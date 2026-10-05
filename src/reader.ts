@@ -85,12 +85,14 @@ export function chatIdOf(e: MtEntity): number {
   return big(e.id);
 }
 
-export type Ref = { kind: 'username'; value: string } | { kind: 'id'; value: number } | { kind: 'invite' };
+export type Ref = { kind: 'username'; value: string } | { kind: 'id'; value: number } | { kind: 'invite'; hash: string };
 
-/** Accepts @name, name, t.me/name, https://t.me/name/123, or a -100… id. */
+/** Accepts @name, name, t.me/name, https://t.me/name/123, a -100… id, or an invite link (t.me/+hash, t.me/joinchat/hash). */
 export function parseRef(input: string): Ref | null {
   let s = input.trim().replace(/^https?:\/\//i, '').replace(/^(www\.)?(t|telegram)\.me\//i, '');
-  if (/^\+|^joinchat\//i.test(s)) return { kind: 'invite' };
+  const invite = /^(?:\+|joinchat\/)([A-Za-z0-9_-]{8,})/i.exec(s) ?? /^tg:\/\/join\?invite=([A-Za-z0-9_-]{8,})/i.exec(input.trim());
+  if (invite) return { kind: 'invite', hash: invite[1] };
+  if (/^\+|^joinchat\//i.test(s)) return null;
   s = s.replace(/^@/, '').replace(/^s\//, '').replace(/[/?#].*$/, '');
   if (/^-?\d+$/.test(s)) return { kind: 'id', value: Number(s) };
   if (/^[A-Za-z][A-Za-z0-9_]{3,31}$/.test(s)) return { kind: 'username', value: s };

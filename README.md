@@ -168,7 +168,7 @@ src/
   render.ts        Telegram HTML、分段、投票按钮
   store.ts         SQLite（node:sqlite）
   fake-llm.ts      测试和 --fake 用的替身模型
-scripts/login.ts   读者账号登录（手机号、验证码、两步验证密码，你本人输入）
+scripts/login.ts   读者账号登录（默认扫码；`--phone` 用手机号 + 登录码；两步验证密码由你本人输入；从不注册新账号）
 scripts/replay.ts  离线回放
 fixtures/          合成群聊 + 标注
 ```

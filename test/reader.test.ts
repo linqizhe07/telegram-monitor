@@ -43,13 +43,15 @@ function setup() {
   return { clock, store, mt, reader };
 }
 
-test('refs: usernames, links, ids; invite links are refused', () => {
+test('refs: usernames, links, ids and invite hashes', () => {
   assert.deepEqual(parseRef('@binance'), { kind: 'username', value: 'binance' });
   assert.deepEqual(parseRef('https://t.me/binance/123'), { kind: 'username', value: 'binance' });
   assert.deepEqual(parseRef('t.me/s/binance'), { kind: 'username', value: 'binance' });
   assert.deepEqual(parseRef('-1001987654321'), { kind: 'id', value: -1001987654321 });
-  assert.deepEqual(parseRef('https://t.me/+AbCdEf123'), { kind: 'invite' });
-  assert.deepEqual(parseRef('t.me/joinchat/AbCdEf'), { kind: 'invite' });
+  assert.deepEqual(parseRef('https://t.me/+AbCdEf123_-x'), { kind: 'invite', hash: 'AbCdEf123_-x' });
+  assert.deepEqual(parseRef('t.me/joinchat/AbCdEf12'), { kind: 'invite', hash: 'AbCdEf12' });
+  assert.deepEqual(parseRef('tg://join?invite=AbCdEf12'), { kind: 'invite', hash: 'AbCdEf12' });
+  assert.equal(parseRef('t.me/+'), null);
   assert.equal(parseRef('not a ref!'), null);
   assert.equal(chatIdOf(GROUP), GROUP_ID);
   assert.equal(chatIdOf({ className: 'Chat', id: 4242 }), -4242);
@@ -154,7 +156,7 @@ test('a private group the reader account joined is found by its name, and by id 
 test('Telegram errors become reasons a person can act on', async () => {
   const env = setup();
   await assert.rejects(env.reader.resolve('@nobody_here'), /no public group or channel has that username/);
-  await assert.rejects(env.reader.resolve('https://t.me/+secret'), /join the group with the reader account/);
+  await assert.rejects(env.reader.resolve('https://t.me/+AbCdEfGh1234'), /join the group with the reader account/);
   env.mt.entities.set('someone', user(77, 'Someone'));
   await assert.rejects(env.reader.resolve('@someone'), /a person, not a group/);
   assert.match(explain({ errorMessage: 'CHANNEL_PRIVATE' }).message, /join it first/);
