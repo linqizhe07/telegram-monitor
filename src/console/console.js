@@ -96,6 +96,13 @@ const METHODS = {
   'digest saved': 'digest written by Claude',
   'connection lost': 'connection to Telegram lost',
   'connection back': 'connection to Telegram back',
+  'new chat': 'NEW group found in your chats',
+  'left chat': 'left in Telegram: reading stopped',
+  rejoined: 'rejoined: reading again',
+  'switched on': 'switched on',
+  'switched off': 'switched off',
+  'not added': 'not added',
+  setting: 'setting changed',
   reconnect: 'reconnect',
   recovered: 'RECOVERED missed messages',
   'was off': 'service was off',
@@ -161,10 +168,11 @@ function accessPill(a) {
 
 function renderSources(s) {
   const t = $('sources');
-  t.replaceChildren(el('thead', {}, el('tr', {}, ...['Source', 'Access', 'Captured · 24h', 'Group volume', 'Guards at the door', 'Next digest', 'Status', ''].map((h) => el('th', { text: h })))));
+  t.replaceChildren(el('thead', {}, el('tr', {}, ...['Read', 'Source', 'Access', 'Captured · 24h', 'Group volume', 'Guards at the door', 'Next digest', 'Status', ''].map((h) => el('th', { text: h })))));
+  $('auto-watch').checked = Boolean(s.autoWatchNew);
   const body = el('tbody');
   if (s.sources.length === 0) {
-    body.append(el('tr', {}, el('td', { colspan: 8, class: 'empty', text: 'Nothing watched yet. Check a group below, then watch it.' })));
+    body.append(el('tr', {}, el('td', { colspan: 9, class: 'empty', text: 'Nothing here yet. Join a group in Telegram, or check one by name below.' })));
   }
   for (const src of s.sources) {
     const guards = [];
@@ -172,8 +180,9 @@ function renderSources(s) {
     if (src.door?.hiddenHistoryForNewMembers) guards.push(el('span', { class: 'chip guard', text: 'history hidden for new members' }));
     if (src.door?.telegramAntispam) guards.push(el('span', { class: 'chip guard', text: 'Telegram anti-spam' }));
     for (const b of src.bots || []) guards.push(el('span', { class: 'chip', text: b }));
+    const OFF = { owner: 'switched off', left: 'you left it in Telegram', 'auto-watch off': 'new; auto-read is off' };
     const status = !src.enabled
-      ? el('span', { class: 'pill muted', text: 'paused' })
+      ? el('span', { class: 'pill muted', text: OFF[src.offReason] || 'off', title: src.error || '' })
       : src.error
         ? el('span', { class: 'pill bad', text: src.error, title: src.error })
         : src.behind
@@ -186,9 +195,25 @@ function renderSources(s) {
       src.kind === 'watched' && src.enabled ? el('button', { class: 'btn', text: 'Catch up', onclick: (e) => action(e.target, '/api/pull', { chatId: src.chatId }) }) : null,
       src.kind === 'watched' && src.enabled ? el('button', { class: 'btn', text: 'Audit 1h', title: 'Compare the last hour with Telegram itself: anything missing?', onclick: (e) => action(e.target, '/api/audit', { chatId: src.chatId, hours: 1 }) }) : null,
       el('button', { class: 'btn', text: 'Digest now', disabled: !s.claude.ready, title: s.claude.ready ? '' : 'Needs ANTHROPIC_API_KEY', onclick: (e) => action(e.target, '/api/digest', { chatId: src.chatId }) }),
-      src.kind === 'watched' && src.enabled ? el('button', { class: 'btn', text: 'Stop', onclick: (e) => confirm(`Stop reading ${src.title}?`) && action(e.target, '/api/unwatch', { chatId: src.chatId }) }) : null);
+      null);
+    const sw = el('input', { type: 'checkbox', role: 'switch', 'aria-label': `Read ${src.title}`, title: src.enabled ? 'On: being read. Click to stop.' : 'Off: not read. Click to read it (catches up at most 24 hours).' });
+    sw.checked = src.enabled;
+    sw.addEventListener('change', async () => {
+      sw.disabled = true;
+      try {
+        const r = await api('/api/toggle', { chatId: src.chatId, on: sw.checked });
+        toast(r.message);
+      } catch (err) {
+        toast(err.message);
+        sw.checked = !sw.checked;
+      } finally {
+        sw.disabled = false;
+        refresh();
+      }
+    });
     body.append(el('tr', { class: src.enabled ? '' : 'off' },
-      el('td', {}, el('div', { class: 'src-title', text: src.title }), el('div', { class: 'src-ref', text: src.ref })),
+      el('td', {}, sw),
+      el('td', {}, el('div', { class: 'src-title', text: src.title }), el('div', { class: 'src-ref', text: src.ref }), el('div', { class: 'origin', text: src.origin === 'dialog' ? 'from your chats' : src.origin === 'manual' ? 'added by name' : '' })),
       el('td', {}, accessPill(src.access)),
       el('td', {}, el('div', { text: `${n(src.messages24h)} messages` }), el('div', { class: 'src-ref', text: `${n(src.people24h)} people · last ${ago(src.newest)}` })),
       el('td', {}, el('div', { text: src.perDay !== null ? `~${n(src.perDay)} / day` : '—' }), el('div', { class: 'src-ref', text: src.members ? `${n(src.members)} members` : '' })),
@@ -298,33 +323,21 @@ $('add-form').addEventListener('submit', async (e) => {
   }
 });
 
-// ── the account's own chats ────────────────────────────────────────────────
+// ── sources controls ───────────────────────────────────────────────────────
 
-async function loadJoined() {
-  const box = $('joined-list');
-  box.replaceChildren(el('p', { class: 'hint', text: 'Loading…' }));
-  const r = await api('/api/joined').catch((err) => ({ error: err.message, chats: [] }));
-  if (r.error) return box.replaceChildren(el('p', { class: 'hint', text: r.error }));
-  const rows = r.chats.map((c) => el('div', { class: 'joined-row' },
-    el('div', {}, el('div', { class: 'src-title', text: c.title }), el('div', { class: 'src-ref', text: `${c.type}${c.members ? ` · ${n(c.members)} members` : ''} · ${c.ref}` })),
-    c.watched ? el('span', { class: 'pill ok', text: 'watched' }) : el('button', { class: 'btn', text: 'Watch', onclick: (e) => watchRef(e.target, c.ref) })));
-  box.replaceChildren(...(rows.length ? rows : [el('p', { class: 'hint', text: 'This account is in no groups or channels.' })]));
-}
-
-async function watchRef(button, ref) {
-  button.disabled = true;
+$('refresh-list').addEventListener('click', (e) => action(e.target, '/api/refresh', {}));
+$('auto-watch').addEventListener('change', async (e) => {
+  const box = e.target;
+  box.disabled = true;
   try {
-    const r = await api('/api/watch', { target: ref });
-    toast(r.message);
-    await refresh();
-    await loadJoined();
+    toast((await api('/api/settings', { autoWatchNew: box.checked })).message);
   } catch (err) {
     toast(err.message);
-    button.disabled = false;
+    box.checked = !box.checked;
+  } finally {
+    box.disabled = false;
   }
-}
-
-$('joined').addEventListener('toggle', () => $('joined').open && loadJoined());
+});
 
 // ── activity feed ──────────────────────────────────────────────────────────
 

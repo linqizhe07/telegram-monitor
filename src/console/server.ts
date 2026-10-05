@@ -185,6 +185,12 @@ export class ConsoleServer {
           return this.json(res, 200, await this.digest(Number(body.chatId)));
         case '/api/audit':
           return this.json(res, 200, await this.audit(Number(body.chatId), Number(body.hours ?? 1)));
+        case '/api/toggle':
+          return this.json(res, 200, this.toggle(Number(body.chatId), body.on === true));
+        case '/api/refresh':
+          return this.json(res, 200, await this.refreshList());
+        case '/api/settings':
+          return this.json(res, 200, this.settings(body));
       }
       res.writeHead(404).end('not found');
       return;
@@ -222,6 +228,8 @@ export class ConsoleServer {
           newest: st?.newest ?? null,
           cursor: c.readerCursor,
           behind: this.deps.reader?.isBehind(c.chatId) ?? false,
+          origin: c.readerOrigin,
+          offReason: c.enabled ? null : store.getKv(`reader_off_reason:${c.chatId}`) || null,
           caughtUpAt: Number(store.getKv(`reader_caught_up:${c.chatId}`) ?? 0) || null,
           error: c.readerError,
           reportTo: c.reportChatId,
@@ -241,6 +249,7 @@ export class ConsoleServer {
       bot: this.deps.bot,
       claude: this.deps.claude,
       reportTo: config.reportTo,
+      autoWatchNew: (store.getKv('auto_watch_new') || (config.autoWatchNew ? 'on' : 'off')) === 'on',
       pollSeconds: config.readerPollSeconds,
       retentionDays: config.retentionDays,
       sources,
@@ -343,6 +352,8 @@ export class ConsoleServer {
     const known = store.getChat(info.chatId);
     if (known?.kind === 'watched') store.updateChat(info.chatId, { enabled: true, readerError: null });
     else store.watchChat(info, config.reportTo, null, { language: config.language, digestHour: config.digestHour, timezone: config.timezone, rsiMode: config.rsiMode });
+    if (!store.getChat(info.chatId)?.readerOrigin) store.updateChat(info.chatId, { readerOrigin: 'manual' });
+    store.setKv(`reader_off_reason:${info.chatId}`, '');
     activity.event('console', 'watch', info.title, `${info.ref}: reading from now on (first pull goes back 24 hours)`);
     if (!store.getKv(probeKey(info.chatId)) && this.deps.account) {
       const raw = this.deps.account.raw;
@@ -359,11 +370,56 @@ export class ConsoleServer {
   }
 
   private unwatch(chatId: number): { ok: boolean; message: string } {
-    const chat = this.deps.store.getChat(chatId);
-    if (!chat || chat.kind !== 'watched') return { ok: false, message: 'Not a watched source.' };
-    this.deps.store.updateChat(chatId, { enabled: false });
-    this.deps.activity.event('console', 'unwatch', chat.title, 'no longer read; stored messages kept until retention deletes them');
-    return { ok: true, message: `Stopped watching ${chat.title}.` };
+    return this.toggle(chatId, false);
+  }
+
+  /**
+   * The per-source switch. Off: not read any more (what was stored stays until retention). On: read
+   * again, catching up from where it stopped but no further back than 24 hours. The owner's choice
+   * sticks: following the chat list never switches back on what the owner switched off.
+   */
+  private toggle(chatId: number, on: boolean): { ok: boolean; message: string } {
+    const { store, activity, reader } = this.deps;
+    const chat = store.getChat(chatId);
+    if (!chat || chat.kind !== 'watched') return { ok: false, message: 'Not a source.' };
+    if (on === chat.enabled) return { ok: true, message: `${chat.title} is already ${on ? 'on' : 'off'}.` };
+    if (on) {
+      store.updateChat(chatId, { enabled: true, readerError: null });
+      store.setKv(`reader_off_reason:${chatId}`, '');
+      store.setKv(`reader_floor:${chatId}`, String(this.deps.now() - 86_400));
+      activity.event('console', 'switched on', chat.title, 'reading again: catching up from where it stopped, at most 24 hours back');
+      if (reader) void reader.pull(store.getChat(chatId)!).catch(() => undefined);
+      return { ok: true, message: `${chat.title}: on. Catching up (at most the last 24 hours).` };
+    }
+    store.updateChat(chatId, { enabled: false });
+    store.setKv(`reader_off_reason:${chatId}`, 'owner');
+    activity.event('console', 'switched off', chat.title, 'not read any more; stored messages stay until retention deletes them');
+    return { ok: true, message: `${chat.title}: off. It is not read any more.` };
+  }
+
+  /** Re-checks the account's chat list now (it also runs every 10 minutes and after a join). */
+  private async refreshList(): Promise<{ ok: boolean; message: string }> {
+    const { reader } = this.deps;
+    if (!reader) return { ok: false, message: 'The reader account is not signed in.' };
+    try {
+      const r = await withTimeout(reader.reconcile(), 120_000, 'checking the chat list');
+      const parts = [
+        r.added.length ? `new: ${r.added.map((c) => c.title).join(', ')}` : 'no new chats',
+        r.left.length ? `left: ${r.left.map((c) => c.title).join(', ')}` : '',
+      ].filter(Boolean);
+      return { ok: true, message: `Chat list checked: ${parts.join('; ')}.` };
+    } catch (err) {
+      return { ok: false, message: (err as Error).message };
+    }
+  }
+
+  private settings(body: Record<string, unknown>): { ok: boolean; message: string } {
+    if (typeof body.autoWatchNew === 'boolean') {
+      this.deps.store.setKv('auto_watch_new', body.autoWatchNew ? 'on' : 'off');
+      this.deps.activity.event('console', 'setting', 'auto-watch', body.autoWatchNew ? 'groups and channels the account joins are read automatically' : 'groups and channels the account joins are listed switched off');
+      return { ok: true, message: body.autoWatchNew ? 'New groups you join will be read automatically.' : 'New groups you join will be listed, switched off.' };
+    }
+    return { ok: false, message: 'Nothing to change.' };
   }
 
   private async pull(chatId: number): Promise<{ ok: boolean; message: string }> {

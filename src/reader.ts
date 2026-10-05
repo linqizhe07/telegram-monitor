@@ -9,7 +9,7 @@
 
 import type { Activity } from './activity.ts';
 import type { Config } from './config.ts';
-import type { ChatRow, StoredMessage, Store } from './store.ts';
+import type { ChatDefaults, ChatRow, StoredMessage, Store } from './store.ts';
 import type { Window } from './transcript.ts';
 
 // The GramJS objects the reader touches, duck-typed by `className` so tests can pass plain objects.
@@ -19,6 +19,10 @@ export interface MtEntity {
   accessHash?: unknown;
   /** A "min" entity carries an access hash that only works in the context it came from. */
   min?: boolean;
+  /** The account is no longer in it (basic groups keep a dialog after you leave). */
+  left?: boolean;
+  /** A basic group that was upgraded to a supergroup. */
+  deactivated?: boolean;
   restrictionReason?: { platform: string; reason: string; text: string }[];
   title?: string;
   username?: string;
@@ -57,7 +61,7 @@ export interface MtMessage {
 export interface MtClient {
   getEntity(ref: string | number): Promise<MtEntity>;
   /** The account's own chats (also teaches GramJS the access hashes of private groups it has joined). */
-  getDialogs(params: { limit?: number }): Promise<{ entity?: MtEntity; title?: string }[]>;
+  getDialogs(params: { limit?: number }): Promise<{ entity?: MtEntity; title?: string }[] & { total?: number }>;
   /**
    * messages.getHistory through GramJS: newest first by default; with `reverse`, oldest first
    * starting after `minId`; with `offsetDate`, the newest messages sent before that time.
@@ -288,6 +292,19 @@ export interface ReaderDeps {
   reconnect?: () => Promise<void>;
   /** How long one pull may take before the watchdog steps in (default 3 minutes). */
   pullTimeoutMs?: number;
+  /**
+   * Following the account's own chat list: groups and channels it joins become sources, ones it
+   * leaves stop. Without this, sources are only what someone added by hand.
+   */
+  discovery?: {
+    /** Start reading newly joined chats right away (otherwise they are listed, switched off). */
+    autoWatch: () => boolean;
+    /** Where their digests go. */
+    reportTo: number | null;
+    defaults: ChatDefaults;
+    /** How often to re-check the chat list even without a membership notice (default 10 min). */
+    everyMs?: number;
+  };
 }
 
 /** Rejects with a ReaderError if `p` takes longer than `ms`. */
@@ -352,17 +369,130 @@ export class Reader {
     throw new ReaderError(`several of the reader account's chats match "${input}": ${found.slice(0, 5).map((d) => d.title ?? d.entity.title).join(' · ')}`);
   }
 
-  /** The groups and channels the account itself is in (its chat list), never people. */
-  async joined(): Promise<SourceInfo[]> {
-    const dialogs = await this.deps.client.getDialogs({ limit: 500 }).catch((err) => {
+  /**
+   * The groups and channels the account itself is in (its chat list, archived ones included), never
+   * people. `complete` is false when the list may have been cut short, so absence proves nothing.
+   */
+  async membership(): Promise<{ chats: SourceInfo[]; complete: boolean; skipped: string[] }> {
+    const LIMIT = 1000;
+    // Not GramJS's ignoreMigrated: in 2.26.22 that test is inverted (client/dialogs.js:132 keeps only
+    // entities that HAVE a migratedTo field, so every supergroup and channel is dropped). Upgraded
+    // basic groups are skipped below instead, by their `deactivated` flag.
+    const dialogs = await this.deps.client.getDialogs({ limit: LIMIT }).catch((err) => {
       throw explain(err);
     });
-    const out: SourceInfo[] = [];
+    const chats: SourceInfo[] = [];
+    const skipped: string[] = [];
     for (const d of dialogs) {
-      if (!d.entity || (d.entity.className !== 'Channel' && d.entity.className !== 'Chat')) continue;
-      out.push(this.info(d.entity));
+      const e = d.entity;
+      if (!e || (e.className !== 'Channel' && e.className !== 'Chat')) continue; // people, bots, forbidden (kicked)
+      if (e.left || e.deactivated) continue;
+      try {
+        chats.push(this.info(e));
+      } catch (err) {
+        skipped.push(`${e.title ?? String(e.id)}: ${(err as Error).message}`); // e.g. restricted for every client
+      }
     }
-    return out;
+    const total = typeof dialogs.total === 'number' ? dialogs.total : dialogs.length;
+    return { chats, complete: dialogs.length < LIMIT && total <= dialogs.length, skipped };
+  }
+
+  async joined(): Promise<SourceInfo[]> {
+    return (await this.membership()).chats;
+  }
+
+  private lastReconcile = 0;
+  private reconcileTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconciling: Promise<{ added: SourceInfo[]; left: ChatRow[] }> | null = null;
+
+  /**
+   * Brings the sources in line with the account's chat list:
+   *  - a group or channel the account is in but that is not a source yet becomes one, switched on
+   *    when auto-watch is on (it starts 24 hours back);
+   *  - a source found this way that the account is no longer in is switched off (it left, or was
+   *    removed); joining it again switches it back on, unless the owner switched it off by hand;
+   *  - an owner's on/off choice is never overridden, and renames are picked up.
+   */
+  reconcile(): Promise<{ added: SourceInfo[]; left: ChatRow[] }> {
+    this.reconciling ??= this.reconcileOnce().finally(() => {
+      this.reconciling = null;
+    });
+    return this.reconciling;
+  }
+
+  private async reconcileOnce(): Promise<{ added: SourceInfo[]; left: ChatRow[] }> {
+    const d = this.deps.discovery;
+    const { store, activity } = this.deps;
+    if (!d) return { added: [], left: [] };
+    this.lastReconcile = Date.now();
+    const { chats, complete, skipped } = await this.membership();
+    const added: SourceInfo[] = [];
+    const left: ChatRow[] = [];
+    const inList = new Set(chats.map((c) => c.chatId));
+    for (const c of chats) {
+      const row = store.getChat(c.chatId);
+      if (row && (row.kind === 'group' || row.kind === 'report')) continue; // the bot's own chats
+      if (!row) {
+        if (d.reportTo === null) continue;
+        const on = d.autoWatch();
+        store.watchChat({ ...c }, d.reportTo, null, d.defaults);
+        store.updateChat(c.chatId, { readerOrigin: 'dialog', ...(on ? {} : { enabled: false }) });
+        if (!on) store.setKv(`reader_off_reason:${c.chatId}`, 'auto-watch off');
+        added.push(c);
+        activity?.event(
+          'reader',
+          'new chat',
+          c.title,
+          on
+            ? `the account is in this ${c.type} now: reading it from 24 hours back (switch it off in the console)`
+            : `the account is in this ${c.type} now; auto-watch is off, so it is listed switched off`,
+        );
+        continue;
+      }
+      // Known: pick up renames and the origin; a chat it had left and rejoined comes back on.
+      store.upsertChat({ chatId: c.chatId, title: c.title, username: c.username, type: row.type }, d.defaults);
+      // A private chat (no @username) can only be read as a member, so it follows the chat list. A
+      // public one added before this existed stays readable from outside even if the account leaves.
+      if (!c.username && row.readerOrigin !== 'dialog') store.updateChat(c.chatId, { readerOrigin: 'dialog' });
+      else if (!row.readerOrigin) store.updateChat(c.chatId, { readerOrigin: 'manual' });
+      if (c.peer && !row.readerPeer) store.updateChat(c.chatId, { readerPeer: c.peer });
+      if (!row.enabled && store.getKv(`reader_off_reason:${c.chatId}`) === 'left') {
+        store.updateChat(c.chatId, { enabled: true, readerError: null });
+        store.setKv(`reader_off_reason:${c.chatId}`, '');
+        store.setKv(`reader_floor:${c.chatId}`, String(this.deps.now() - 86_400));
+        activity?.event('reader', 'rejoined', c.title, 'the account is back in this chat: reading again (from up to 24 hours back)');
+      }
+    }
+    // Sources the account is not in were added by name (read from outside): never stopped by this check.
+    for (const row of store.listChats(false)) {
+      if (row.kind === 'watched' && !row.readerOrigin && !inList.has(row.chatId)) store.updateChat(row.chatId, { readerOrigin: 'manual' });
+    }
+    if (complete) {
+      for (const row of store.listChats(true)) {
+        if (row.kind !== 'watched' || row.readerOrigin !== 'dialog' || inList.has(row.chatId)) continue;
+        store.updateChat(row.chatId, { enabled: false, readerError: 'the account is no longer in this chat (left or removed in Telegram): reading stopped' });
+        store.setKv(`reader_off_reason:${row.chatId}`, 'left');
+        this.entities.delete(row.chatId);
+        left.push(row);
+        activity?.event('reader', 'left chat', row.title, 'the account is no longer in it: reading stopped. If it is public, switch it on to read it from outside');
+      }
+    }
+    for (const note of skipped) activity?.event('reader', 'not added', note.split(':')[0], note);
+    for (const c of added) {
+      if (store.getChat(c.chatId)?.enabled) void this.pull(store.getChat(c.chatId)!).catch(() => undefined); // its first 24 hours, now
+    }
+    return { added, left };
+  }
+
+  /** A membership notice arrived (joined, left, removed): re-check the chat list shortly. */
+  reconcileSoon(): void {
+    if (!this.deps.discovery || this.reconcileTimer) return;
+    const wait = Math.max(3_000, 60_000 - (Date.now() - this.lastReconcile)); // at most once a minute
+    this.reconcileTimer = setTimeout(() => {
+      this.reconcileTimer = null;
+      void this.reconcile().catch((err) => this.deps.log(`reader: chat list check failed: ${(err as Error).message}`));
+    }, wait);
+    this.reconcileTimer.unref?.();
   }
 
   /** By id: works for chats GramJS has seen; after a restart, loading the chat list teaches it the private ones. */
@@ -486,8 +616,14 @@ export class Reader {
 
     let cursor = chat.readerCursor;
     const cursorDate = Number(store.getKv(`reader_cursor_date:${chatId}`) ?? NaN);
-    const floor = cursor === null ? now - 86_400 : now - config.retentionDays * 86_400;
-    if (cursor === null || cursorDate < floor) {
+    // Switched back on after a while: start no more than 24 hours back (the owner's floor).
+    const ownerFloor = Number(store.getKv(`reader_floor:${chatId}`) || 0);
+    const floor = Math.max(cursor === null ? now - 86_400 : now - config.retentionDays * 86_400, ownerFloor);
+    if (ownerFloor) store.setKv(`reader_floor:${chatId}`, '');
+    // How far in time the capture is known to be complete: the newest message read, or the last time
+    // it was caught up, whichever is later (a quiet channel's newest message can be weeks old).
+    const covered = Math.max(Number.isFinite(cursorDate) ? cursorDate : 0, lastCaughtUp);
+    if (cursor === null || covered < floor) {
       // The newest message from before the floor: everything after it gets fetched.
       const [before] = (await client.getMessages(entity, { limit: 1, offsetDate: floor }).catch(fail)).filter((m): m is MtMessage => Boolean(m));
       const anchor = before?.id ?? 0;
@@ -656,6 +792,10 @@ export class Reader {
     const loop = async () => {
       while (!stopped) {
         let retrySoon = false;
+        // The chat list: on the first round, then every 10 minutes (joins also trigger it sooner).
+        if (this.deps.discovery && Date.now() - this.lastReconcile >= (this.deps.discovery.everyMs ?? 600_000)) {
+          await withTimeout(this.reconcile(), 120_000, 'checking the chat list').catch((err) => log(`reader: chat list check failed: ${(err as Error).message}`));
+        }
         for (const chat of store.listChats(true).filter((c) => c.kind === 'watched')) {
           if (stopped) break;
           try {
@@ -702,6 +842,7 @@ export class Reader {
     void loop();
     return () => {
       stopped = true;
+      if (this.reconcileTimer) clearTimeout(this.reconcileTimer);
       if (timer) clearTimeout(timer);
       wake?.();
     };

@@ -42,6 +42,8 @@ export interface Config {
   reportTo: number | null;
   /** Local console port (http://127.0.0.1:port); 0 turns it off. */
   consolePort: number;
+  /** Start reading groups and channels the reader account joins, as soon as it joins them (the console can change it). */
+  autoWatchNew: boolean;
 }
 
 const EFFORTS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -128,6 +130,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     readerPollSeconds: field('PULSE_READER_POLL_SECONDS', () => int(env.PULSE_READER_POLL_SECONDS, 120, 30, 3600)),
     watch: (env.PULSE_WATCH ?? '').split(/[,\s]+/).map((x) => x.trim()).filter(Boolean),
     consolePort: field('PULSE_CONSOLE_PORT', () => int(env.PULSE_CONSOLE_PORT, 4830, 0, 65535)),
+    autoWatchNew: field('PULSE_AUTO_WATCH_NEW', () => oneOf(env.PULSE_AUTO_WATCH_NEW, ['on', 'off'] as const, 'on') === 'on'),
     reportTo: field('PULSE_REPORT_TO', () => {
       const raw = env.PULSE_REPORT_TO?.trim();
       if (!raw) return ownerIds[0] ?? null;

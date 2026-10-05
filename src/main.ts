@@ -85,7 +85,23 @@ async function main(): Promise<void> {
       const at = (t: number) => new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ');
       activity.event('reader', 'was off', 'service', `not running from ${at(lastSeen.at)} to ${at(now())} UTC (${Math.round((now() - lastSeen.at) / 60)} min); fetching everything posted meanwhile`);
     }
-    reader = new Reader({ client: connection.client, store, config, log, now, activity, reconnect: connection.reconnect });
+    reader = new Reader({
+      client: connection.client,
+      store,
+      config,
+      log,
+      now,
+      activity,
+      reconnect: connection.reconnect,
+      // Follow the account's own chat list: what it joins in Telegram is read, what it leaves stops.
+      discovery: {
+        autoWatch: () => (store.getKv('auto_watch_new') || (config.autoWatchNew ? 'on' : 'off')) === 'on',
+        reportTo: config.reportTo,
+        defaults,
+      },
+    });
+    const followed = reader;
+    connection.onMembershipNotice(() => followed.reconcileSoon());
     log(`reader account: ${connection.name}`);
     activity.event('reader', 'signed in', connection.name, `Telegram id ${connection.id}`);
     if (config.ownerIds.length === 0) log('warning: the reader account is on but PULSE_OWNER_IDS is empty, so nobody can use /watch');

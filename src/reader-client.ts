@@ -124,6 +124,26 @@ export interface ReaderConnection {
   state: () => { state: ConnectionState; since: number };
   /** Until when (ms epoch) Telegram has asked the account to wait; 0 = not waiting. */
   pausedUntil: () => number;
+  /** Called when Telegram says the account joined, left or was removed from some chat. */
+  onMembershipNotice: (l: () => void) => void;
+}
+
+/**
+ * Whether an update says the ACCOUNT's own membership changed: a channel or group it is in
+ * changed (updateChannel / updateChat: sent on join, leave, removal, and also on some info
+ * changes, which is harmless because the check that follows is cheap and rate-limited), or a
+ * service message adds or removes the account itself. Other people joining never counts.
+ */
+export function isMembershipNotice(update: unknown, selfId: string): boolean {
+  if (update instanceof Api.UpdateChannel || update instanceof Api.UpdateChat) return true;
+  const m = update instanceof Api.UpdateNewMessage || update instanceof Api.UpdateNewChannelMessage ? update.message : null;
+  if (!(m instanceof Api.MessageService)) return false;
+  const a = m.action;
+  const from = m.fromId instanceof Api.PeerUser ? String(m.fromId.userId) : null;
+  if (a instanceof Api.MessageActionChatAddUser) return a.users.some((u) => String(u) === selfId);
+  if (a instanceof Api.MessageActionChatDeleteUser) return String(a.userId) === selfId;
+  if (a instanceof Api.MessageActionChatJoinedByLink || a instanceof Api.MessageActionChatJoinedByRequest) return from === selfId || Boolean(m.out);
+  return false;
 }
 
 /** A chat's address saved at watch time, so it is never resolved by name again. */
@@ -212,11 +232,15 @@ export async function connectReader(
     log(`reader: connection ${state === 'online' ? `back after ${now - was.since}s` : 'lost; retrying every 3s'}`);
     opts.activity?.event('reader', state === 'online' ? 'connection back' : 'connection lost', 'Telegram', state === 'online' ? `offline for ${now - was.since}s; catching up` : 'network unreachable or the server stopped answering; retrying', state === 'online');
   };
+  const membershipListeners = new Set<() => void>();
+  const selfId = String(me.id);
   client.addEventHandler((update: unknown) => {
     if (update instanceof UpdateConnectionState) {
       if (update.state === UpdateConnectionState.connected) setState('online');
       else setState('offline');
+      return;
     }
+    if (isMembershipNotice(update, selfId)) for (const l of membershipListeners) l();
   });
   let reconnecting: Promise<void> | null = null;
   return {
@@ -230,6 +254,9 @@ export async function connectReader(
       lock.release();
     },
     pausedUntil: () => supervisor?.pausedUntil() ?? 0,
+    onMembershipNotice: (l: () => void) => {
+      membershipListeners.add(l);
+    },
     reconnect: () => {
       reconnecting ??= (async () => {
         setState('offline');

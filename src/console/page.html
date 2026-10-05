@@ -26,19 +26,20 @@
   <section class="panel" aria-labelledby="sources-h">
     <div class="panel-head">
       <h2 id="sources-h">Sources</h2>
-      <p class="hint">Groups and channels the reader account reads. Reading from outside means the account never joined.</p>
+      <div class="controls">
+        <label class="switch-label" title="Groups and channels you join in Telegram show up here by themselves">
+          <input type="checkbox" role="switch" id="auto-watch"> Read new groups I join automatically
+        </label>
+        <button class="btn" id="refresh-list" title="Check the account's chat list now (it also runs every 10 minutes and right after you join a group)">Refresh from Telegram</button>
+      </div>
     </div>
+    <p class="hint">Everything the account is in shows up here on its own, and new groups appear within seconds of joining. Each one has its own switch. Reading from outside means the account never joined.</p>
     <div class="table-wrap"><table class="sources" id="sources"></table></div>
     <form class="add" id="add-form" autocomplete="off">
       <input id="add-input" placeholder="@username, t.me link, or invite link" aria-label="Group or channel to check">
       <button type="submit" id="probe-btn">Check (read-only)</button>
     </form>
     <div id="probe-result" hidden></div>
-    <details class="joined" id="joined">
-      <summary>Groups and channels this account is already in</summary>
-      <p class="hint">Members can read these without any join step. Watching one starts 24 hours back. Nothing here sends anything.</p>
-      <div id="joined-list"></div>
-    </details>
   </section>
 
   <div class="split">

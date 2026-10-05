@@ -260,6 +260,17 @@ test('after a gap, one line sums up what came back; only chats that got messages
   assert.equal(recovered[1].detail, 'back after 60 min: 3 messages recovered across 1 chat; 1 had nothing new; everything is up to date');
 });
 
+test('a channel quiet for weeks is not re-anchored on every pull', async () => {
+  const env = setup();
+  const chat = env.store.watchChat(await env.reader.resolve('@binance_cn_test'), 42, null, { language: 'auto', digestHour: 9, timezone: 'UTC', rsiMode: 'auto' });
+  env.mt.messages.push(msg(1, T0 - 20 * 86_400, 'three weeks ago'));
+  await env.reader.pull(chat);
+  const calls = env.mt.historyCalls;
+  env.clock.t = T0 + 120;
+  await env.reader.pull(env.store.getChat(GROUP_ID)!);
+  assert.equal(env.mt.historyCalls - calls, 1, 'one page read, no second look-up of where 24 hours ago was');
+});
+
 test('a group silent for a day still moves the cursor, so old history is not re-read', async () => {
   const env = setup();
   const chat = env.store.watchChat(await env.reader.resolve('@binance_cn_test'), 42, null, { language: 'auto', digestHour: 9, timezone: 'UTC', rsiMode: 'auto' });

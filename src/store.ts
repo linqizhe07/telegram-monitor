@@ -39,6 +39,8 @@ export interface ChatRow {
   readerError: string | null;
   /** The chat's address (JSON: type, id, access hash), saved so it is never resolved by name again. */
   readerPeer: string | null;
+  /** How it became a source: 'dialog' = found in the account's own chat list; 'manual' = added by name or link. */
+  readerOrigin: 'dialog' | 'manual' | null;
 }
 
 export type ChatKind = 'group' | 'watched' | 'report';
@@ -333,6 +335,7 @@ export class Store {
       ['chats', 'reader_cursor', 'INTEGER'],
       ['chats', 'reader_error', 'TEXT'],
       ['chats', 'reader_peer', 'TEXT'],
+      ['chats', 'reader_origin', 'TEXT'],
       ['digests', 'posted_chat_id', 'INTEGER'],
     ];
     for (const [table, column, type] of added) {
@@ -405,6 +408,7 @@ export class Store {
       readerCursor: numOrNull(r.reader_cursor),
       readerError: strOrNull(r.reader_error),
       readerPeer: strOrNull(r.reader_peer),
+      readerOrigin: (strOrNull(r.reader_origin) as ChatRow['readerOrigin']) ?? null,
     };
   }
 
@@ -462,6 +466,7 @@ export class Store {
         | 'readerCursor'
         | 'readerError'
         | 'readerPeer'
+        | 'readerOrigin'
       >
     >,
   ): void {
@@ -483,6 +488,7 @@ export class Store {
       readerCursor: 'reader_cursor',
       readerError: 'reader_error',
       readerPeer: 'reader_peer',
+      readerOrigin: 'reader_origin',
     };
     for (const [key, value] of Object.entries(patch)) {
       const col = cols[key];

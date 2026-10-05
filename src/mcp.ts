@@ -61,8 +61,8 @@ function sources(): ChatRow[] {
 }
 
 /** A source by title, @username, t.me link, -100… id, or #n from list_sources; or the only one. */
-function pick(ref: string | undefined): ChatRow {
-  const all = sources().filter((c) => c.enabled);
+function pick(ref: string | undefined, includeOff = false): ChatRow {
+  const all = sources().filter((c) => includeOff || c.enabled);
   if (!ref || !ref.trim()) {
     if (all.length === 1) return all[0];
     throw new Error(all.length ? `Several sources; name one: ${all.map((c, i) => `#${i + 1} ${c.title}`).join(' · ')}` : 'Nothing is watched yet.');
@@ -103,7 +103,7 @@ server.registerTool(
     const lines = sources().map((c, i) => {
       const st = stats.get(c.chatId);
       return [
-        `#${i + 1} ${c.title} (${c.readerRef ?? c.chatId})${c.enabled ? '' : ' [stopped]'}`,
+        `#${i + 1} ${c.title} (${c.readerRef ?? c.chatId}) [${c.enabled ? 'ON' : 'OFF'}]${c.readerOrigin === 'dialog' ? ' · from the account\'s chats' : ''}`,
         `   last 24h: ${st?.count ?? 0} messages from ${st?.people ?? 0} people; newest ${when(st?.newest ?? null, c.timezone)} (${c.timezone})`,
         `   ${freshness(c)}`,
       ].join('\n');
@@ -406,6 +406,48 @@ server.registerTool(
     try {
       const r = await callService('/api/pull', { chatId: c.chatId });
       return r.ok ? text(`${c.title}: ${String(r.message)}`) : fail(String(r.message));
+    } catch (err) {
+      return fail((err as Error).message);
+    }
+  },
+);
+
+server.registerTool(
+  'set_monitoring',
+  {
+    title: 'Switch a group on or off',
+    description:
+      'Turns reading of one group or channel on or off. Off: it is not read any more (stored messages stay until retention). On: it is read again, catching up from where it stopped but at most 24 hours back. Groups the account joins in Telegram show up on their own; this switch is how to leave one out. Needs the monitor service running.',
+    inputSchema: { source: z.string().describe('Title, @username, -100… id, or #n from list_sources'), on: z.boolean() },
+  },
+  async ({ source, on }) => {
+    let c: ChatRow;
+    try {
+      c = pick(source, true);
+    } catch (err) {
+      return fail((err as Error).message);
+    }
+    try {
+      const r = await callService('/api/toggle', { chatId: c.chatId, on });
+      return r.ok ? text(String(r.message)) : fail(String(r.message));
+    } catch (err) {
+      return fail((err as Error).message);
+    }
+  },
+);
+
+server.registerTool(
+  'refresh_sources',
+  {
+    title: 'Re-check the account\'s chat list',
+    description:
+      'Checks now which groups and channels the account is in: new ones become sources (read automatically when auto-read is on), ones it left stop being read. It also happens every 10 minutes and right after a join. Needs the monitor service running.',
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  async () => {
+    try {
+      const r = await callService('/api/refresh', {});
+      return r.ok ? text(String(r.message)) : fail(String(r.message));
     } catch (err) {
       return fail((err as Error).message);
     }
