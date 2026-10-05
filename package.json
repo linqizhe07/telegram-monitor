@@ -1,0 +1,24 @@
+{
+  "name": "telegram-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pulse: a Telegram group plugin that records the last 24h of a group, digests it into topics, pain points, ideas, opportunities and open questions, and recursively improves its own digest playbook under verified selection.",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/main.ts",
+    "replay": "node --env-file-if-exists=.env scripts/replay.ts",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2"
+  }
+}
