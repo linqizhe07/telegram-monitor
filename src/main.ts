@@ -79,6 +79,12 @@ async function main(): Promise<void> {
       })
     : null;
   if (connection) {
+    // Was the service off for a while? Then say so: everything posted meanwhile is fetched next.
+    const [lastSeen] = store.activity({ limit: 1 });
+    if (lastSeen && now() - lastSeen.at > 300) {
+      const at = (t: number) => new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ');
+      activity.event('reader', 'was off', 'service', `not running from ${at(lastSeen.at)} to ${at(now())} UTC (${Math.round((now() - lastSeen.at) / 60)} min); fetching everything posted meanwhile`);
+    }
     reader = new Reader({ client: connection.client, store, config, log, now, activity, reconnect: connection.reconnect });
     log(`reader account: ${connection.name}`);
     activity.event('reader', 'signed in', connection.name, `Telegram id ${connection.id}`);

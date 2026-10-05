@@ -97,6 +97,8 @@ const METHODS = {
   'connection lost': 'connection to Telegram lost',
   'connection back': 'connection to Telegram back',
   reconnect: 'reconnect',
+  recovered: 'RECOVERED missed messages',
+  'was off': 'service was off',
 };
 const KIND = {
   read: ['READ', 'read'],

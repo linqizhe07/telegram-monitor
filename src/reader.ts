@@ -426,6 +426,8 @@ export class Reader {
   /** Chats whose last pull stopped before reaching the newest message (a long time offline). */
   private readonly behind = new Set<number>();
   private lastReconnect = 0;
+  /** Chats being caught up after a gap (offline, asleep, stopped): since when, and how much came back. */
+  private readonly recovering = new Map<number, { since: number; saved: number }>();
   private readonly locks = new Map<number, Promise<unknown>>();
 
   /** Bumped by every reconnect: a pull from before it (stuck on the dead connection) must not commit. */
@@ -466,6 +468,13 @@ export class Reader {
     if (!chat) return 0;
     const entity = await this.entity(chat);
     const now = this.deps.now();
+    // A gap: the last time this chat was caught up is well over one poll ago (the service was off,
+    // the computer asleep, or the network down). Count what comes back, and say so when done.
+    const lastCaughtUp = Number(store.getKv(`reader_caught_up:${chatId}`) ?? 0);
+    const gapAfter = Math.max(300, config.readerPollSeconds * 2.5);
+    if (!this.recovering.has(chatId) && lastCaughtUp > 0 && now - lastCaughtUp > gapAfter) {
+      this.recovering.set(chatId, { since: lastCaughtUp, saved: 0 });
+    }
     const fail = (err: unknown): never => {
       // A saved address can go stale (CHANNEL_INVALID): forget it, so the next pull resolves afresh.
       const code = (err as { errorMessage?: string }).errorMessage ?? '';
@@ -525,9 +534,22 @@ export class Reader {
       const pause = this.deps.pageDelayMs ?? 250;
       if (pause > 0) await new Promise((r) => setTimeout(r, pause));
     }
+    const gap = this.recovering.get(chatId);
+    if (gap) gap.saved += saved;
     if (caughtUp) {
       this.behind.delete(chatId);
       store.setKv(`reader_caught_up:${chatId}`, String(now));
+      if (gap) {
+        this.recovering.delete(chatId);
+        const minutes = Math.round((now - gap.since) / 60);
+        const at = (t: number) => new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ');
+        this.deps.activity?.event(
+          'reader',
+          'recovered',
+          chat.title,
+          `${gap.saved} message${gap.saved === 1 ? '' : 's'} posted while it was not reading (${at(gap.since)} → ${at(now)} UTC, ${minutes} min), now stored; up to date`,
+        );
+      }
     } else {
       this.behind.add(chatId);
     }

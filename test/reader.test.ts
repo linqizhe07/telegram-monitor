@@ -132,8 +132,13 @@ test('messages posted while the service was offline come in when it is back, wit
   for (let i = 11; i <= 360; i++) env.mt.messages.push(msg(i, T0 + (i - 10) * 90, `while offline ${i}`));
   env.clock.t = T0 + 10 * 3600;
   // It comes back as a new process: a new Reader, same database.
-  const back = new Reader({ client: env.mt, store: env.store, config: testConfig(), log: () => undefined, now: env.clock.now, pageDelayMs: 0 });
+  const events: { method: string; detail: string }[] = [];
+  const activity = { event: (_actor: string, method: string, _target: string, detail: string) => events.push({ method, detail }) } as never;
+  const back = new Reader({ client: env.mt, store: env.store, config: testConfig(), log: () => undefined, now: env.clock.now, pageDelayMs: 0, activity });
   assert.equal(await back.pull(env.store.getChat(GROUP_ID)!), 350);
+  const recovered = events.find((e) => e.method === 'recovered');
+  assert.ok(recovered, 'the recovery is reported');
+  assert.match(recovered.detail, /^350 messages posted while it was not reading .*600 min\), now stored; up to date$/);
   const stored = env.store.messages(GROUP_ID, 0, T0 * 2);
   assert.equal(stored.length, 360);
   assert.deepEqual(stored.map((m) => m.messageId), Array.from({ length: 360 }, (_, i) => i + 1), 'no gap');
