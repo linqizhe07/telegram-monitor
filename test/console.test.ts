@@ -131,7 +131,55 @@ test('the console serves the page, guards its host and its actions, and streams 
       setTimeout(() => activity.event('reader', 'stored', 'a group', '3 new messages'), 50);
     });
     assert.match(streamed, /"method":"stored"/);
+
+    // Clearing storage: only with the page's token, and it leaves one line saying it happened.
+    const noTokenClear = await call(port, '/api/clear', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"activity":true}' });
+    assert.equal(noTokenClear.status, 403);
+    const cleared = JSON.parse((await call(port, '/api/clear', { method: 'POST', headers: { 'content-type': 'application/json', 'x-console-token': token! }, body: '{"activity":true}' })).body);
+    assert.equal(cleared.ok, true);
+    assert.match(cleared.message, /^Cleared: deleted \d+ activity rows; storage/);
+    const left = store.activity();
+    assert.deepEqual(left.map((a) => a.method), ['cleared storage']);
+    const storage = JSON.parse((await call(port, '/api/storage')).body);
+    assert.equal(storage.activity, 1);
   } finally {
     await server.stop();
   }
+});
+
+test('clearing storage deletes what was collected and keeps sources, switches and reading positions', () => {
+  const clock = new Clock();
+  const store = memoryStore(clock);
+  const activity = new Activity(store);
+  const defaults = { language: 'auto' as const, digestHour: 9, timezone: 'UTC', rsiMode: 'auto' as const };
+  store.watchChat({ chatId: -100777, title: 'A group', username: 'a_group', type: 'supergroup', ref: '@a_group' }, 42, null, defaults);
+  store.updateChat(-100777, { readerCursor: 5150, enabled: false });
+  store.setKv('reader_caught_up:-100777', '123');
+  store.upsertUser(-100777, 9, 'Somebody', 'somebody');
+  for (let i = 1; i <= 3; i++) store.saveMessage({ chatId: -100777, messageId: i, threadId: null, userId: 9, date: clock.now(), text: `m${i}`, replyTo: null, reactions: 0, edited: false });
+  activity.event('reader', 'stored', 'A group', '3 new messages');
+  store.addOutbox(42, '<b>digest</b>', false);
+
+  const before = store.storageCounts();
+  assert.deepEqual(before, { messages: 3, sources: 1, people: 1, activity: 1, digests: 0, outbox: 1 });
+
+  const { deleted } = store.clearStored({ messages: true, activity: true, digests: true });
+  assert.equal(deleted.messages, 3);
+  assert.equal(deleted.people, 1);
+  assert.equal(deleted.activity, 1);
+  assert.equal(deleted.outbox, 1);
+  assert.deepEqual(store.storageCounts(), { messages: 0, sources: 0, people: 0, activity: 0, digests: 0, outbox: 0 });
+
+  const kept = store.getChat(-100777)!;
+  assert.equal(kept.kind, 'watched');
+  assert.equal(kept.enabled, false, 'its switch is kept');
+  assert.equal(kept.readerCursor, 5150, 'where it was read up to is kept: nothing is downloaded again');
+  assert.equal(store.getKv('reader_caught_up:-100777'), '123');
+
+  // Only what was chosen goes.
+  activity.event('reader', 'stored', 'A group', '1 new message');
+  store.saveMessage({ chatId: -100777, messageId: 6, threadId: null, userId: 9, date: clock.now(), text: 'kept', replyTo: null, reactions: 0, edited: false });
+  store.clearStored({ activity: true });
+  assert.equal(store.storageCounts().messages, 1);
+  assert.equal(store.storageCounts().activity, 0);
 });

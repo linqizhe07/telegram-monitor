@@ -3,8 +3,8 @@
 // actions need a per-run token that only the page itself carries (no cross-site requests).
 
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { TelegramClient as GramClient } from 'telegram';
 import type { Activity } from '../activity.ts';
@@ -154,6 +154,8 @@ export class ConsoleServer {
           return this.json(res, 200, this.messages(Number(url.searchParams.get('chat')), Number(url.searchParams.get('limit') ?? 100)));
         case '/api/joined':
           return this.json(res, 200, await this.joined());
+        case '/api/storage':
+          return this.json(res, 200, this.storage());
         case '/api/signal':
           return this.json(res, 200, this.signal(Number(url.searchParams.get('chat')), Number(url.searchParams.get('hours') ?? 24)));
         case '/api/events':
@@ -191,6 +193,8 @@ export class ConsoleServer {
           return this.json(res, 200, await this.refreshList());
         case '/api/settings':
           return this.json(res, 200, this.settings(body));
+        case '/api/clear':
+          return this.json(res, 200, this.clear(body));
       }
       res.writeHead(404).end('not found');
       return;
@@ -218,7 +222,7 @@ export class ConsoleServer {
           ref: c.readerRef ?? (c.username ? `@${c.username}` : String(c.chatId)),
           kind: c.kind,
           enabled: c.enabled,
-          access: p ? (p.member ? 'member' : p.verdict === 'read-from-outside' ? 'outside' : p.verdict) : null,
+          access: p ? (p.member ? 'member' : p.verdict === 'read-from-outside' ? 'outside' : p.verdict) : c.readerOrigin === 'dialog' ? 'member' : null,
           members: p?.members ?? null,
           perDay: p?.history?.perDay ?? null,
           bots: p?.bots ?? [],
@@ -320,6 +324,20 @@ export class ConsoleServer {
     }
   }
 
+  /** What is stored, and how big the files are. */
+  private storage() {
+    const { store, config } = this.deps;
+    const dataDir = dirname(config.dbPath);
+    const size = (f: string) => (existsSync(f) ? statSync(f).size : 0);
+    const digestDir = join(dataDir, 'digests');
+    return {
+      ...store.storageCounts(),
+      digestFiles: existsSync(digestDir) ? readdirSync(digestDir).filter((f) => f.endsWith('.md')).length : 0,
+      bytes: size(config.dbPath) + size(`${config.dbPath}-wal`) + size(join(dataDir, 'monitor.log')),
+      retentionDays: config.retentionDays,
+    };
+  }
+
   // ── actions ──────────────────────────────────────────────────────────────
 
   private async probe(target: string): Promise<ProbeResult | { error: string }> {
@@ -411,6 +429,41 @@ export class ConsoleServer {
     } catch (err) {
       return { ok: false, message: (err as Error).message };
     }
+  }
+
+  /**
+   * The owner's "clear storage" button: deletes, for good, what was collected (the chosen parts).
+   * Only the console offers it (a person clicks it); Claude's tools cannot.
+   */
+  private clear(body: Record<string, unknown>): { ok: boolean; message: string } {
+    const { store, config, activity } = this.deps;
+    const what = { messages: body.messages === true, activity: body.activity === true, digests: body.digests === true };
+    if (!what.messages && !what.activity && !what.digests) return { ok: false, message: 'Nothing chosen to clear.' };
+    const before = this.storage().bytes;
+    const dataDir = dirname(config.dbPath);
+    let files = 0;
+    if (what.digests) {
+      const dir = join(dataDir, 'digests');
+      if (existsSync(dir)) {
+        for (const f of readdirSync(dir).filter((x) => x.endsWith('.md'))) {
+          rmSync(join(dir, f), { force: true });
+          files++;
+        }
+      }
+    }
+    if (what.activity && existsSync(join(dataDir, 'monitor.log'))) truncateSync(join(dataDir, 'monitor.log'));
+    const { deleted, compacted } = store.clearStored(what);
+    const after = this.storage().bytes;
+    const parts = [
+      what.messages ? `${deleted.messages ?? 0} messages and ${deleted.people ?? 0} names` : '',
+      what.activity ? `${deleted.activity ?? 0} activity rows` : '',
+      what.digests ? `${deleted.digests ?? 0} digests, ${deleted.outbox ?? 0} outgoing messages and ${files} digest files` : '',
+    ].filter(Boolean);
+    const mb = (b: number) => `${(b / 1_048_576).toFixed(1)} MB`;
+    const summary = `deleted ${parts.join(', ')}; storage ${mb(before)} → ${mb(after)}${compacted ? '' : ' (the file shrinks at the next clear: it was busy)'}`;
+    // The one trace that remains: that a clear happened (not what was in it).
+    activity.event('console', 'cleared storage', 'owner', summary);
+    return { ok: true, message: `Cleared: ${summary}. Sources, switches and reading positions are kept, so nothing is downloaded again.` };
   }
 
   private settings(body: Record<string, unknown>): { ok: boolean; message: string } {

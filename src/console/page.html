@@ -13,7 +13,7 @@
   <div class="brand">
     <span class="logo" aria-hidden="true"></span>
     <div>
-      <h1>Telegram Monitor</h1>
+      <h1>Group Pulse</h1>
       <p class="sub">Console · this computer only (127.0.0.1)</p>
     </div>
   </div>
@@ -79,6 +79,19 @@
     </div>
     <p class="hint" id="out-hint"></p>
     <ol class="outbox" id="outbox"></ol>
+  </section>
+  <section class="panel" aria-labelledby="storage-h">
+    <div class="panel-head">
+      <h2 id="storage-h">Storage</h2>
+    </div>
+    <p class="hint" id="storage-now">…</p>
+    <div class="clear-box">
+      <label class="check"><input type="checkbox" id="clear-messages" checked> Messages, and the names of the people in them</label>
+      <label class="check"><input type="checkbox" id="clear-activity" checked> Activity log</label>
+      <label class="check"><input type="checkbox" id="clear-digests" checked> Digests and outgoing messages</label>
+      <button class="btn danger" id="clear-btn">Clear now…</button>
+    </div>
+    <p class="hint">Deleted for good and the database file is compacted, so nothing lingers on disk. Kept: the sources, their switches and where each was read up to (nothing is downloaded again), settings, and the Telegram login.</p>
   </section>
 </main>
 <div class="toast" id="toast" role="status" hidden></div>

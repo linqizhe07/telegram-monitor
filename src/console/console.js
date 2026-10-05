@@ -103,6 +103,7 @@ const METHODS = {
   'switched off': 'switched off',
   'not added': 'not added',
   setting: 'setting changed',
+  'cleared storage': 'CLEARED stored data',
   reconnect: 'reconnect',
   recovered: 'RECOVERED missed messages',
   'was off': 'service was off',
@@ -132,7 +133,7 @@ function renderCards(s) {
     cards.append(card(offline ? 'bad' : 'ok', 'Reader account', el('div', { class: 'big', text: s.account.name }),
       conn ? el('div', { class: 'line' }, el('span', { class: `pill ${offline ? 'bad' : 'ok'}`, text: offline ? 'Telegram unreachable' : 'connected' }), ` since ${fmtDateTime(conn.since)}${offline ? ' · retrying every 3s; missed messages are fetched when it is back' : ''}`) : null,
       `Telegram id ${s.account.id} · signed in`,
-      'Revoke any time: Telegram → Settings → Devices → Telegram Monitor → Terminate.'));
+      'Revoke any time: Telegram → Settings → Devices → Group Pulse → Terminate.'));
   } else {
     cards.append(card('bad', 'Reader account', el('div', { class: 'big', text: 'Not signed in' }),
       s.readerConfigured ? 'Run npm run login, then restart.' : 'Set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env, then npm run login.'));
@@ -179,7 +180,9 @@ function renderSources(s) {
     if (src.door?.joinRequest) guards.push(el('span', { class: 'chip guard', text: 'join approval' }));
     if (src.door?.hiddenHistoryForNewMembers) guards.push(el('span', { class: 'chip guard', text: 'history hidden for new members' }));
     if (src.door?.telegramAntispam) guards.push(el('span', { class: 'chip guard', text: 'Telegram anti-spam' }));
-    for (const b of src.bots || []) guards.push(el('span', { class: 'chip', text: b }));
+    const bots = src.bots || [];
+    for (const b of bots.slice(0, 4)) guards.push(el('span', { class: 'chip', text: b }));
+    if (bots.length > 4) guards.push(el('span', { class: 'chip', text: `+${bots.length - 4} more`, title: bots.slice(4).join('  ') }));
     const OFF = { owner: 'switched off', left: 'you left it in Telegram', 'auto-watch off': 'new; auto-read is off' };
     const status = !src.enabled
       ? el('span', { class: 'pill muted', text: OFF[src.offReason] || 'off', title: src.error || '' })
@@ -229,7 +232,8 @@ function renderSources(s) {
   const current = sel.value;
   sel.replaceChildren(...s.sources.map((x) => el('option', { value: x.chatId, text: x.title })));
   if (current && s.sources.some((x) => String(x.chatId) === current)) sel.value = current;
-  if (!sel.value && s.sources[0]) {
+  // First render (nothing chosen yet): the browser has picked the first option by itself, so load it.
+  if (!current && s.sources[0]) {
     sel.value = String(s.sources[0].chatId);
     loadMessages();
   }
@@ -484,6 +488,54 @@ function renderOutbox(s) {
     el('div', { class: 'body' }, sanitize(o.html)))));
 }
 
+// ── storage ────────────────────────────────────────────────────────────────
+
+let storageNow = null;
+async function loadStorage() {
+  storageNow = await api('/api/storage').catch(() => null);
+  if (!storageNow) return;
+  const s = storageNow;
+  $('storage-now').textContent =
+    `Stored now: ${n(s.messages)} messages from ${n(s.sources)} sources · ${n(s.people)} names · ${n(s.activity)} activity rows · ` +
+    `${n(s.digests)} digests${s.digestFiles ? ` (+${n(s.digestFiles)} files)` : ''} · ${(s.bytes / 1048576).toFixed(1)} MB on disk. ` +
+    `Messages older than ${s.retentionDays} days are deleted automatically.`;
+}
+
+$('clear-btn').addEventListener('click', async (e) => {
+  const what = { messages: $('clear-messages').checked, activity: $('clear-activity').checked, digests: $('clear-digests').checked };
+  if (!what.messages && !what.activity && !what.digests) return toast('Choose what to clear first.');
+  await loadStorage();
+  const s = storageNow || {};
+  const list = [
+    what.messages ? `${n(s.messages)} messages and ${n(s.people)} names` : null,
+    what.activity ? `${n(s.activity)} activity rows` : null,
+    what.digests ? `${n(s.digests)} digests and their files` : null,
+  ].filter(Boolean);
+  if (!confirm(`Delete permanently: ${list.join(', ')}?\n\nThis cannot be undone. Sources, switches and reading positions are kept, so nothing is downloaded again.`)) return;
+  const b = e.target;
+  b.disabled = true;
+  try {
+    const r = await api('/api/clear', what);
+    toast(r.message);
+    if (what.activity) {
+      feedRows.length = 0;
+      lastActivityId = 0;
+      for (const a of await api('/api/activity?limit=400').catch(() => [])) {
+        feedRows.push(a);
+        lastActivityId = Math.max(lastActivityId, a.id);
+      }
+      renderFeed();
+    }
+    await refresh();
+    await loadStorage();
+    loadMessages();
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    b.disabled = false;
+  }
+});
+
 // ── refresh loop and live stream ───────────────────────────────────────────
 
 let refreshTimer = null;
@@ -527,6 +579,8 @@ function connect() {
   }
   renderFeed();
   connect();
+  loadStorage();
   setInterval(refresh, 10_000);
+  setInterval(loadStorage, 60_000);
   setInterval(() => $('msg-source').value && loadMessages(), 30_000);
 })();

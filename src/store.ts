@@ -322,6 +322,7 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.clock = clock;
     this.db.exec('PRAGMA journal_mode = WAL;');
+    this.db.exec('PRAGMA busy_timeout = 5000;'); // the MCP server opens the same file
     this.db.exec(SCHEMA);
     this.migrate();
   }
@@ -1050,6 +1051,51 @@ export class Store {
       out.set(num(r.chat_id), { count: num(r.n), newest: numOrNull(r.newest), people: num(r.people) });
     }
     return out;
+  }
+
+  // ── storage: what is kept, and clearing it ───────────────────────────────
+
+  storageCounts(): { messages: number; sources: number; people: number; activity: number; digests: number; outbox: number } {
+    const n = (sql: string) => num(this.get(sql)?.n ?? 0);
+    return {
+      messages: n('SELECT COUNT(*) AS n FROM messages'),
+      sources: n('SELECT COUNT(DISTINCT chat_id) AS n FROM messages'),
+      people: n('SELECT COUNT(*) AS n FROM users'),
+      activity: n('SELECT COUNT(*) AS n FROM activity'),
+      digests: n('SELECT COUNT(*) AS n FROM digests'),
+      outbox: n('SELECT COUNT(*) AS n FROM outbox'),
+    };
+  }
+
+  /**
+   * Deletes what has been collected, for good: messages (and the people named in them), the
+   * activity log, digests and outgoing messages, as chosen. Keeps the sources, their switches and
+   * cursors (so nothing is downloaded again), settings, and the self-improving playbook. Then
+   * rewrites the database file, so the deleted rows do not linger in free pages or the WAL.
+   */
+  clearStored(what: { messages?: boolean; activity?: boolean; digests?: boolean }): { deleted: Record<string, number>; compacted: boolean } {
+    const deleted: Record<string, number> = {};
+    this.transaction(() => {
+      if (what.messages) {
+        deleted.messages = this.run('DELETE FROM messages').changes;
+        deleted.people = this.run('DELETE FROM users').changes;
+      }
+      if (what.activity) deleted.activity = this.run('DELETE FROM activity').changes;
+      if (what.digests) {
+        deleted.digests = this.run('DELETE FROM digests').changes;
+        deleted.votes = this.run('DELETE FROM votes').changes;
+        deleted.outbox = this.run('DELETE FROM outbox').changes;
+      }
+    });
+    let compacted = true;
+    try {
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+      this.db.exec('VACUUM;');
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+    } catch {
+      compacted = false; // another process held the file: the rows are gone, the space comes back later
+    }
+    return { deleted, compacted };
   }
 
   // ── key/value ────────────────────────────────────────────────────────────
