@@ -42,12 +42,20 @@ const askHidden = async (q: string) => {
 };
 
 const NO_ACCOUNT = 'NO_ACCOUNT';
+let failures = 0;
 const onError = async (err: Error) => {
   if (err.message === NO_ACCOUNT) {
     console.error('\nThis phone number has no Telegram account. Create the account in the Telegram app first, then run this again.');
     return true; // stop: never sign up from here
   }
-  console.error(`  ${err.message}`);
+  const code = (err as Error & { errorMessage?: string }).errorMessage ?? err.message;
+  console.error(`  ${code}`);
+  // Telegram caps login attempts (about 5 a day per number) and locks out for up to a day:
+  // stop at once on limits and bans, and after a second mistake, instead of retrying.
+  if (/FLOOD|BANNED|PHONE_NUMBER_INVALID|PHONE_NUMBER_UNOCCUPIED|AUTH_RESTART/.test(code) || ++failures >= 2) {
+    console.error('\nStopping. Wait before trying again (Telegram limits login attempts); if it says FLOOD, wait the time it gives.');
+    return true;
+  }
   return false;
 };
 const password = (hint?: string) => askHidden(`Two-step verification password${hint ? ` (hint: ${hint})` : ''}: `);
@@ -94,7 +102,8 @@ writeFileSync(config.readerSession, String(client.session.save()), { mode: 0o600
 const me = (await client.getMe()) as { username?: string; firstName?: string };
 console.log(`\nSigned in as ${me.username ? `@${me.username}` : (me.firstName ?? 'the account')}.`);
 console.log(`Session saved to ${config.readerSession} (mode 600). It is full access to this account: never commit or share it.`);
-console.log('To revoke it: Telegram → Settings → Devices → "Telegram Monitor" → Terminate.');
+console.log('On the phone, Telegram may ask "Is this you?" about the new session: confirm it.');
+console.log('To revoke it: Telegram → Settings → Devices → "Group Pulse" → Terminate.');
 await client.disconnect();
 rl.close();
 process.exit(0);

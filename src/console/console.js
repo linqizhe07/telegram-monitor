@@ -245,7 +245,7 @@ function renderProbe(r) {
   if (r.door) {
     const d = r.door;
     const door = [d.joinRequest && 'join needs admin approval', d.hiddenHistoryForNewMembers && 'history hidden for new members', d.telegramAntispam && 'Telegram anti-spam on', d.slowmodeSeconds && `slow mode ${d.slowmodeSeconds}s`, d.protectedContent && 'protected content', d.membersCannot.length && `members cannot: ${d.membersCannot.join(', ')}`, d.restricted.length && `restricted: ${d.restricted.join('; ')}`].filter(Boolean);
-    add('At the door', door.length ? door.join(' · ') : 'nothing special');
+    add('At the door', `${door.length ? door.join(' · ') : 'nothing seen'}${d.hiddenHistoryForNewMembers === null ? ' (hidden history and anti-spam are only shown to admins)' : ''}`);
   }
   if (r.bots) add('Bots in the group', r.bots.length ? r.bots.join('  ') : 'none listed');
   if (r.flags) add('Telegram flags', [r.flags.verified && 'verified', r.flags.scam && 'SCAM', r.flags.fake && 'FAKE'].filter(Boolean).join(', ') || 'none');

@@ -37,6 +37,8 @@ export interface ChatRow {
   /** Highest message id already pulled by the reader account. */
   readerCursor: number | null;
   readerError: string | null;
+  /** The chat's address (JSON: type, id, access hash), saved so it is never resolved by name again. */
+  readerPeer: string | null;
 }
 
 export type ChatKind = 'group' | 'watched' | 'report';
@@ -330,6 +332,7 @@ export class Store {
       ['chats', 'reader_ref', 'TEXT'],
       ['chats', 'reader_cursor', 'INTEGER'],
       ['chats', 'reader_error', 'TEXT'],
+      ['chats', 'reader_peer', 'TEXT'],
       ['digests', 'posted_chat_id', 'INTEGER'],
     ];
     for (const [table, column, type] of added) {
@@ -401,6 +404,7 @@ export class Store {
       readerRef: strOrNull(r.reader_ref),
       readerCursor: numOrNull(r.reader_cursor),
       readerError: strOrNull(r.reader_error),
+      readerPeer: strOrNull(r.reader_peer),
     };
   }
 
@@ -457,6 +461,7 @@ export class Store {
         | 'readerRef'
         | 'readerCursor'
         | 'readerError'
+        | 'readerPeer'
       >
     >,
   ): void {
@@ -477,6 +482,7 @@ export class Store {
       readerRef: 'reader_ref',
       readerCursor: 'reader_cursor',
       readerError: 'reader_error',
+      readerPeer: 'reader_peer',
     };
     for (const [key, value] of Object.entries(patch)) {
       const col = cols[key];
@@ -488,13 +494,13 @@ export class Store {
 
   /** Registers (or re-enables) a group or channel the reader account watches, reporting to `reportChatId`. */
   watchChat(
-    c: { chatId: number; title: string; username: string | null; type: string; ref: string },
+    c: { chatId: number; title: string; username: string | null; type: string; ref: string; peer?: string | null },
     reportChatId: number,
     threadId: number | null,
     defaults: ChatDefaults,
   ): ChatRow {
     this.upsertChat({ chatId: c.chatId, title: c.title, username: c.username, type: c.type }, defaults);
-    this.updateChat(c.chatId, { kind: 'watched', reportChatId, threadId, readerRef: c.ref, enabled: true, readerError: null });
+    this.updateChat(c.chatId, { kind: 'watched', reportChatId, threadId, readerRef: c.ref, enabled: true, readerError: null, ...(c.peer ? { readerPeer: c.peer } : {}) });
     return this.getChat(c.chatId)!;
   }
 

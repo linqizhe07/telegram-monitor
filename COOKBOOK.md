@@ -111,7 +111,7 @@ cp .env.example .env
 ### 4.2 申请 api_id / api_hash
 
 1. 浏览器打开 https://my.telegram.org ，用**专用账号**的手机号登录。验证码会发到这个账号的 Telegram App 里，不走短信。
-2. 进 **API development tools**，App title 和 Short name 随便填（例如 `monitor`），Platform 选 Desktop，点 Create application。
+2. 进 **API development tools**，App title 和 Short name 随便填，但**不要带 "Telegram" 字样**（API 条款 2.3），例如 `Group Pulse` / `grouppulse`。Platform 选 Desktop，点 Create application。如果弹出 "ERROR"：不要反复重试，换成手机流量、关掉 VPN，等一天再试（这条来自多份用户反馈）。
 3. 把 **App api_id** 和 **App api_hash** 填进 `.env` 的 `TELEGRAM_API_ID`、`TELEGRAM_API_HASH`。
 
 如果创建时一直报 `ERROR`：换个浏览器、关掉广告拦截插件、换个网络再试。这是 my.telegram.org 的老毛病。
@@ -143,7 +143,8 @@ npm run login -- --phone
 ### 4.4 会话文件的安全
 
 - `data/reader.session` 等于这个账号的完整登录：**不要提交到 git**（`data/` 已在 `.gitignore` 里），不要发给任何人。
-- 要作废它：用专用账号在 Telegram → Settings → Devices 里，找到 **Telegram Monitor**（或你在 my.telegram.org 填的应用名）→ Terminate。
+- 要作废它：在 Telegram → Settings → Devices 里找到 **Group Pulse** → Terminate。旧版本显示的名字是 "Telegram Monitor"。登录后手机上可能弹出「是你本人吗」，请确认。
+- **同一个会话只能有一个进程在用**：服务开着的时候，不要再跑 `npm run probe`。两个连接同时用同一个会话，Telegram 可能把它作废（AUTH_KEY_DUPLICATED）。程序带了锁，会拒绝第二个进程；要查看一个群，用控制台的 Check 或 Claude 的 check_group 工具。
 - 作废或过期以后，程序日志会提示重新运行 `npm run login`。
 
 ---
@@ -206,7 +207,7 @@ reader account: @your_reader_account        ← 监控模式才有
 |---|---|
 | Reader account | 登录的是哪个号；随时可以在 Telegram → 设置 → 设备里终止 |
 | Account actions | 24 小时内账号发给 Telegram 的请求：读几次、**写几次**（加群、发言、按按钮、标已读都算写）。正常是 0 次写 |
-| Sources | 每个群：从外面读，还是已是成员；过去 24 小时存了多少条；群的日均量；门口的守卫（入群审批、隐藏历史、群里的机器人）；是否已追平 |
+| Sources | 每个群：从外面读，还是已是成员；过去 24 小时存了多少条；群的日均量；门口的守卫（入群审批、群里的机器人）；是否已追平。「隐藏历史」和「反垃圾」只有管理员能看到，从外面看显示为未知，不代表没有 |
 | Activity | 账号发出的**每一个**请求，实时滚动。GramJS 所有请求都经过同一个被记录的入口，只有建连接的握手和心跳不记（它们不涉及任何群） |
 | Captured messages | `Signal` = 去噪后 Claude 实际读到的内容；`All` = 原始消息 |
 | Digests | Claude 写好的摘要 |
@@ -371,7 +372,7 @@ journalctl -u telegram-monitor -f
 注意：
 
 - **同一个 bot token 只能跑一个实例**。Telegram 长轮询只允许一个消费者，开两个会报 409。
-- **备份** `data/pulse.db`（消息、摘要、playbook 谱系、投票）和 `data/reader.session`。迁移到别的机器，把这两个文件和 `.env` 一起带走即可。
+- **备份** `data/pulse.db`（消息、摘要、playbook 谱系、投票）。迁移到别的机器时，**先停掉旧机器上的服务**，再在新机器上重新 `npm run login`，不要拷贝 `reader.session` 两边同时跑。换 IP 或国家也可能触发风控（用户反馈）。
 
 ---
 
@@ -412,6 +413,8 @@ journalctl -u telegram-monitor -f
 
   别把含个人信息的摘要公开转发，也别用它针对具体的人。
 - **入群验证码**由你本人在手机上完成。程序不会、也不应该自动通过任何人机验证。
+- **⚠️ Telegram 关于 AI 的条款（请你自己判断）**：Telegram 的 Content Licensing 条款（telegram.org/tos/content-licensing，「Large Language Models and AI」一节）和 API 条款第 1.5 条，禁止把平台数据用于人工智能的「训练、微调、验证……或部署」。例外不是自动给的：要所有相关用户逐个、明确、持续地同意，而且仅限那个聊天，之后 Telegram「可能」批准。Bot 开发者条款第 4.3 条还单独禁止为 AI 产品抓取公开群和频道的内容，所以换成 bot 模式也绕不开。把群消息交给 Claude 写摘要，和这些条款直接冲突。个人自用和做成产品，风险也不一样。这不是法律意见：请读原文，必要时问律师。
+- **非官方客户端**：Telegram 说用非官方客户端登录的账号会被「观察」，可能出现资料页警告（用户反馈）。所以要少写、慢读、不刷接口。
 - **数据去向**：消息内容会发给 Anthropic 的 Claude API 处理；其他数据都存在本机或你的服务器上。
 
 ---
@@ -425,11 +428,13 @@ journalctl -u telegram-monitor -f
 | 日志 `409 Conflict` | 同一个 token 开了两个实例 | 关掉另一个 |
 | `/watch` 回复「需要读者账号」 | 没填 `TELEGRAM_API_ID/HASH`，或没登录 | 第 4 步，然后重启 |
 | 「no public group or channel has that username」 | 用户名写错，或者那是私密群 | 核对 `t.me/` 链接；私密群先加入再用 id |
-| 「the reader account cannot see it: join it first」 | 私密群，或群关闭了预览 | 用专用账号在手机上加入，再 `/watch 群名` |
+| 「the account cannot see this chat」 | 私密群：要先加入。**公开群**出现这个提示，通常意味着账号被这个群封了（公开群没有「关闭预览」这种设置），重新加入也没用 | 私密群：在手机上加入后再监控；公开群：别再尝试 |
 | 「has joined no group or channel with that name」 | 读者账号还没加入，或名字写得不对 | 先加入；名字写一部分即可，按读者账号聊天列表里显示的名字 |
 | 群里发命令 bot 没反应 | 群里有别的 bot，命令没点名 | 写成 `/命令@你的bot用户名` |
-| 「slow down for N s」 | Telegram 限流 | 程序会自动等。经常出现就调大 `PULSE_READER_POLL_SECONDS`，少监控几个群 |
-| 「session is no longer valid」 | 会话被终止、账号退出或被封 | 重新 `npm run login`；被封就换一个专用账号 |
+| 「FLOOD_WAIT Ns」（控制台的 Errors 里） | Telegram 要求账号放慢 | 整个账号的请求都会自动暂停到时间结束。所有请求本来就按每秒约 1 次的节奏发。经常出现就调大 `PULSE_READER_POLL_SECONDS`、少监控几个群。千万别在等待期间反复重启：用户名解析每天只有约 200 次额度，超了可能要等十几个小时 |
+| 「session is no longer valid」 | 会话在 Devices 里被终止，或账号退出 | 重新 `npm run login` |
+| 「used by two processes at once」 | 同一个会话被两个进程同时使用（AUTH_KEY_DUPLICATED） | 先停掉另一个进程，再重新登录 |
+| 「FROZEN」/「BANNED」/「limited」 | 账号被冻结、封禁或限制 | 不要重试，也**不要换号绕过**（这是 Telegram 不允许的账号轮换）。按 Telegram App 里给出的申诉链接申诉，或联系 recover@telegram.org、@SpamBot |
 | 私聊收不到摘要 | 没先给 bot 发过 `/start` | 私聊 bot 发 `/start` |
 | `/digest` 回复「⚠️ 没能写出摘要」 | API key 无效、余额不足或地区不支持 | 看日志里的具体报错 |
 | 摘要太长或抓不住重点 | playbook 还在早期 | 投 👎 并具体回复；几轮 RSI 后会改善。也可以 `/rsi playbook` 看规则 |

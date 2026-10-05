@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { loadConfig } from '../src/config.ts';
 import { probe } from '../src/probe.ts';
-import { newClient } from '../src/reader-client.ts';
+import { acquireSessionLock, newClient } from '../src/reader-client.ts';
 
 const targets = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 if (targets.length === 0) {
@@ -13,6 +13,12 @@ if (targets.length === 0) {
   process.exit(1);
 }
 const config = loadConfig({ ...process.env, TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || 'unused-here' });
+try {
+  acquireSessionLock(config.readerSession); // never a second connection on a session the service holds
+} catch (err) {
+  console.error(`${(err as Error).message}\nWhile the service runs, use the console's "Check" (http://127.0.0.1:4830) or Claude's check_group tool.`);
+  process.exit(1);
+}
 const client = newClient(config, readFileSync(config.readerSession, 'utf8').trim());
 await client.connect();
 if (!(await client.checkAuthorization())) {

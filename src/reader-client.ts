@@ -1,7 +1,8 @@
 // Connects the reader account (GramJS over MTProto) from the session saved by `npm run login`.
 
-import { existsSync, readFileSync } from 'node:fs';
-import { TelegramClient } from 'telegram';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { Api, TelegramClient } from 'telegram';
+import { returnBigInt } from 'telegram/Helpers.js';
 import { Logger, LogLevel } from 'telegram/extensions/Logger.js';
 import { UpdateConnectionState } from 'telegram/network/index.js';
 import { StringSession } from 'telegram/sessions/index.js';
@@ -17,41 +18,96 @@ export function newClient(config: Config, session = ''): TelegramClient {
     connectionRetries: Infinity,
     retryDelay: 3000,
     autoReconnect: true,
-    // Short flood waits are slept through by the library; longer ones surface to the reader loop.
-    floodSleepThreshold: 60,
+    // Every flood wait surfaces to superviseRequests, which records it and holds the whole account.
+    floodSleepThreshold: 0,
     baseLogger: new Logger(LogLevel.ERROR),
-    deviceModel: 'Telegram Monitor',
-    appVersion: '0.1',
+    // Telegram's API terms: no "Telegram" in a third-party app's name (2.3).
+    deviceModel: 'Group Pulse',
+    appVersion: '0.2',
   });
 }
 
 /**
- * Records every request the account sends. All GramJS helpers go through `invoke`, and file
- * downloads through `invokeWithSender`; only the connection handshake and keep-alive pings do not
- * (they carry nothing about any chat).
+ * The one door every request goes through: all GramJS helpers use `invoke`, file downloads use
+ * `invokeWithSender`; only the connection handshake and keep-alive pings bypass it (they carry
+ * nothing about any chat). At this door each request is
+ *  - paced: an account-wide budget of about one request a second (Telegram's limits are not
+ *    published; the last public figure was 30 history requests per 30 seconds);
+ *  - held while Telegram has asked the account to wait (FLOOD_WAIT), for every chat at once;
+ *  - recorded, including every wait (GramJS would otherwise sleep through short waits silently).
  */
-export function recordRequests(client: TelegramClient, activity: Activity, titleOf: (chatId: number) => string | null): void {
+export function superviseRequests(
+  client: TelegramClient,
+  activity: Activity,
+  titleOf: (chatId: number) => string | null,
+  opts: { intervalMs?: number; burst?: number } = {},
+): { pausedUntil: () => number } {
+  const interval = opts.intervalMs ?? 1100;
+  let tokens = opts.burst ?? 5;
+  let refilledAt = Date.now();
+  let pausedUntil = 0;
+  let queue: Promise<void> = Promise.resolve();
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  /** Waits for the account-wide pause and a token, one request at a time. */
+  const turn = (): Promise<void> => {
+    const mine = queue.then(async () => {
+      for (;;) {
+        const now = Date.now();
+        if (now < pausedUntil) {
+          await sleep(pausedUntil - now);
+          continue;
+        }
+        tokens = Math.min(opts.burst ?? 5, tokens + (now - refilledAt) / interval);
+        refilledAt = now;
+        if (tokens >= 1) {
+          tokens -= 1;
+          return;
+        }
+        await sleep((1 - tokens) * interval);
+      }
+    });
+    queue = mine.catch(() => undefined);
+    return mine;
+  };
+
   const wrap = <A extends unknown[], R>(call: (request: { className: string }, ...rest: A) => Promise<R>) =>
     async (request: { className: string }, ...rest: A): Promise<R> => {
-      const started = Date.now();
       const req = request as unknown as Record<string, unknown>;
       const kind = classify(request.className, req as { increment?: boolean });
       const target = describeTarget(req, titleOf);
-      try {
-        const res = await call(request, ...rest);
-        if (kind !== 'system') activity.record({ actor: 'reader', kind, method: request.className, target, detail: describeCall(request.className, req, res), ms: Date.now() - started });
-        return res;
-      } catch (err) {
-        const e = err as { errorMessage?: string; message?: string };
-        activity.record({ actor: 'reader', kind, method: request.className, target, detail: e.errorMessage ?? e.message ?? String(err), ok: false, ms: Date.now() - started });
-        throw err;
+      for (let attempt = 0; ; attempt++) {
+        if (kind !== 'system') await turn();
+        const started = Date.now();
+        try {
+          const res = await call(request, ...rest);
+          if (kind !== 'system') activity.record({ actor: 'reader', kind, method: request.className, target, detail: describeCall(request.className, req, res), ms: Date.now() - started });
+          return res;
+        } catch (err) {
+          const e = err as { errorMessage?: string; message?: string; seconds?: number };
+          const code = e.errorMessage ?? e.message ?? String(err);
+          const wait = typeof e.seconds === 'number' ? e.seconds : /FLOOD_WAIT_(\d+)/.test(code) ? Number(/FLOOD_WAIT_(\d+)/.exec(code)![1]) : null;
+          if (wait !== null) {
+            // Telegram asked this account to slow down: hold every request, not just this one.
+            pausedUntil = Math.max(pausedUntil, Date.now() + wait * 1000 * 1.1 + 1000);
+            activity.record({ actor: 'reader', kind: 'error', method: request.className, target, detail: `FLOOD_WAIT ${wait}s: Telegram asked the account to slow down; every request now waits until ${new Date(pausedUntil).toISOString()}`, ok: false, ms: Date.now() - started });
+            if (wait <= 60 && attempt === 0) continue; // short: wait it out once, then retry
+            throw err;
+          }
+          activity.record({ actor: 'reader', kind, method: request.className, target, detail: code, ok: false, ms: Date.now() - started });
+          throw err;
+        }
       }
     };
   type Call = (request: { className: string }, ...rest: unknown[]) => Promise<unknown>;
   const c = client as unknown as Record<'invoke' | 'invokeWithSender', Call>;
   c.invoke = wrap(c.invoke.bind(client));
   c.invokeWithSender = wrap(c.invokeWithSender.bind(client));
+  return { pausedUntil: () => pausedUntil };
 }
+
+/** @deprecated name kept for scripts: same as superviseRequests. */
+export const recordRequests = superviseRequests;
 
 export type ConnectionState = 'online' | 'offline';
 
@@ -66,6 +122,59 @@ export interface ReaderConnection {
   reconnect: () => Promise<void>;
   /** online / offline, and since when (unix seconds). */
   state: () => { state: ConnectionState; since: number };
+  /** Until when (ms epoch) Telegram has asked the account to wait; 0 = not waiting. */
+  pausedUntil: () => number;
+}
+
+/** A chat's address saved at watch time, so it is never resolved by name again. */
+export interface SavedPeer {
+  type: 'channel' | 'chat';
+  id: string;
+  accessHash?: string;
+}
+
+export function inputPeer(p: SavedPeer): unknown {
+  return p.type === 'channel'
+    ? new Api.InputPeerChannel({ channelId: returnBigInt(p.id), accessHash: returnBigInt(p.accessHash ?? '0') })
+    : new Api.InputPeerChat({ chatId: returnBigInt(p.id) });
+}
+
+/**
+ * One process per session file: the same session used by two connections at once can get it
+ * revoked (AUTH_KEY_DUPLICATED). The service and `npm run probe` both take this lock.
+ */
+export function acquireSessionLock(sessionPath: string): { release: () => void } {
+  const file = `${sessionPath}.lock`;
+  if (existsSync(file)) {
+    const pid = Number(readFileSync(file, 'utf8').trim());
+    let alive = false;
+    if (pid && pid !== process.pid) {
+      try {
+        process.kill(pid, 0);
+        alive = true;
+      } catch (err) {
+        alive = (err as NodeJS.ErrnoException).code === 'EPERM';
+      }
+    }
+    if (alive) {
+      throw new Error(
+        `the reader session is in use by process ${pid} (the monitor service?). Two connections on one session can get it revoked: stop that process first, or use the console (Check) instead.`,
+      );
+    }
+  }
+  writeFileSync(file, String(process.pid), { mode: 0o600 });
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    try {
+      if (readFileSync(file, 'utf8').trim() === String(process.pid)) rmSync(file);
+    } catch {
+      // already gone
+    }
+  };
+  process.once('exit', release);
+  return { release };
 }
 
 /** The connected reader account, or null (with the reason logged) when it is not set up. */
@@ -80,7 +189,10 @@ export async function connectReader(
     return null;
   }
   const client = newClient(config, readFileSync(config.readerSession, 'utf8').trim());
-  if (opts.activity) recordRequests(client, opts.activity, opts.titleOf ?? (() => null));
+  // Reopen saved chats without resolving their names again (resolving is the scarcest budget).
+  (client as unknown as { inputPeer: (p: SavedPeer) => unknown }).inputPeer = inputPeer;
+  const lock = acquireSessionLock(config.readerSession);
+  const supervisor = opts.activity ? superviseRequests(client, opts.activity, opts.titleOf ?? (() => null)) : null;
   await client.connect();
   if (!(await client.checkAuthorization())) {
     log('reader: the saved session is no longer valid (logged out or revoked); run `npm run login` again');
@@ -112,10 +224,12 @@ export async function connectReader(
     raw: client,
     name: me.username ? `@${me.username}` : ([me.firstName, me.lastName].filter(Boolean).join(' ') || String(me.id)),
     id: String(me.id),
-    disconnect: () => {
+    disconnect: async () => {
       closing = true;
-      return client.disconnect();
+      await client.disconnect();
+      lock.release();
     },
+    pausedUntil: () => supervisor?.pausedUntil() ?? 0,
     reconnect: () => {
       reconnecting ??= (async () => {
         setState('offline');

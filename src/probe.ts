@@ -25,8 +25,9 @@ export interface ProbeResult {
   door?: {
     joinRequest: boolean;
     joinToSend: boolean;
-    hiddenHistoryForNewMembers: boolean;
-    telegramAntispam: boolean;
+    /** Only admins are told these two: null = unknown (seen from outside or as a plain member). */
+    hiddenHistoryForNewMembers: boolean | null;
+    telegramAntispam: boolean | null;
     membersListHidden: boolean;
     slowmodeSeconds: number;
     protectedContent: boolean;
@@ -61,8 +62,8 @@ async function channel(client: TelegramClient, target: string, e: Api.Channel, n
     door: {
       joinRequest: Boolean(e.joinRequest),
       joinToSend: Boolean(e.joinToSend),
-      hiddenHistoryForNewMembers: false,
-      telegramAntispam: false,
+      hiddenHistoryForNewMembers: null,
+      telegramAntispam: null,
       membersListHidden: false,
       slowmodeSeconds: 0,
       protectedContent: Boolean(e.noforwards),
@@ -77,8 +78,9 @@ async function channel(client: TelegramClient, target: string, e: Api.Channel, n
     const users = new Map(full.users.map((u) => [String(u.id), u as Api.User]));
     r.members = f.participantsCount ?? r.members;
     r.online = f.onlineCount ?? null;
-    r.door!.hiddenHistoryForNewMembers = Boolean(f.hiddenPrehistory);
-    r.door!.telegramAntispam = Boolean(f.antispam);
+    const admin = Boolean(e.creator || e.adminRights);
+    r.door!.hiddenHistoryForNewMembers = admin ? Boolean(f.hiddenPrehistory) : f.hiddenPrehistory ? true : null;
+    r.door!.telegramAntispam = admin ? Boolean(f.antispam) : f.antispam ? true : null;
     r.door!.membersListHidden = Boolean(f.participantsHidden);
     r.door!.slowmodeSeconds = f.slowmodeSeconds ?? 0;
     r.linkedChatId = f.linkedChatId ? -(1_000_000_000_000 + big(f.linkedChatId)) : null;

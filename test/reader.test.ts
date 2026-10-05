@@ -275,7 +275,12 @@ test('Telegram errors become reasons a person can act on', async () => {
   await assert.rejects(env.reader.resolve('https://t.me/+AbCdEfGh1234'), /join the group with the reader account/);
   env.mt.entities.set('someone', user(77, 'Someone'));
   await assert.rejects(env.reader.resolve('@someone'), /a person, not a group/);
-  assert.match(explain({ errorMessage: 'CHANNEL_PRIVATE' }).message, /join it first/);
+  assert.match(explain({ errorMessage: 'CHANNEL_PRIVATE' }).message, /PUBLIC group this usually means the account was banned/);
+  assert.match(explain({ errorMessage: 'FROZEN_METHOD_INVALID' }).message, /FROZEN/);
+  assert.match(explain({ errorMessage: 'USER_DEACTIVATED_BAN' }).message, /BANNED.*appeal/);
+  assert.match(explain({ errorMessage: 'USER_DEACTIVATED' }).message, /npm run login/);
+  assert.match(explain({ errorMessage: 'AUTH_KEY_DUPLICATED' }).message, /two processes/);
+  assert.match(explain({ errorMessage: 'PEER_FLOOD' }).message, /limited/);
   assert.equal(explain({ errorMessage: 'FLOOD_WAIT_42', seconds: 42 }).retryAfter, 42);
   assert.match(explain({ errorMessage: 'AUTH_KEY_UNREGISTERED' }).message, /npm run login/);
 });

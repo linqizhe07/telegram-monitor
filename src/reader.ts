@@ -16,6 +16,10 @@ import type { Window } from './transcript.ts';
 export interface MtEntity {
   className: string;
   id: unknown;
+  accessHash?: unknown;
+  /** A "min" entity carries an access hash that only works in the context it came from. */
+  min?: boolean;
+  restrictionReason?: { platform: string; reason: string; text: string }[];
   title?: string;
   username?: string;
   firstName?: string;
@@ -58,6 +62,8 @@ export interface MtClient {
    * messages.getHistory through GramJS: newest first by default; with `reverse`, oldest first
    * starting after `minId`; with `offsetDate`, the newest messages sent before that time.
    */
+  /** Builds an input peer from a saved address, with no request (see reader-client.ts). */
+  inputPeer?(p: { type: 'channel' | 'chat'; id: string; accessHash?: string }): MtEntity;
   getMessages(
     entity: MtEntity,
     params: { limit?: number; offsetId?: number; minId?: number; ids?: number[]; reverse?: boolean; offsetDate?: number },
@@ -72,6 +78,8 @@ export interface SourceInfo {
   /** What the reader uses to find it again: @username, or the -100… id. */
   ref: string;
   members: number | null;
+  /** Its saved address (JSON), so it is never resolved by name again; null when not usable. */
+  peer: string | null;
 }
 
 /** A problem worth showing to the person who asked (not a crash). */
@@ -91,6 +99,15 @@ export function chatIdOf(e: MtEntity): number {
   if (e.className === 'Channel' || e.className === 'ChannelForbidden') return -(1_000_000_000_000 + big(e.id));
   if (e.className === 'Chat' || e.className === 'ChatForbidden') return -big(e.id);
   return big(e.id);
+}
+
+/** The address to save for an entity (channels need a full, non-min access hash). */
+export function peerOf(e: MtEntity): string | null {
+  if (e.className === 'Channel' && e.accessHash !== undefined && e.accessHash !== null && !e.min) {
+    return JSON.stringify({ type: 'channel', id: String(e.id), accessHash: String(e.accessHash) });
+  }
+  if (e.className === 'Chat') return JSON.stringify({ type: 'chat', id: String(e.id) });
+  return null;
 }
 
 export type Ref = { kind: 'username'; value: string } | { kind: 'id'; value: number } | { kind: 'invite'; hash: string };
@@ -116,14 +133,41 @@ export function explain(err: unknown): ReaderError {
     const s = e.seconds ?? Number(/FLOOD_WAIT_(\d+)/.exec(code)?.[1] ?? 60);
     return new ReaderError(`Telegram asked the reader account to slow down for ${s}s`, s);
   }
-  if (/USERNAME_NOT_OCCUPIED|USERNAME_INVALID|No user has|Cannot find any entity/i.test(code)) {
+  if (/FROZEN_METHOD_INVALID|FROZEN_PARTICIPANT_MISSING/.test(code)) {
+    return new ReaderError('Telegram has FROZEN the reader account: it can only appeal. Open Telegram on the phone and follow the appeal link it shows; do not retry from here');
+  }
+  if (/USER_DEACTIVATED_BAN/.test(code)) {
+    return new ReaderError('Telegram BANNED the reader account. Logging in again will not help: appeal through recover@telegram.org or @SpamBot');
+  }
+  if (/AUTH_KEY_DUPLICATED/.test(code)) {
+    return new ReaderError('the reader session was used by two processes at once and Telegram revoked it: stop the other process (another `npm start` or `npm run probe`), then run `npm run login` again');
+  }
+  if (/AUTH_KEY_UNREGISTERED|SESSION_REVOKED|SESSION_EXPIRED|USER_DEACTIVATED/.test(code)) {
+    return new ReaderError('the reader account session is no longer valid (logged out or terminated): run `npm run login` again');
+  }
+  if (/PEER_FLOOD|USER_RESTRICTED/.test(code)) {
+    return new ReaderError('Telegram has limited the reader account (spam restriction): stop joining and contacting; check @SpamBot');
+  }
+  if (/CHANNELS_TOO_MUCH/.test(code)) {
+    return new ReaderError('the reader account is in too many groups and channels (Telegram caps this): leave some first');
+  }
+  if (/CHANNEL_PUBLIC_GROUP_NA/.test(code)) {
+    return new ReaderError('this public group is not available to the account (Telegram restricts it)');
+  }
+  if (/USERNAME_NOT_OCCUPIED|USERNAME_INVALID|No user has/i.test(code)) {
     return new ReaderError('no public group or channel has that username');
   }
-  if (/CHANNEL_PRIVATE|CHANNEL_INVALID|CHAT_ADMIN_REQUIRED|CHAT_FORBIDDEN|PEER_ID_INVALID/.test(code)) {
-    return new ReaderError('the reader account cannot see it: join it first in the Telegram app (private groups need an invite)');
+  if (/Cannot find any entity/i.test(code)) {
+    return new ReaderError('Telegram did not return that chat to this account (unknown name, or not visible to it)');
   }
-  if (/AUTH_KEY_UNREGISTERED|SESSION_REVOKED|SESSION_EXPIRED|USER_DEACTIVATED|AUTH_KEY_DUPLICATED/.test(code)) {
-    return new ReaderError('the reader account session is no longer valid: run `npm run login` again');
+  if (/CHANNEL_PRIVATE/.test(code)) {
+    return new ReaderError('the account cannot see this chat: for a private group it must join first; for a PUBLIC group this usually means the account was banned from it (joining again will not help)');
+  }
+  if (/CHANNEL_INVALID|PEER_ID_INVALID/.test(code)) {
+    return new ReaderError('the saved address of this chat no longer works; it will be looked up again on the next read');
+  }
+  if (/CHAT_FORBIDDEN/.test(code)) {
+    return new ReaderError('the account is not allowed in this chat (removed or never a member)');
   }
   return new ReaderError(code.slice(0, 200));
 }
@@ -333,6 +377,10 @@ export class Reader {
 
   private info(e: MtEntity): SourceInfo {
     if (e.className === 'User') throw new ReaderError('that is a person, not a group or channel');
+    const everywhere = (e.restrictionReason ?? []).filter((r) => r.platform === 'all');
+    if (everywhere.length) {
+      throw new ReaderError(`Telegram restricts this chat for every client (${everywhere.map((r) => r.reason).join(', ')}: ${everywhere[0].text.slice(0, 120)}); it is not read`);
+    }
     const chatId = chatIdOf(e);
     this.entities.set(chatId, e);
     return {
@@ -342,18 +390,37 @@ export class Reader {
       type: e.className === 'Channel' ? (e.broadcast ? 'channel' : 'supergroup') : 'group',
       ref: e.username ? `@${e.username}` : String(chatId),
       members: e.participantsCount ?? null,
+      peer: peerOf(e),
     };
   }
 
   private async entity(chat: ChatRow): Promise<MtEntity> {
     const hit = this.entities.get(chat.chatId);
     if (hit) return hit;
+    // The saved address: no name resolution after a restart (resolving is the scarcest budget).
+    if (chat.readerPeer && this.deps.client.inputPeer) {
+      try {
+        const e = this.deps.client.inputPeer(JSON.parse(chat.readerPeer));
+        this.entities.set(chat.chatId, e);
+        return e;
+      } catch {
+        // unreadable: resolve below and save a fresh one
+      }
+    }
     const ref = parseRef(chat.readerRef ?? String(chat.chatId));
     const e = await (ref?.kind === 'username' ? this.deps.client.getEntity(ref.value) : this.byId(chat.chatId)).catch((err) => {
       throw explain(err);
     });
     this.entities.set(chat.chatId, e);
+    const peer = peerOf(e);
+    if (peer) this.deps.store.updateChat(chat.chatId, { readerPeer: peer });
     return e;
+  }
+
+  /** Forgets a chat's address (it went stale): the next read resolves it again. */
+  forgetPeer(chatId: number): void {
+    this.entities.delete(chatId);
+    this.deps.store.updateChat(chatId, { readerPeer: null });
   }
 
   /** Chats whose last pull stopped before reaching the newest message (a long time offline). */
@@ -400,6 +467,9 @@ export class Reader {
     const entity = await this.entity(chat);
     const now = this.deps.now();
     const fail = (err: unknown): never => {
+      // A saved address can go stale (CHANNEL_INVALID): forget it, so the next pull resolves afresh.
+      const code = (err as { errorMessage?: string }).errorMessage ?? '';
+      if (/CHANNEL_INVALID|PEER_ID_INVALID/.test(code) && chat.readerPeer) this.forgetPeer(chatId);
       throw explain(err);
     };
 
