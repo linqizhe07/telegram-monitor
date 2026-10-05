@@ -24,7 +24,7 @@
 | 引用到闲聊噪音 | 0/61 | 0/54 | 0/28 |
 | 发到 Telegram 的可见字数 | 3,593 | 2,916 | 2,857 |
 
-
+一轮 RSI：盲测胜率 0%，保留 v0。
 
 ## 第 1 步：种子 playbook（v0）写的两天摘要
 
@@ -212,11 +212,56 @@ Style:
 
 ## 第 5 步：盲测，候选 vs 现任，正反各一次
 
-盲测还在进行：两个评审各自独立回答（正序、反序各一次），回答完会补到这里。
+| 顺序 | 评审判定 | 把握 | 理由 |
+|---|---|---|---|
+| 候选在 A 位 | 现任 v0 | medium | Both digests get the main threads right: U7's misparsed position-cut order, the Arcbridge exploit and the bridge-API proposal, the weekend tokenized-stock premium, CEX vs DEX, and Polymarket. B backs nearly every claim with a message it cites and puts each item in the right section. It has separate pain points for keys with no limits and for nobody being able to judge bridge safety, U3's and U13's proposals as ideas, and Arcbridge fund recovery as a real open question. A crams whole threads into single items, so many statements (the 2.1%/1.6% premiums, the bounty and recovery outlook, U2/U12/U14's remarks) rest on messages it does not cite; it also credits U9 with U8's volume observation and files the Arcbridge news and U7's incident only as Opportunities, and although A is richer in detail and next steps and avoids B's repetition, faithfulness and section fit rank higher. |
+| 现任在 A 位 | 现任 v0 | high | A is the more faithful digest: every claim I checked is backed by the messages it cites and credited to the right alias, while B crams whole conversations into single items whose six refs leave much of what they report uncited, and it credits U8's 'volume is a fraction of weekdays' remark to U9. A also files content in the right places (the four main threads as topics, then distinct pain points, proposals, openings and still-open questions), whereas B leaves Topics with only the CEX/DEX debate and packs the Arcbridge news and aftermath and U7's whole incident into Opportunities, burying the unanswered question of whether users get their money back. B's extra detail, lack of cross-section repetition and inclusion of U4's summary-bot request do not outweigh this; A's main cost is some repeated context across sections. |
+
+评审胜率 **0%**（采用门槛 62.5%）；引用核验 100% → 100%（通过）；热门讨论覆盖 100% → 88%（不通过）。
+
+**结论：不采用。** 现任 v0 保留；这一轮的结果写进谱系，改进者下一轮会看到。
+
+<details>
+<summary>评审指出的候选 v1 弱点（两位评审合并）</summary>
+
+- Many claims rest on messages missing from the item's refs: the pain point's 2.1% and 1.6% premiums (#5184, #5209), the under-$30k order book (#5142) and U3's 'tax' line (#5150); Opportunity 1's official post-mortem notice (#5162), U2's false-alarm worry and U10's reply (#5159, #5160), and the bounty and recovery outlook (#5196, #5214); Opportunity 2's U2, U12 and U14 remarks (#5136-#5138).
+- Credits U9 with noting that Sunday volume was a fraction of weekday volume; that observation is U8's (#5184), and U9 only built on it (#5185).
+- Loose section fit: the Arcbridge news and its bounty/recovery aftermath sit inside an Opportunity, the unlimited-key problem from U7's incident appears only as an Opportunity, and there is just one pain point even though unlimited keys and bridge safety were clear problems people raised.
+- Ideas holds only U4's meta request for a summary bot, which drew nothing but a joke, while U13's 'execution on CEX, funds and authorization on-chain' proposal is buried inside the Topic.
+- Items are dense walls of text (the CEX/DEX Topic and Opportunity 1 especially), and people lists leave out members the text credits (U6 in the Topic, U9 in Opportunity 1).
+- Many claims are not supported by the messages cited: the bridge opportunity cites #5121, #5152, #5155, #5157, #5187 and #5212 but also reports U10's advice on which bridge to use (#5154), U12 (#5156), U8 (#5158), U2's false-alarm worry and U10's reply (#5159-#5160), U6 (#5161), the bounty offer (#5196) and the recovery outlook (#5214); the CEX/DEX topic draws on #5171-#5174, #5176-#5178 and #5203-#5205 without citing them; the premium item leaves #5142, #5143, #5150, #5184 and #5209 uncited; the limit-card item leaves U2, U12 and U14 (#5136-#5138) uncited.
+- Misattribution: it says U9 pointed out that Sunday volume was only a fraction of weekday volume, but that was U8 (#5184); U9 (#5185) only replied that with volume that thin the narrowing proved little.
+- Presents the 90% bounty as something the project itself offered, without noting it is U10's relay of what the project said (#5196).
+- Sectioning: Topics holds only the CEX/DEX debate, while the two most-engaged threads (Arcbridge, U7's agent mishap) are folded into Opportunities together with news and aftermath that are not openings (the bounty, the attacker moving funds, U6 switching to exchange deposits); the still-unanswered question of whether users get their money back is buried there instead of listed as open.
+- Items are long run-on paragraphs that are hard to scan and carry minor chatter such as the voice-note exchange.
+- Chronology blur: U11's suggestion to settle the CEX/DEX debate at the meetup (#5182, 14:31) reads as if it followed the evening wick exchange.
+
+</details>
+
+<details>
+<summary>评审指出的现任 v0 弱点（两位评审合并）</summary>
+
+- Threads are spread over many items, with some repetition. U7's incident spans Topic 1, Pain point 1, Idea 1 and Opportunity 2, and the point that exchanges cannot tell an agent from its owner appears in both Topic 1 and Pain point 1. Arcbridge spans four items, with the 40-minute window repeated. CEX vs DEX appears as both Topic 3 and Open question 1.
+- Drops some specifics that A keeps: the nearly 3 minutes U7 needed to revoke the key, Arcbridge's own pause and post-mortem notice (#5162), and U9's remark that this year's bridge hacks are past counting (#5126).
+- Leaves out U4's summary-bot request (#5207, 9 reactions), although nobody followed it up.
+- Next steps are narrower than A's: there is no plan to test willingness to pay or to line up the members who asked for the bridge API. Topic 2 also lists U5 as a participant without saying what U5 said.
+- The same threads recur across sections: U7's incident appears in Topic 1, Pain point 1, Idea 1 and Opportunity 2, Arcbridge in Topic 2, Pain point 2, Opportunity 1 and Open question 3 (the 40-minute window is stated twice), and the tokenized-stock premium is split between Topic 4 and Pain point 3.
+- Omits U4's proposal for a bot that posts a daily pain-point/opportunity summary of the chat (#5207, 9 reactions), a standalone proposal with real engagement.
+- Topic 2 lists U5 among its people without saying what U5 contributed (#5188).
+
+</details>
 
 ## 这次干跑说明了什么，没说明什么
 
-- **说明了**：提示词能被正确理解；输出能通过结构化 schema 和代码检查；RSI 这一轮每一步都按设计走通了：批评指出具体问题，改进者针对问题改规则并写下自己的策略，候选重写，盲测，再由选择门槛决定。
+- **说明了**：提示词能被正确理解，输出能通过结构化 schema 和代码检查。RSI 这一轮每一步都按设计走通了：批评指出具体问题，改进者针对问题改规则并写下自己的策略，候选重写，盲测，最后由选择门槛决定。
+- **这一轮拒掉了一个听起来合理的改动。**「每条线索只放一处、讲完整」确实消除了重复（评审也承认），但条目合得太大：
+  - 热门讨论覆盖从 8/8 掉到 7/8；
+  - 埋点放进对的栏目从 9/10 掉到 5/10；
+  - 两位评审都更喜欢现任，正反两次都是。
+
+  门槛和评审各自独立地挡住了它。外部埋点核对的结论是有得有失：它找到的埋点反而更多（10/10），但放进对的栏目的少了将近一半（9/10 → 5/10）。
+- **评审抓到了代码抓不到的问题。** 候选把整条线索塞进一个条目后，很多说法超出了它引用的那几条消息，还把 U8 的话记成了 U9 的。代码检查只能保证「引用的消息存在、引文原样存在」，保证不了每句话都有出处，所以需要评审这一层。
+- **下一轮的方向已经写进改进者自己的笔记**：如果 repair 输了，就试 simplify（把 Ideas 并进 Opportunities）。这一轮的结果会作为谱系交还给它，这就是递归的那一层。
 - **没说明**：
   - 这不是真实的 API 调用；
   - 只有一个合成群聊、一个评估窗口，批评和评估用的是同一天，样本内外有重叠；
