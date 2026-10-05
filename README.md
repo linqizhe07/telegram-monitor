@@ -4,6 +4,9 @@
 
 **完整上手指南：[COOKBOOK.md](COOKBOOK.md)**，从注册账号到 24 小时部署，按步骤来。
 
+
+> **2026-10 更新**：不配 bot 和 API key 也能用。`npm start` 自带本地控制台（http://127.0.0.1:4830），账号的每个请求都实时可见；离线期间的消息上线后按时间补齐；读之前先去噪。摘要由 Claude 桌面端通过 MCP（`src/mcp.ts`）和定时任务来写。见 [COOKBOOK.md 第 6A 节](COOKBOOK.md#6a-不配-bot不配-api-key控制台--claude-桌面端)。
+
 ## 两种接法
 
 | | 别人的群（Binance、OKX…） | 你自己管的群 |

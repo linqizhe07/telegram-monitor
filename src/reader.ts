@@ -7,6 +7,7 @@
 // groups must be joined first, by a person, in the Telegram app (that is also where any "I am not
 // a robot" check gets answered). The reader is read-only: it never posts, reacts or joins.
 
+import type { Activity } from './activity.ts';
 import type { Config } from './config.ts';
 import type { ChatRow, StoredMessage, Store } from './store.ts';
 import type { Window } from './transcript.ts';
@@ -53,7 +54,14 @@ export interface MtClient {
   getEntity(ref: string | number): Promise<MtEntity>;
   /** The account's own chats (also teaches GramJS the access hashes of private groups it has joined). */
   getDialogs(params: { limit?: number }): Promise<{ entity?: MtEntity; title?: string }[]>;
-  getMessages(entity: MtEntity, params: { limit?: number; offsetId?: number; minId?: number; ids?: number[] }): Promise<(MtMessage | undefined)[]>;
+  /**
+   * messages.getHistory through GramJS: newest first by default; with `reverse`, oldest first
+   * starting after `minId`; with `offsetDate`, the newest messages sent before that time.
+   */
+  getMessages(
+    entity: MtEntity,
+    params: { limit?: number; offsetId?: number; minId?: number; ids?: number[]; reverse?: boolean; offsetDate?: number },
+  ): Promise<(MtMessage | undefined)[]>;
 }
 
 export interface SourceInfo {
@@ -228,10 +236,16 @@ export interface ReaderDeps {
   config: Config;
   log: (line: string) => void;
   now: () => number;
+  /** Pause between history pages (default 250ms), so a big first pull does not hammer Telegram. */
+  pageDelayMs?: number;
+  /** Where pulls and their failures are shown (the console). */
+  activity?: Activity | null;
 }
 
 const PAGE = 100;
-const MAX_PAGES_PER_PULL = 50;
+// Pages per pull. A pull that stops at the cap is not lost: the cursor is committed page by page
+// and the next pull continues from it (a busy group passed 8,000 messages a day on 2026-10-05).
+const MAX_PAGES_PER_PULL = 100;
 
 export class Reader {
   private readonly deps: ReaderDeps;
@@ -314,49 +328,153 @@ export class Reader {
     return e;
   }
 
+  /** Chats whose last pull stopped before reaching the newest message (a long time offline). */
+  private readonly behind = new Set<number>();
+  private readonly locks = new Map<number, Promise<unknown>>();
+
+  /** One pull at a time per chat, so two pulls never race over the cursor. */
+  private locked<T>(chatId: number, task: () => Promise<T>): Promise<T> {
+    const prev = this.locks.get(chatId) ?? Promise.resolve();
+    const next = prev.catch(() => undefined).then(task);
+    this.locks.set(chatId, next.catch(() => undefined));
+    return next;
+  }
+
+  isBehind(chatId: number): boolean {
+    return this.behind.has(chatId);
+  }
+
   /**
-   * Stores the messages posted since the last pull, newest page first down to the cursor.
-   * The first pull of a chat goes back 24 hours.
+   * Stores every message posted after the cursor, OLDEST FIRST, committing the cursor after each
+   * page. So whatever was posted while the service was off (asleep, stopped, offline) is fetched
+   * when it comes back, by the messages' own timestamps; a pull cut short (page cap, error, crash)
+   * resumes exactly where it stopped and never skips a gap.
+   *
+   * The first pull of a chat starts 24 hours back. A cursor older than the retention period is
+   * moved up to it: those messages would be deleted on arrival anyway.
    */
-  async pull(chat: ChatRow): Promise<number> {
-    const { client, store } = this.deps;
+  pull(chat: ChatRow): Promise<number> {
+    return this.locked(chat.chatId, () => this.pullLocked(chat.chatId));
+  }
+
+  private async pullLocked(chatId: number): Promise<number> {
+    const { client, store, config } = this.deps;
+    const chat = store.getChat(chatId);
+    if (!chat) return 0;
     const entity = await this.entity(chat);
-    const cursor = chat.readerCursor ?? 0;
-    const floor = this.deps.now() - 86_400;
-    const fresh: MtMessage[] = [];
-    let newest = cursor;
-    let offsetId = 0;
-    for (let page = 0; page < MAX_PAGES_PER_PULL; page++) {
-      const batch = (await client.getMessages(entity, { limit: PAGE, offsetId, minId: cursor }).catch((err) => {
-        throw explain(err);
-      })).filter((m): m is MtMessage => Boolean(m));
-      if (batch.length === 0) break;
-      newest = Math.max(newest, ...batch.map((m) => m.id));
-      let reachedFloor = false;
-      for (const m of batch) {
-        if (m.id <= cursor) continue;
-        if (cursor === 0 && m.date < floor) {
-          reachedFloor = true;
-          break;
-        }
-        fresh.push(m);
+    const now = this.deps.now();
+    const fail = (err: unknown): never => {
+      throw explain(err);
+    };
+
+    let cursor = chat.readerCursor;
+    const cursorDate = Number(store.getKv(`reader_cursor_date:${chatId}`) ?? NaN);
+    const floor = cursor === null ? now - 86_400 : now - config.retentionDays * 86_400;
+    if (cursor === null || cursorDate < floor) {
+      // The newest message from before the floor: everything after it gets fetched.
+      const [before] = (await client.getMessages(entity, { limit: 1, offsetDate: floor }).catch(fail)).filter((m): m is MtMessage => Boolean(m));
+      const anchor = before?.id ?? 0;
+      if (cursor !== null && anchor > cursor) {
+        this.deps.activity?.event('reader', 'skipped', chat.title, `messages older than ${config.retentionDays} days (retention) were not fetched`);
       }
-      if (reachedFloor || batch.length < PAGE) break;
-      offsetId = Math.min(...batch.map((m) => m.id));
+      if (cursor === null || anchor > cursor) {
+        cursor = anchor;
+        store.updateChat(chatId, { readerCursor: cursor });
+        store.setKv(`reader_cursor_date:${chatId}`, String(before?.date ?? floor));
+      }
     }
 
     let saved = 0;
-    store.transaction(() => {
-      for (const m of fresh.sort((a, b) => a.id - b.id)) {
-        const s = toStored(m, chat.chatId);
-        if (!s) continue;
-        store.upsertUser(chat.chatId, s.author.id, s.author.name, s.author.username);
-        store.saveMessage(s.message);
-        saved++;
+    let caughtUp = false;
+    for (let page = 0; page < MAX_PAGES_PER_PULL; page++) {
+      const from: number = cursor;
+      const batch = (await client.getMessages(entity, { limit: PAGE, minId: from, reverse: true }).catch(fail))
+        .filter((m): m is MtMessage => Boolean(m) && m!.id > from)
+        .sort((a, b) => a.id - b.id);
+      if (batch.length === 0) {
+        caughtUp = true;
+        break;
       }
-      if (newest > cursor) store.updateChat(chat.chatId, { readerCursor: newest });
-    });
+      const last = batch[batch.length - 1];
+      store.transaction(() => {
+        for (const m of batch) {
+          const s = toStored(m, chatId);
+          if (!s) continue;
+          store.upsertUser(chatId, s.author.id, s.author.name, s.author.username);
+          store.saveMessage(s.message);
+          saved++;
+        }
+        store.updateChat(chatId, { readerCursor: last.id });
+        store.setKv(`reader_cursor_date:${chatId}`, String(last.date));
+      });
+      cursor = last.id;
+      if (batch.length < PAGE) {
+        caughtUp = true;
+        break;
+      }
+      const pause = this.deps.pageDelayMs ?? 250;
+      if (pause > 0) await new Promise((r) => setTimeout(r, pause));
+    }
+    if (caughtUp) {
+      this.behind.delete(chatId);
+      store.setKv(`reader_caught_up:${chatId}`, String(now));
+    } else {
+      this.behind.add(chatId);
+    }
     return saved;
+  }
+
+  /**
+   * Checks the capture against Telegram itself: lists what Telegram has for the window (newest
+   * first, independently of the cursor) and compares it with what is stored. Every message is
+   * either stored, or skipped for a stated reason; anything else is reported as missing.
+   */
+  async audit(chat: ChatRow, since: number): Promise<{ checked: number; stored: number; bots: number; service: number; empty: number; missing: number[]; newerThanCursor: number }> {
+    const { client, store } = this.deps;
+    const entity = await this.entity(chat);
+    const cursor = store.getChat(chat.chatId)?.readerCursor ?? 0;
+    const out = { checked: 0, stored: 0, bots: 0, service: 0, empty: 0, missing: [] as number[], newerThanCursor: 0 };
+    let offsetId = 0;
+    for (let page = 0; page < 50; page++) {
+      const batch = (await client.getMessages(entity, { limit: PAGE, offsetId }).catch((err) => {
+        throw explain(err);
+      })).filter((m): m is MtMessage => Boolean(m));
+      if (batch.length === 0) break;
+      const ids = batch.map((m) => m.id);
+      const have = new Set(store.messages(chat.chatId, since - 1, this.deps.now() + 86_400).map((m) => m.messageId));
+      let done = false;
+      for (const m of batch) {
+        if (m.date < since) {
+          done = true;
+          continue;
+        }
+        if (m.id > cursor) {
+          out.newerThanCursor++; // posted after the last pull: the next pull takes it
+          continue;
+        }
+        out.checked++;
+        if (m.className === 'MessageService' || m.action) out.service++;
+        else if (m.sender?.className === 'User' && m.sender.bot) out.bots++;
+        else if (!describeMtMessage(m)) out.empty++;
+        else if (have.has(m.id)) out.stored++;
+        else out.missing.push(m.id);
+      }
+      if (done || batch.length < PAGE) break;
+      offsetId = Math.min(...ids);
+      const pause = this.deps.pageDelayMs ?? 250;
+      if (pause > 0) await new Promise((r) => setTimeout(r, pause));
+    }
+    return out;
+  }
+
+  /** Pulls until the chat is caught up (or `budgetMs` runs out). True when caught up. */
+  async catchUp(chat: ChatRow, budgetMs = 10 * 60_000): Promise<boolean> {
+    const deadline = Date.now() + budgetMs;
+    do {
+      await this.pull(chat);
+      if (!this.behind.has(chat.chatId)) return true;
+    } while (Date.now() < deadline);
+    return false;
   }
 
   async pullNow(chatId: number): Promise<number> {
@@ -401,15 +519,20 @@ export class Reader {
           try {
             const n = await this.pull(chat);
             if (chat.readerError) store.updateChat(chat.chatId, { readerError: null });
-            if (n > 0) log(`reader: ${n} new message${n === 1 ? '' : 's'} from ${chat.title}`);
+            if (n > 0) {
+              log(`reader: ${n} new message${n === 1 ? '' : 's'} from ${chat.title}`);
+              this.deps.activity?.event('reader', 'stored', chat.title, `${n} new message${n === 1 ? '' : 's'}`);
+            }
           } catch (err) {
             const e = explain(err);
             store.updateChat(chat.chatId, { readerError: e.message.slice(0, 300) });
             log(`reader: ${chat.title}: ${e.message}`);
+            this.deps.activity?.event('reader', 'pull failed', chat.title, e.message, false);
             if (e.retryAfter) await sleep(e.retryAfter * 1000);
           }
         }
-        if (!stopped) await sleep(config.readerPollSeconds * 1000 * (0.85 + Math.random() * 0.3));
+        // Still catching up somewhere (back from a long time offline): go again soon.
+        if (!stopped) await sleep(this.behind.size > 0 ? 2_000 : config.readerPollSeconds * 1000 * (0.85 + Math.random() * 0.3));
       }
     };
     void loop();

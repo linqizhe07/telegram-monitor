@@ -191,6 +191,67 @@ reader account: @your_reader_account        ← 监控模式才有
 
 ---
 
+## 6A. 不配 bot、不配 API key：控制台 + Claude 桌面端
+
+只要读者账号登录好（第 4 步），`npm start` 就能跑。`TELEGRAM_BOT_TOKEN` 和 `ANTHROPIC_API_KEY` 都可以空着：
+
+- 没有 bot：摘要不发 Telegram，留在本地控制台里。
+- 没有 API key：服务只负责收消息，摘要由 Claude 桌面端来写，用你自己的 Claude 订阅。
+
+### 控制台：它到底干了什么
+
+浏览器打开 http://127.0.0.1:4830 。只有本机能访问，页面的每个操作都要带一个随机令牌，别的网站伪造不了请求。
+
+| 区块 | 看什么 |
+|---|---|
+| Reader account | 登录的是哪个号；随时可以在 Telegram → 设置 → 设备里终止 |
+| Account actions | 24 小时内账号发给 Telegram 的请求：读几次、**写几次**（加群、发言、按按钮、标已读都算写）。正常是 0 次写 |
+| Sources | 每个群：从外面读，还是已是成员；过去 24 小时存了多少条；群的日均量；门口的守卫（入群审批、隐藏历史、群里的机器人）；是否已追平 |
+| Activity | 账号发出的**每一个**请求，实时滚动。GramJS 所有请求都经过同一个被记录的入口，只有建连接的握手和心跳不记（它们不涉及任何群） |
+| Captured messages | `Signal` = 去噪后 Claude 实际读到的内容；`All` = 原始消息 |
+| Digests | Claude 写好的摘要 |
+
+每个群有两个按钮：**Catch up**（立刻追平）和 **Audit 1h**（拿 Telegram 那边最近一小时的消息逐条对账：要么已存，要么写明为什么跳过，比如机器人或系统消息；其余都会报「缺失」）。
+
+### 离线期间的消息
+
+游标是「已经拿到的最后一条消息的 id」。服务重新跑起来时（电脑睡醒、重启、断网恢复），会从游标开始**按时间从旧到新**一页一页拉，每拉完一页就提交一次游标，直到追平。所以：
+
+- 离线期间发的消息全部补进来，用的是消息本身的发送时间。
+- 中途断网或进程被杀，下次从断点继续，不会跳过任何一段。
+- 写摘要之前会先追平，摘要不会漏掉刚补回来的那部分。
+- 离线超过保留期（`PULSE_RETENTION_DAYS`，默认 7 天），只补保留期内的，更早的到了也会被删掉。
+
+2026-10-05 用真实群验证过：离线两次、共约 7 分钟，补回后对账结果是「476 条中 468 条已存，8 条是机器人，缺失 0」。
+
+### 去噪
+
+大群一天几千条，大部分是贴纸、「哈哈」、碎句、刷屏和拉人私聊的骗子。读之前先用代码过一遍（`src/denoise.ts`，规则固定，不靠模型）：
+
+1. **去掉**：纯贴纸和表情、单字闲聊（早、哈哈、666、gm…）、发给机器人的命令、诈骗和推广（私聊带单、进群领空投、t.me 邀请链接）。有人回复或点了反应的消息一律保留。
+2. **合并**：同一个人 90 秒内的连续碎句合成一行；同一句话被很多人刷，折叠成一行，并标上「×次数 by 人数」。很多人同时喊「提现不了」，本身就是信号。
+3. **按对话分组**：用回复关系把消息串成一段段对话。整段都和加密、交易、交易所、钱无关的（学历、相亲、闲聊）**折叠**成一段说明，需要时可以展开。
+
+币安官方中文群 2026-10-05 的实测：5,174 条 → 去掉 1,100 多条噪音 → 合并后 3,187 行 → 相关对话 505 段、872 行，约 4 万字；折叠掉的无关闲聊约 10 万字。Claude 读 3 页，而不是 12 页。
+
+### 接入 Claude 桌面端
+
+`src/mcp.ts` 是一个 MCP 服务，Claude 通过它读数据、写摘要。注册一次：
+
+```bash
+claude mcp add --scope user telegram-monitor -- /opt/homebrew/bin/node --no-experimental-webstorage --env-file-if-exists=/path/to/tg-pulse/.env /path/to/tg-pulse/src/mcp.ts
+```
+
+这条命令是给 Claude Code 和定时任务用的。桌面端的聊天要在 `~/Library/Application Support/Claude/claude_desktop_config.json` 的 `mcpServers` 里加同样的 command 和 args，然后重启 Claude。
+
+工具：`list_sources`、`read_messages`（默认是去噪后的信号，可切 `off-topic` 或 `all`，分页）、`overview`、`search_messages`、`get_playbook`、`save_digest`、`account_activity`、`catch_up_now`、`audit_capture`、`check_group`（只读查看一个群）、`watch_source`（开始读，从不加群）。
+
+需要动用 Telegram 的工具，会通过正在运行的服务去请求，**不会**另开一个连接：同一个会话在两处同时使用，可能被 Telegram 判定冲突而作废（AUTH_KEY_DUPLICATED）。
+
+每天的摘要用 Claude 桌面端的定时任务跑（侧边栏 Scheduled → 「Telegram 群每日摘要（去噪）」，每天 9:03）：先追平，读完所有去噪后的信号页，按 话题 / 痛点 / 新想法 / 机会 / 待解问题 写成摘要，每条都标上引用的消息 #id，最后存进控制台和 `data/digests/`。第一次请在侧边栏点 **Run now**，把它要用的工具批准一次，之后自动运行。注意定时任务只在桌面端开着时运行；错过的会在下次打开时补跑。
+
+---
+
 ## 7. 开始监控
 
 在报告台（私聊 bot，或团队私密群）里发：

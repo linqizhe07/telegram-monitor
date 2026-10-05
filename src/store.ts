@@ -123,6 +123,38 @@ export interface FeedbackRow {
   createdAt: number;
 }
 
+/**
+ * One thing the service did: every request the reader account sends to Telegram, every message
+ * the bot sends, every Claude call. The console shows these live, so nothing happens unseen.
+ * read   = looks only (history, chat info, resolving a name)
+ * write  = changes something others can see or the account's state (join, send, mark read, press a button)
+ * system = connection upkeep (config, update state, keep-alive)
+ */
+export type ActivityKind = 'read' | 'write' | 'system' | 'llm' | 'event' | 'error';
+
+export interface ActivityRow {
+  id: number;
+  at: number;
+  /** reader | bot | engine | console | probe */
+  actor: string;
+  kind: ActivityKind;
+  /** The Telegram method (e.g. messages.GetHistory) or a short event name. */
+  method: string;
+  target: string;
+  detail: string;
+  ok: boolean;
+  ms: number | null;
+}
+
+/** A message that would have gone to Telegram, kept for the console when no bot token is set. */
+export interface OutboxRow {
+  id: number;
+  at: number;
+  chatId: number;
+  html: string;
+  delivered: boolean;
+}
+
 export interface ChatDefaults {
   language: Lang;
   digestHour: number;
@@ -247,6 +279,25 @@ CREATE TABLE IF NOT EXISTS usage (
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS activity (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at INTEGER NOT NULL,
+  actor TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  method TEXT NOT NULL,
+  target TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT '',
+  ok INTEGER NOT NULL DEFAULT 1,
+  ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS activity_by_time ON activity (at);
+CREATE TABLE IF NOT EXISTS outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at INTEGER NOT NULL,
+  chat_id INTEGER NOT NULL,
+  html TEXT NOT NULL,
+  delivered INTEGER NOT NULL DEFAULT 0
+);
 `;
 
 type Row = Record<string, unknown>;
@@ -889,6 +940,103 @@ export class Store {
     );
     const out = { digest: 0, rsi: 0 };
     for (const r of rows) out[str(r.k) as 'digest' | 'rsi'] = Number(r.c);
+    return out;
+  }
+
+  usageTotals(since: number): { calls: number; costUsd: number; inputTokens: number; outputTokens: number } {
+    const r = this.get(
+      'SELECT COUNT(*) AS n, SUM(COALESCE(cost_usd, 0)) AS c, SUM(input_tokens + cache_read + cache_write) AS i, SUM(output_tokens) AS o FROM usage WHERE created_at > ?',
+      since,
+    );
+    return { calls: num(r?.n ?? 0), costUsd: Number(r?.c ?? 0), inputTokens: num(r?.i ?? 0), outputTokens: num(r?.o ?? 0) };
+  }
+
+  // ── activity (what the service did) ──────────────────────────────────────
+
+  addActivity(a: Omit<ActivityRow, 'id' | 'at'> & { at?: number }): ActivityRow {
+    const at = a.at ?? this.clock();
+    const { lastId } = this.run(
+      'INSERT INTO activity (at, actor, kind, method, target, detail, ok, ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      at,
+      a.actor,
+      a.kind,
+      a.method,
+      a.target.slice(0, 200),
+      a.detail.slice(0, 1000),
+      a.ok ? 1 : 0,
+      a.ms,
+    );
+    return { ...a, at, id: lastId, target: a.target.slice(0, 200), detail: a.detail.slice(0, 1000) };
+  }
+
+  private toActivity(r: Row): ActivityRow {
+    return {
+      id: num(r.id),
+      at: num(r.at),
+      actor: str(r.actor),
+      kind: str(r.kind) as ActivityKind,
+      method: str(r.method),
+      target: str(r.target),
+      detail: str(r.detail),
+      ok: Boolean(r.ok),
+      ms: numOrNull(r.ms),
+    };
+  }
+
+  /** The newest `limit` rows (oldest first), or the rows after `afterId`. */
+  activity(opts: { afterId?: number; limit?: number; kind?: ActivityKind } = {}): ActivityRow[] {
+    const limit = Math.min(Math.max(opts.limit ?? 200, 1), 2000);
+    const where = ['id > ?'];
+    const params: Param[] = [opts.afterId ?? 0];
+    if (opts.kind) {
+      where.push('kind = ?');
+      params.push(opts.kind);
+    }
+    const rows = this.all(`SELECT * FROM activity WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`, ...params, limit);
+    return rows.map((r) => this.toActivity(r)).reverse();
+  }
+
+  /** How many requests of each kind since `since`, and the last write. */
+  activitySummary(since: number): { counts: Record<string, number>; lastWrite: ActivityRow | null; errors: number } {
+    const counts: Record<string, number> = {};
+    for (const r of this.all('SELECT kind, COUNT(*) AS n FROM activity WHERE at > ? GROUP BY kind', since)) counts[str(r.kind)] = num(r.n);
+    const w = this.get("SELECT * FROM activity WHERE kind = 'write' ORDER BY id DESC LIMIT 1");
+    const errors = num(this.get('SELECT COUNT(*) AS n FROM activity WHERE at > ? AND ok = 0', since)?.n ?? 0);
+    return { counts, lastWrite: w ? this.toActivity(w) : null, errors };
+  }
+
+  pruneActivity(before: number): number {
+    return this.run('DELETE FROM activity WHERE at < ?', before).changes;
+  }
+
+  addOutbox(chatId: number, html: string, delivered: boolean): number {
+    return this.run('INSERT INTO outbox (at, chat_id, html, delivered) VALUES (?, ?, ?, ?)', this.clock(), chatId, html, delivered ? 1 : 0).lastId;
+  }
+
+  outbox(limit = 50): OutboxRow[] {
+    return this.all('SELECT * FROM outbox ORDER BY id DESC LIMIT ?', limit).map((r) => ({
+      id: num(r.id),
+      at: num(r.at),
+      chatId: num(r.chat_id),
+      html: str(r.html),
+      delivered: Boolean(r.delivered),
+    }));
+  }
+
+  /** Recent digests of every chat, newest first (for the console). */
+  recentDigests(limit = 30): DigestRow[] {
+    return this.all("SELECT * FROM digests WHERE kind != 'shadow' ORDER BY id DESC LIMIT ?", limit).map((r) => this.toDigest(r));
+  }
+
+  /** Message count per chat since `since`, and the newest stored message date. */
+  messageStats(since: number): Map<number, { count: number; newest: number | null; people: number }> {
+    const out = new Map<number, { count: number; newest: number | null; people: number }>();
+    for (const r of this.all(
+      'SELECT chat_id, COUNT(*) AS n, MAX(date) AS newest, COUNT(DISTINCT user_id) AS people FROM messages WHERE date > ? GROUP BY chat_id',
+      since,
+    )) {
+      out.set(num(r.chat_id), { count: num(r.n), newest: numOrNull(r.newest), people: num(r.people) });
+    }
     return out;
   }
 

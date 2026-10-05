@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="console-token" content="__CONSOLE_TOKEN__">
+<title>Monitor Console</title>
+<link rel="stylesheet" href="/console.css">
+<script src="/console.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <div>
+      <h1>Telegram Monitor</h1>
+      <p class="sub">Console · this computer only (127.0.0.1)</p>
+    </div>
+  </div>
+  <div class="live" id="live"><span class="dot"></span><span id="live-text">connecting…</span></div>
+</header>
+
+<main>
+  <section class="cards" id="cards" aria-label="Status"></section>
+
+  <section class="panel" aria-labelledby="sources-h">
+    <div class="panel-head">
+      <h2 id="sources-h">Sources</h2>
+      <p class="hint">Groups and channels the reader account reads. Reading from outside means the account never joined.</p>
+    </div>
+    <div class="table-wrap"><table class="sources" id="sources"></table></div>
+    <form class="add" id="add-form" autocomplete="off">
+      <input id="add-input" placeholder="@username, t.me link, or invite link" aria-label="Group or channel to check">
+      <button type="submit" id="probe-btn">Check (read-only)</button>
+    </form>
+    <div id="probe-result" hidden></div>
+  </section>
+
+  <div class="split">
+    <section class="panel" aria-labelledby="activity-h">
+      <div class="panel-head">
+        <h2 id="activity-h">Activity</h2>
+        <div class="chips" id="filters" role="tablist" aria-label="Filter activity">
+          <button data-f="all" class="on">All</button>
+          <button data-f="read">Reads</button>
+          <button data-f="write">Writes</button>
+          <button data-f="event">Events</button>
+          <button data-f="llm">Claude</button>
+          <button data-f="error">Errors</button>
+        </div>
+      </div>
+      <p class="hint">Every request the reader account sends to Telegram, as it happens. A write is anything other people could notice or that changes the account (join, send, mark as read, press a button).</p>
+      <ol class="feed" id="feed" aria-live="polite"></ol>
+    </section>
+
+    <section class="panel" aria-labelledby="side-h">
+      <div class="panel-head">
+        <h2 id="side-h">Captured messages</h2>
+        <div class="chips" id="msg-view" role="tablist" aria-label="Messages view">
+          <button data-v="signal" class="on">Signal</button>
+          <button data-v="all">All</button>
+        </div>
+        <select id="msg-source" aria-label="Source"></select>
+      </div>
+      <p class="hint" id="msg-hint">Noise removed, fragments joined, on-topic conversations only: what Claude reads for the digest.</p>
+      <ol class="msgs" id="msgs"></ol>
+    </section>
+  </div>
+
+  <section class="panel" aria-labelledby="out-h">
+    <div class="panel-head">
+      <h2 id="out-h">Digests &amp; outgoing messages</h2>
+    </div>
+    <p class="hint" id="out-hint"></p>
+    <ol class="outbox" id="outbox"></ol>
+  </section>
+</main>
+<div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

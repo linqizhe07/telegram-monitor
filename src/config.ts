@@ -40,6 +40,8 @@ export interface Config {
   watch: string[];
   /** Chat that receives digests of watched groups: your user id (a DM with the bot) or a private group id. */
   reportTo: number | null;
+  /** Local console port (http://127.0.0.1:port); 0 turns it off. */
+  consolePort: number;
 }
 
 const EFFORTS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -125,6 +127,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     readerSession: env.PULSE_READER_SESSION?.trim() || './data/reader.session',
     readerPollSeconds: field('PULSE_READER_POLL_SECONDS', () => int(env.PULSE_READER_POLL_SECONDS, 120, 30, 3600)),
     watch: (env.PULSE_WATCH ?? '').split(/[,\s]+/).map((x) => x.trim()).filter(Boolean),
+    consolePort: field('PULSE_CONSOLE_PORT', () => int(env.PULSE_CONSOLE_PORT, 4830, 0, 65535)),
     reportTo: field('PULSE_REPORT_TO', () => {
       const raw = env.PULSE_REPORT_TO?.trim();
       if (!raw) return ownerIds[0] ?? null;

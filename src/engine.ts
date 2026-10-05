@@ -16,8 +16,11 @@ export interface EngineDeps {
   api: TelegramClient;
   now: () => number;
   log: (line: string) => void;
-  /** The reader account, when one is signed in: refreshes reactions and edits of watched chats before a digest. */
-  reader?: { refresh(chat: ChatRow, window: Window): Promise<void> } | null;
+  /**
+   * The reader account, when one is signed in. Before a watched chat's digest it catches up (so
+   * messages posted while the service was offline are in) and refreshes reactions and edits.
+   */
+  reader?: { refresh(chat: ChatRow, window: Window): Promise<void>; catchUp?(chat: ChatRow): Promise<boolean> } | null;
 }
 
 const pct = (x: number | null) => (x === null ? 'n/a' : `${Math.round(x * 100)}%`);
@@ -100,7 +103,13 @@ export class Engine {
       const post = { replyTo: opts.replyTo, threadId: opts.threadId, to: opts.to };
 
       if (chat.kind === 'watched' && this.deps.reader) {
-        await this.deps.reader.refresh(chat, window).catch((err) => log(`chat ${chatId}: reader refresh failed: ${describeError(err)}`));
+        const reader = this.deps.reader;
+        const current = await (reader.catchUp?.(chat) ?? Promise.resolve(true)).catch((err) => {
+          log(`chat ${chatId}: reader catch-up failed: ${describeError(err)}`);
+          return false;
+        });
+        if (!current) log(`chat ${chatId}: not fully caught up; the digest uses what has arrived so far`);
+        await reader.refresh(chat, window).catch((err) => log(`chat ${chatId}: reader refresh failed: ${describeError(err)}`));
       }
       const count = store.countMessages(chatId, window.start, window.end);
       if (count < config.minDigestMessages) {

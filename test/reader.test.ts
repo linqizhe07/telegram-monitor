@@ -13,6 +13,8 @@ class FakeMt implements MtClient {
   dialogs: { entity: MtEntity; title: string }[] = [];
   messages: MtMessage[] = [];
   historyCalls = 0;
+  /** Throw on the nth history call (1-based), to simulate the connection dropping mid-pull. */
+  failOnCall = 0;
   async getEntity(ref: string | number): Promise<MtEntity> {
     const e = this.entities.get(ref);
     if (!e) throw Object.assign(new Error('USERNAME_NOT_OCCUPIED'), { errorMessage: 'USERNAME_NOT_OCCUPIED' });
@@ -22,13 +24,21 @@ class FakeMt implements MtClient {
     for (const d of this.dialogs) this.entities.set(chatIdOf(d.entity), d.entity);
     return [...this.dialogs, { entity: user(1, 'A friend'), title: 'A friend' }];
   }
-  async getMessages(_e: MtEntity, p: { limit?: number; offsetId?: number; minId?: number; ids?: number[] }) {
+  async getMessages(_e: MtEntity, p: { limit?: number; offsetId?: number; minId?: number; ids?: number[]; reverse?: boolean; offsetDate?: number }) {
     if (p.ids) return p.ids.map((id) => this.messages.find((m) => m.id === id));
     this.historyCalls++;
+    if (this.failOnCall && this.historyCalls === this.failOnCall) throw Object.assign(new Error('Connection closed'), { errorMessage: 'Connection closed' });
+    const limit = p.limit ?? 100;
+    if (p.offsetDate) {
+      return this.messages.filter((m) => m.date < p.offsetDate!).sort((a, b) => b.id - a.id).slice(0, limit);
+    }
+    if (p.reverse) {
+      return this.messages.filter((m) => m.id > (p.minId ?? 0)).sort((a, b) => a.id - b.id).slice(0, limit);
+    }
     return this.messages
       .filter((m) => m.id > (p.minId ?? 0) && (!p.offsetId || m.id < p.offsetId))
       .sort((a, b) => b.id - a.id)
-      .slice(0, p.limit ?? 100);
+      .slice(0, limit);
   }
 }
 
@@ -39,7 +49,7 @@ function setup() {
   const clock = new Clock(T0);
   const store = memoryStore(clock);
   const mt = new FakeMt();
-  const reader = new Reader({ client: mt, store, config: testConfig(), log: () => undefined, now: clock.now });
+  const reader = new Reader({ client: mt, store, config: testConfig(), log: () => undefined, now: clock.now, pageDelayMs: 0 });
   return { clock, store, mt, reader };
 }
 
@@ -104,12 +114,87 @@ test('the first pull goes back 24 hours, later pulls take only what is new, acro
   assert.equal(await env.reader.pull(chat), 250);
   assert.equal(env.store.getChat(GROUP_ID)!.readerCursor, 280);
   assert.equal(env.store.countMessages(GROUP_ID, 0, T0 * 2), 250);
-  assert.equal(env.mt.historyCalls, 3, 'three pages of 100');
+  assert.equal(env.mt.historyCalls, 4, 'one lookup of where 24 hours ago is, then three pages of 100, oldest first');
 
   env.mt.messages.push(msg(281, T0 + 60, 'later'), msg(282, T0 + 120, 'later still'));
   assert.equal(await env.reader.pull(env.store.getChat(GROUP_ID)!), 2);
   assert.equal(env.store.getChat(GROUP_ID)!.readerCursor, 282);
   assert.equal(await env.reader.pull(env.store.getChat(GROUP_ID)!), 0);
+});
+
+test('messages posted while the service was offline come in when it is back, with their own timestamps', async () => {
+  const env = setup();
+  const chat = env.store.watchChat(await env.reader.resolve('@binance_cn_test'), 42, null, { language: 'auto', digestHour: 9, timezone: 'UTC', rsiMode: 'auto' });
+  for (let i = 1; i <= 10; i++) env.mt.messages.push(msg(i, T0 - 3600 + i, `before ${i}`));
+  assert.equal(await env.reader.pull(chat), 10);
+
+  // The service stops (a laptop asleep overnight); 350 messages are posted over 9 hours.
+  for (let i = 11; i <= 360; i++) env.mt.messages.push(msg(i, T0 + (i - 10) * 90, `while offline ${i}`));
+  env.clock.t = T0 + 10 * 3600;
+  // It comes back as a new process: a new Reader, same database.
+  const back = new Reader({ client: env.mt, store: env.store, config: testConfig(), log: () => undefined, now: env.clock.now, pageDelayMs: 0 });
+  assert.equal(await back.pull(env.store.getChat(GROUP_ID)!), 350);
+  const stored = env.store.messages(GROUP_ID, 0, T0 * 2);
+  assert.equal(stored.length, 360);
+  assert.deepEqual(stored.map((m) => m.messageId), Array.from({ length: 360 }, (_, i) => i + 1), 'no gap');
+  assert.equal(stored[10].date, T0 + 90, 'kept the time it was posted, not the time it was fetched');
+  assert.equal(back.isBehind(GROUP_ID), false);
+});
+
+test('a pull cut short resumes exactly where it stopped: a dropped connection or the page cap never leaves a gap', async () => {
+  const env = setup();
+  const chat = env.store.watchChat(await env.reader.resolve('@binance_cn_test'), 42, null, { language: 'auto', digestHour: 9, timezone: 'UTC', rsiMode: 'auto' });
+  for (let i = 1; i <= 450; i++) env.mt.messages.push(msg(i, T0 - 7200 + i, `m ${i}`));
+  env.mt.failOnCall = 4; // the date lookup, two pages, then the connection drops
+  await assert.rejects(env.reader.pull(chat), /Connection closed/);
+  assert.equal(env.store.countMessages(GROUP_ID, 0, T0 * 2), 200, 'the pages before the drop are kept');
+  assert.equal(env.store.getChat(GROUP_ID)!.readerCursor, 200);
+  env.mt.failOnCall = 0;
+  assert.equal(await env.reader.pull(env.store.getChat(GROUP_ID)!), 250);
+  assert.equal(env.store.countMessages(GROUP_ID, 0, T0 * 2), 450);
+
+  // More than one pull's worth (100 pages): the first stops at the cap and says it is behind.
+  for (let i = 451; i <= 10_550; i++) env.mt.messages.push(msg(i, T0 - 3600 + i / 10, `burst ${i}`));
+  assert.equal(await env.reader.pull(env.store.getChat(GROUP_ID)!), 10_000);
+  assert.equal(env.reader.isBehind(GROUP_ID), true);
+  assert.equal(await env.reader.catchUp(env.store.getChat(GROUP_ID)!), true);
+  assert.equal(env.store.countMessages(GROUP_ID, 0, T0 * 2), 10_550);
+});
+
+test('two pulls at once neither store twice nor move the cursor backwards', async () => {
+  const env = setup();
+  const chat = env.store.watchChat(await env.reader.resolve('@binance_cn_test'), 42, null, { language: 'auto', digestHour: 9, timezone: 'UTC', rsiMode: 'auto' });
+  for (let i = 1; i <= 230; i++) env.mt.messages.push(msg(i, T0 - 3600 + i, `m ${i}`));
+  const [a, b] = await Promise.all([env.reader.pull(chat), env.reader.pull(chat)]);
+  assert.equal(a + b, 230);
+  assert.equal(env.store.getChat(GROUP_ID)!.readerCursor, 230);
+});
+
+test('offline for longer than the retention period: it starts from the retention floor, not from the old cursor', async () => {
+  const env = setup();
+  const chat = env.store.watchChat(await env.reader.resolve('@binance_cn_test'), 42, null, { language: 'auto', digestHour: 9, timezone: 'UTC', rsiMode: 'auto' });
+  env.mt.messages.push(msg(1, T0 - 60, 'last seen'));
+  await env.reader.pull(chat);
+  // 10 days offline (retention is 7): one message a day.
+  for (let d = 1; d <= 10; d++) env.mt.messages.push(msg(1 + d, T0 + d * 86_400 - 3600, `day ${d}`));
+  env.clock.t = T0 + 10 * 86_400;
+  await env.reader.pull(env.store.getChat(GROUP_ID)!);
+  const days = env.store.messages(GROUP_ID, 0, T0 * 2).map((m) => m.text);
+  assert.deepEqual(days, ['last seen', 'day 4', 'day 5', 'day 6', 'day 7', 'day 8', 'day 9', 'day 10']);
+});
+
+test('the audit checks the capture against Telegram: every message is stored or skipped for a reason', async () => {
+  const env = setup();
+  const chat = env.store.watchChat(await env.reader.resolve('@binance_cn_test'), 42, null, { language: 'auto', digestHour: 9, timezone: 'UTC', rsiMode: 'auto' });
+  for (let i = 1; i <= 120; i++) env.mt.messages.push(msg(i, T0 - 3000 + i * 10, `m ${i}`));
+  env.mt.messages.push(msg(121, T0 - 500, 'BTC 62000', { sender: user(9, 'PriceBot', { bot: true }) }));
+  env.mt.messages.push({ id: 122, date: T0 - 400, className: 'MessageService', action: {} });
+  await env.reader.pull(chat);
+  env.store.db.exec(`DELETE FROM messages WHERE message_id = 50`); // pretend one was lost
+  env.mt.messages.push(msg(123, T0 + 10, 'after the last pull'));
+  env.clock.t = T0 + 20;
+  const r = await env.reader.audit(env.store.getChat(GROUP_ID)!, T0 - 3600);
+  assert.deepEqual(r, { checked: 122, stored: 119, bots: 1, service: 1, empty: 0, missing: [50], newerThanCursor: 1 });
 });
 
 test('a group silent for a day still moves the cursor, so old history is not re-read', async () => {
@@ -148,7 +233,7 @@ test('a private group the reader account joined is found by its name, and by id 
   const fresh = new FakeMt();
   fresh.dialogs = env.mt.dialogs;
   fresh.messages.push(msg(1, T0 - 600, '内部消息'));
-  const reader = new Reader({ client: fresh, store: env.store, config: testConfig(), log: () => undefined, now: env.clock.now });
+  const reader = new Reader({ client: fresh, store: env.store, config: testConfig(), log: () => undefined, now: env.clock.now, pageDelayMs: 0 });
   const chat = env.store.watchChat(info, 42, null, { language: 'auto', digestHour: 9, timezone: 'UTC', rsiMode: 'auto' });
   assert.equal(await reader.pull(chat), 1);
 });
