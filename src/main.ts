@@ -79,7 +79,7 @@ async function main(): Promise<void> {
       })
     : null;
   if (connection) {
-    reader = new Reader({ client: connection.client, store, config, log, now, activity });
+    reader = new Reader({ client: connection.client, store, config, log, now, activity, reconnect: connection.reconnect });
     log(`reader account: ${connection.name}`);
     activity.event('reader', 'signed in', connection.name, `Telegram id ${connection.id}`);
     if (config.ownerIds.length === 0) log('warning: the reader account is on but PULSE_OWNER_IDS is empty, so nobody can use /watch');
@@ -128,7 +128,7 @@ async function main(): Promise<void> {
       now,
       log,
       startedAt,
-      account: connection ? { name: connection.name, id: connection.id, raw: connection.raw } : null,
+      account: connection ? { name: connection.name, id: connection.id, raw: connection.raw, state: connection.state } : null,
       reader,
       bot: me?.username ? { username: me.username } : null,
       claude: { ready: claudeReady, model: config.model },

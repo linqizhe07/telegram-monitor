@@ -11,7 +11,7 @@ import type { Activity } from '../activity.ts';
 import type { Config } from '../config.ts';
 import { denoise, formatSignal } from '../denoise.ts';
 import { probe, type ProbeResult } from '../probe.ts';
-import type { Reader } from '../reader.ts';
+import { withTimeout, type Reader } from '../reader.ts';
 import type { Store } from '../store.ts';
 import { lastSlot } from '../transcript.ts';
 
@@ -23,7 +23,7 @@ export interface ConsoleDeps {
   now: () => number;
   log: (line: string) => void;
   startedAt: number;
-  account: { name: string; id: string; raw: GramClient } | null;
+  account: { name: string; id: string; raw: GramClient; state?: () => { state: 'online' | 'offline'; since: number } } | null;
   reader: Reader | null;
   bot: { username: string } | null;
   claude: { ready: boolean; model: string };
@@ -152,6 +152,8 @@ export class ConsoleServer {
         }
         case '/api/messages':
           return this.json(res, 200, this.messages(Number(url.searchParams.get('chat')), Number(url.searchParams.get('limit') ?? 100)));
+        case '/api/joined':
+          return this.json(res, 200, await this.joined());
         case '/api/signal':
           return this.json(res, 200, this.signal(Number(url.searchParams.get('chat')), Number(url.searchParams.get('hours') ?? 24)));
         case '/api/events':
@@ -232,7 +234,9 @@ export class ConsoleServer {
     return {
       now,
       startedAt: this.deps.startedAt,
-      account: this.deps.account ? { name: this.deps.account.name, id: this.deps.account.id, session: config.readerSession } : null,
+      account: this.deps.account
+        ? { name: this.deps.account.name, id: this.deps.account.id, session: config.readerSession, connection: this.deps.account.state?.() ?? null }
+        : null,
       readerConfigured: Boolean(config.telegramApiId),
       bot: this.deps.bot,
       claude: this.deps.claude,
@@ -290,6 +294,23 @@ export class ConsoleServer {
     };
   }
 
+  /** The account's own groups and channels, and whether each is watched. */
+  private async joined(): Promise<{ error?: string; chats: { chatId: number; title: string; ref: string; type: string; members: number | null; watched: boolean }[] }> {
+    const { reader, store } = this.deps;
+    if (!reader) return { error: 'The reader account is not signed in.', chats: [] };
+    try {
+      const list = await withTimeout(reader.joined(), 60_000, 'listing your chats');
+      return {
+        chats: list.map((c) => {
+          const row = store.getChat(c.chatId);
+          return { chatId: c.chatId, title: c.title, ref: c.ref, type: c.type, members: c.members, watched: Boolean(row && row.kind === 'watched' && row.enabled) };
+        }),
+      };
+    } catch (err) {
+      return { error: (err as Error).message, chats: [] };
+    }
+  }
+
   // ── actions ──────────────────────────────────────────────────────────────
 
   private async probe(target: string): Promise<ProbeResult | { error: string }> {
@@ -297,7 +318,12 @@ export class ConsoleServer {
     if (!account) return { error: 'The reader account is not signed in.' };
     if (!target.trim()) return { error: 'Type a @username, a t.me link or an invite link.' };
     activity.event('console', 'probe', target, 'read-only look requested from the console');
-    const r = await probe(account.raw, target.trim(), this.deps.now());
+    let r: ProbeResult;
+    try {
+      r = await withTimeout(probe(account.raw, target.trim(), this.deps.now()), 120_000, 'the check');
+    } catch (err) {
+      return { error: (err as Error).message };
+    }
     activity.event('probe', r.verdict, r.title ?? target, r.summary, r.verdict !== 'not-found');
     if (r.chatId) this.deps.store.setKv(probeKey(r.chatId), JSON.stringify(r));
     return r;
@@ -310,7 +336,7 @@ export class ConsoleServer {
     const ref = target.trim();
     let info;
     try {
-      info = await reader.resolve(ref);
+      info = await withTimeout(reader.resolve(ref), 60_000, 'finding the group');
     } catch (err) {
       return { ok: false, message: (err as Error).message };
     }
@@ -346,7 +372,7 @@ export class ConsoleServer {
     if (!reader || !chat || chat.kind !== 'watched') return { ok: false, message: 'Not a watched source, or no reader account.' };
     try {
       const before = store.countMessages(chatId, 0, this.deps.now() + 86_400);
-      const current = await reader.catchUp(chat, 5 * 60_000);
+      const current = await withTimeout(reader.catchUp(chat, 5 * 60_000), 6 * 60_000, 'catching up');
       const n = store.countMessages(chatId, 0, this.deps.now() + 86_400) - before;
       activity.event('console', 'catch up', chat.title, `${n} new messages${current ? ', up to date' : ', still catching up'}`);
       return { ok: true, message: `${n} new messages; ${current ? 'up to date' : 'still catching up (a lot was posted while offline)'}.` };
@@ -361,7 +387,7 @@ export class ConsoleServer {
     if (!reader || !chat || chat.kind !== 'watched') return { ok: false, message: 'Not a watched source, or no reader account.' };
     const h = Math.min(Math.max(hours || 1, 1), 24);
     try {
-      const r = await reader.audit(chat, now() - h * 3600);
+      const r = await withTimeout(reader.audit(chat, now() - h * 3600), 120_000, 'the audit');
       const message =
         `Last ${h}h, checked against Telegram: ${r.checked} messages; ${r.stored} stored, ${r.bots} from bots, ${r.service} service messages (joins, pins), ${r.empty} empty — ` +
         (r.missing.length ? `${r.missing.length} MISSING (#${r.missing.slice(0, 10).join(', #')}).` : 'nothing missing.') +

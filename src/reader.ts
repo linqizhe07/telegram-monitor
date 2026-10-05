@@ -240,6 +240,21 @@ export interface ReaderDeps {
   pageDelayMs?: number;
   /** Where pulls and their failures are shown (the console). */
   activity?: Activity | null;
+  /** Opens a fresh connection when a pull hangs (the watchdog). */
+  reconnect?: () => Promise<void>;
+  /** How long one pull may take before the watchdog steps in (default 3 minutes). */
+  pullTimeoutMs?: number;
+}
+
+/** Rejects with a ReaderError if `p` takes longer than `ms`. */
+export function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new ReaderError(`${what} took longer than ${Math.round(ms / 1000)}s (connection stuck?)`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
 }
 
 const PAGE = 100;
@@ -293,6 +308,19 @@ export class Reader {
     throw new ReaderError(`several of the reader account's chats match "${input}": ${found.slice(0, 5).map((d) => d.title ?? d.entity.title).join(' · ')}`);
   }
 
+  /** The groups and channels the account itself is in (its chat list), never people. */
+  async joined(): Promise<SourceInfo[]> {
+    const dialogs = await this.deps.client.getDialogs({ limit: 500 }).catch((err) => {
+      throw explain(err);
+    });
+    const out: SourceInfo[] = [];
+    for (const d of dialogs) {
+      if (!d.entity || (d.entity.className !== 'Channel' && d.entity.className !== 'Chat')) continue;
+      out.push(this.info(d.entity));
+    }
+    return out;
+  }
+
   /** By id: works for chats GramJS has seen; after a restart, loading the chat list teaches it the private ones. */
   private async byId(id: number): Promise<MtEntity> {
     try {
@@ -330,13 +358,20 @@ export class Reader {
 
   /** Chats whose last pull stopped before reaching the newest message (a long time offline). */
   private readonly behind = new Set<number>();
+  private lastReconnect = 0;
   private readonly locks = new Map<number, Promise<unknown>>();
 
-  /** One pull at a time per chat, so two pulls never race over the cursor. */
+  /** Bumped by every reconnect: a pull from before it (stuck on the dead connection) must not commit. */
+  private epoch = 0;
+
+  /**
+   * One pull at a time per chat, so two pulls never race over the cursor. A pull stuck on a dead
+   * connection holds the turn for at most the pull timeout; after that the next one goes ahead.
+   */
   private locked<T>(chatId: number, task: () => Promise<T>): Promise<T> {
     const prev = this.locks.get(chatId) ?? Promise.resolve();
     const next = prev.catch(() => undefined).then(task);
-    this.locks.set(chatId, next.catch(() => undefined));
+    this.locks.set(chatId, withTimeout(next, this.deps.pullTimeoutMs ?? 180_000, 'previous pull').catch(() => undefined));
     return next;
   }
 
@@ -359,6 +394,7 @@ export class Reader {
 
   private async pullLocked(chatId: number): Promise<number> {
     const { client, store, config } = this.deps;
+    const epoch = this.epoch;
     const chat = store.getChat(chatId);
     if (!chat) return 0;
     const entity = await this.entity(chat);
@@ -396,6 +432,7 @@ export class Reader {
         break;
       }
       const last = batch[batch.length - 1];
+      if (epoch !== this.epoch) throw new ReaderError('pull abandoned: the connection was replaced while it was waiting');
       store.transaction(() => {
         for (const m of batch) {
           const s = toStored(m, chatId);
@@ -404,8 +441,11 @@ export class Reader {
           store.saveMessage(s.message);
           saved++;
         }
-        store.updateChat(chatId, { readerCursor: last.id });
-        store.setKv(`reader_cursor_date:${chatId}`, String(last.date));
+        // Forward only: a late pull never moves the cursor back.
+        if (last.id > (store.getChat(chatId)?.readerCursor ?? 0)) {
+          store.updateChat(chatId, { readerCursor: last.id });
+          store.setKv(`reader_cursor_date:${chatId}`, String(last.date));
+        }
       });
       cursor = last.id;
       if (batch.length < PAGE) {
@@ -514,10 +554,11 @@ export class Reader {
       });
     const loop = async () => {
       while (!stopped) {
+        let retrySoon = false;
         for (const chat of store.listChats(true).filter((c) => c.kind === 'watched')) {
           if (stopped) break;
           try {
-            const n = await this.pull(chat);
+            const n = await withTimeout(this.pull(chat), this.deps.pullTimeoutMs ?? 180_000, `reading ${chat.title}`);
             if (chat.readerError) store.updateChat(chat.chatId, { readerError: null });
             if (n > 0) {
               log(`reader: ${n} new message${n === 1 ? '' : 's'} from ${chat.title}`);
@@ -529,10 +570,21 @@ export class Reader {
             log(`reader: ${chat.title}: ${e.message}`);
             this.deps.activity?.event('reader', 'pull failed', chat.title, e.message, false);
             if (e.retryAfter) await sleep(e.retryAfter * 1000);
+            else if (/took longer than|Not connected|disconnected|TIMEOUT/i.test(e.message) && this.deps.reconnect) {
+              // The watchdog: a hung request means a dead connection; open a new one (at most once a minute).
+              const now = Date.now();
+              if (now - this.lastReconnect > 60_000) {
+                this.lastReconnect = now;
+                this.epoch++;
+                await withTimeout(this.deps.reconnect(), 120_000, 'reconnecting').catch((err) => log(`reader: reconnect failed: ${(err as Error).message}`));
+              }
+              retrySoon = true;
+              break; // start the round again on the new connection
+            }
           }
         }
         // Still catching up somewhere (back from a long time offline): go again soon.
-        if (!stopped) await sleep(this.behind.size > 0 ? 2_000 : config.readerPollSeconds * 1000 * (0.85 + Math.random() * 0.3));
+        if (!stopped) await sleep(retrySoon ? 5_000 : this.behind.size > 0 ? 2_000 : config.readerPollSeconds * 1000 * (0.85 + Math.random() * 0.3));
       }
     };
     void loop();

@@ -197,6 +197,37 @@ test('the audit checks the capture against Telegram: every message is stored or 
   assert.deepEqual(r, { checked: 122, stored: 119, bots: 1, service: 1, empty: 0, missing: [50], newerThanCursor: 1 });
 });
 
+test('the watchdog: a pull that hangs (dead connection) triggers a reconnect, and reading resumes', async () => {
+  const env = setup();
+  env.store.watchChat(await env.reader.resolve('@binance_cn_test'), 42, null, { language: 'auto', digestHour: 9, timezone: 'UTC', rsiMode: 'auto' });
+  for (let i = 1; i <= 5; i++) env.mt.messages.push(msg(i, T0 - 600 + i, `m ${i}`));
+  let dead = true;
+  const real = env.mt.getMessages.bind(env.mt);
+  env.mt.getMessages = (e, p) => (dead ? new Promise(() => undefined) : real(e, p)); // hangs forever while "dead"
+  let reconnects = 0;
+  const events: string[] = [];
+  const reader = new Reader({
+    client: env.mt,
+    store: env.store,
+    config: { ...testConfig(), readerPollSeconds: 30 },
+    log: () => undefined,
+    now: env.clock.now,
+    pageDelayMs: 0,
+    pullTimeoutMs: 50,
+    activity: { event: (_a: string, method: string) => events.push(method) } as never,
+    reconnect: async () => {
+      reconnects++;
+      dead = false;
+    },
+  });
+  const stop = reader.start();
+  for (let i = 0; i < 100 && env.store.countMessages(GROUP_ID, 0, T0 * 2) < 5; i++) await new Promise((r) => setTimeout(r, 100));
+  stop();
+  assert.equal(reconnects, 1);
+  assert.ok(events.includes('pull failed'));
+  assert.equal(env.store.countMessages(GROUP_ID, 0, T0 * 2), 5, 'read again after the reconnect');
+});
+
 test('a group silent for a day still moves the cursor, so old history is not re-read', async () => {
   const env = setup();
   const chat = env.store.watchChat(await env.reader.resolve('@binance_cn_test'), 42, null, { language: 'auto', digestHour: 9, timezone: 'UTC', rsiMode: 'auto' });

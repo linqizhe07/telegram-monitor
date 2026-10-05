@@ -94,6 +94,9 @@ const METHODS = {
   'catch up': 'catch up',
   audit: 'audit capture against Telegram',
   'digest saved': 'digest written by Claude',
+  'connection lost': 'connection to Telegram lost',
+  'connection back': 'connection to Telegram back',
+  reconnect: 'reconnect',
 };
 const KIND = {
   read: ['READ', 'read'],
@@ -115,7 +118,10 @@ function renderCards(s) {
   cards.replaceChildren();
   // Reader account
   if (s.account) {
-    cards.append(card('ok', 'Reader account', el('div', { class: 'big', text: s.account.name }),
+    const conn = s.account.connection;
+    const offline = conn && conn.state === 'offline';
+    cards.append(card(offline ? 'bad' : 'ok', 'Reader account', el('div', { class: 'big', text: s.account.name }),
+      conn ? el('div', { class: 'line' }, el('span', { class: `pill ${offline ? 'bad' : 'ok'}`, text: offline ? 'Telegram unreachable' : 'connected' }), ` since ${fmtDateTime(conn.since)}${offline ? ' · retrying every 3s; missed messages are fetched when it is back' : ''}`) : null,
       `Telegram id ${s.account.id} · signed in`,
       'Revoke any time: Telegram → Settings → Devices → Telegram Monitor → Terminate.'));
   } else {
@@ -289,6 +295,34 @@ $('add-form').addEventListener('submit', async (e) => {
     b.textContent = 'Check (read-only)';
   }
 });
+
+// ── the account's own chats ────────────────────────────────────────────────
+
+async function loadJoined() {
+  const box = $('joined-list');
+  box.replaceChildren(el('p', { class: 'hint', text: 'Loading…' }));
+  const r = await api('/api/joined').catch((err) => ({ error: err.message, chats: [] }));
+  if (r.error) return box.replaceChildren(el('p', { class: 'hint', text: r.error }));
+  const rows = r.chats.map((c) => el('div', { class: 'joined-row' },
+    el('div', {}, el('div', { class: 'src-title', text: c.title }), el('div', { class: 'src-ref', text: `${c.type}${c.members ? ` · ${n(c.members)} members` : ''} · ${c.ref}` })),
+    c.watched ? el('span', { class: 'pill ok', text: 'watched' }) : el('button', { class: 'btn', text: 'Watch', onclick: (e) => watchRef(e.target, c.ref) })));
+  box.replaceChildren(...(rows.length ? rows : [el('p', { class: 'hint', text: 'This account is in no groups or channels.' })]));
+}
+
+async function watchRef(button, ref) {
+  button.disabled = true;
+  try {
+    const r = await api('/api/watch', { target: ref });
+    toast(r.message);
+    await refresh();
+    await loadJoined();
+  } catch (err) {
+    toast(err.message);
+    button.disabled = false;
+  }
+}
+
+$('joined').addEventListener('toggle', () => $('joined').open && loadJoined());
 
 // ── activity feed ──────────────────────────────────────────────────────────
 
