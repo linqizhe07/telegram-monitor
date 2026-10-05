@@ -72,6 +72,8 @@ async function main(): Promise<void> {
   // The reader account: groups you do not run, read through a Telegram user session (see COOKBOOK.md).
   const defaults = { language: config.language, digestHour: config.digestHour, timezone: config.timezone, rsiMode: config.rsiMode };
   let reader: Reader | null = null;
+  // The last thing recorded before this start: read before connecting, which records requests itself.
+  const [lastSeen] = store.activity({ limit: 1 });
   const connection: ReaderConnection | null = config.telegramApiId
     ? await connectReader(config, log, { activity, titleOf: (id) => store.getChat(id)?.title ?? null }).catch((err) => {
         log(`reader: could not connect: ${(err as Error).message}`);
@@ -79,8 +81,6 @@ async function main(): Promise<void> {
       })
     : null;
   if (connection) {
-    // Was the service off for a while? Then say so: everything posted meanwhile is fetched next.
-    const [lastSeen] = store.activity({ limit: 1 });
     if (lastSeen && now() - lastSeen.at > 300) {
       const at = (t: number) => new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ');
       activity.event('reader', 'was off', 'service', `not running from ${at(lastSeen.at)} to ${at(now())} UTC (${Math.round((now() - lastSeen.at) / 60)} min); fetching everything posted meanwhile`);

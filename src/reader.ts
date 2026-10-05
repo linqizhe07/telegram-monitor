@@ -428,6 +428,8 @@ export class Reader {
   private lastReconnect = 0;
   /** Chats being caught up after a gap (offline, asleep, stopped): since when, and how much came back. */
   private readonly recovering = new Map<number, { since: number; saved: number }>();
+  /** Recoveries finished during the current poll round, summed up in one line at its end. */
+  private roundRecovered: { chats: number; quiet: number; messages: number; since: number } | null = null;
   private readonly locks = new Map<number, Promise<unknown>>();
 
   /** Bumped by every reconnect: a pull from before it (stuck on the dead connection) must not commit. */
@@ -543,12 +545,19 @@ export class Reader {
         this.recovering.delete(chatId);
         const minutes = Math.round((now - gap.since) / 60);
         const at = (t: number) => new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ');
-        this.deps.activity?.event(
-          'reader',
-          'recovered',
-          chat.title,
-          `${gap.saved} message${gap.saved === 1 ? '' : 's'} posted while it was not reading (${at(gap.since)} → ${at(now)} UTC, ${minutes} min), now stored; up to date`,
-        );
+        if (gap.saved > 0) {
+          this.deps.activity?.event(
+            'reader',
+            'recovered',
+            chat.title,
+            `${gap.saved} message${gap.saved === 1 ? '' : 's'} posted while it was not reading (${at(gap.since)} → ${at(now)} UTC, ${minutes} min), now stored; up to date`,
+          );
+        }
+        const r = (this.roundRecovered ??= { chats: 0, quiet: 0, messages: 0, since: gap.since });
+        r.chats++;
+        r.messages += gap.saved;
+        if (gap.saved === 0) r.quiet++;
+        r.since = Math.min(r.since, gap.since);
       }
     } else {
       this.behind.add(chatId);
@@ -674,6 +683,17 @@ export class Reader {
               break; // start the round again on the new connection
             }
           }
+        }
+        const back = this.roundRecovered;
+        if (back) {
+          this.roundRecovered = null;
+          const minutes = Math.round((this.deps.now() - back.since) / 60);
+          this.deps.activity?.event(
+            'reader',
+            'recovered',
+            'all sources',
+            `back after ${minutes} min: ${back.messages} message${back.messages === 1 ? '' : 's'} recovered across ${back.chats - back.quiet} chat${back.chats - back.quiet === 1 ? '' : 's'}; ${back.quiet} had nothing new${this.behind.size ? `; still catching up on ${this.behind.size}` : '; everything is up to date'}`,
+          );
         }
         // Still catching up somewhere (back from a long time offline): go again soon.
         if (!stopped) await sleep(retrySoon ? 5_000 : this.behind.size > 0 ? 2_000 : config.readerPollSeconds * 1000 * (0.85 + Math.random() * 0.3));

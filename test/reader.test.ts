@@ -233,6 +233,33 @@ test('the watchdog: a pull that hangs (dead connection) triggers a reconnect, an
   assert.equal(env.store.countMessages(GROUP_ID, 0, T0 * 2), 5, 'read again after the reconnect');
 });
 
+test('after a gap, one line sums up what came back; only chats that got messages get their own line', async () => {
+  const env = setup();
+  const quiet: MtEntity = { className: 'Channel', id: 777, title: 'Quiet channel', username: 'quiet_test', broadcast: true };
+  env.mt.entities.set('quiet_test', quiet);
+  env.store.watchChat(await env.reader.resolve('@binance_cn_test'), 42, null, { language: 'auto', digestHour: 9, timezone: 'UTC', rsiMode: 'auto' });
+  env.store.watchChat(await env.reader.resolve('@quiet_test'), 42, null, { language: 'auto', digestHour: 9, timezone: 'UTC', rsiMode: 'auto' });
+  for (const id of [GROUP_ID, -1000000000777]) {
+    env.store.updateChat(id, { readerCursor: 0 });
+    env.store.setKv(`reader_caught_up:${id}`, String(T0 - 3600)); // last caught up an hour ago
+    env.store.setKv(`reader_cursor_date:${id}`, String(T0 - 3600));
+  }
+  for (let i = 1; i <= 3; i++) env.mt.messages.push(msg(i, T0 - 1800 + i, `while away ${i}`));
+  // The fake holds one chat's history; the quiet channel has none.
+  const real = env.mt.getMessages.bind(env.mt);
+  env.mt.getMessages = (e, p) => (e.id === 777 ? Promise.resolve([]) : real(e, p));
+  const events: { method: string; target: string; detail: string }[] = [];
+  const activity = { event: (_a: string, method: string, target: string, detail: string) => events.push({ method, target, detail }) } as never;
+  const reader = new Reader({ client: env.mt, store: env.store, config: testConfig(), log: () => undefined, now: env.clock.now, pageDelayMs: 0, activity });
+  const stop = reader.start();
+  for (let i = 0; i < 50 && !events.some((e) => e.target === 'all sources'); i++) await new Promise((r) => setTimeout(r, 20));
+  stop();
+  const recovered = events.filter((e) => e.method === 'recovered');
+  assert.deepEqual(recovered.map((e) => e.target), ['Binance 中文', 'all sources']);
+  assert.match(recovered[0].detail, /^3 messages posted while it was not reading .*60 min\), now stored; up to date$/);
+  assert.equal(recovered[1].detail, 'back after 60 min: 3 messages recovered across 1 chat; 1 had nothing new; everything is up to date');
+});
+
 test('a group silent for a day still moves the cursor, so old history is not re-read', async () => {
   const env = setup();
   const chat = env.store.watchChat(await env.reader.resolve('@binance_cn_test'), 42, null, { language: 'auto', digestHour: 9, timezone: 'UTC', rsiMode: 'auto' });
