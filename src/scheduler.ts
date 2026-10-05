@@ -12,7 +12,7 @@ export function startScheduler(
   const tick = () => {
     const now = opts.now();
     for (const chat of store.listChats(true)) {
-      if (running.has(chat.chatId)) continue;
+      if (chat.kind === 'report' || running.has(chat.chatId)) continue;
       const slot = lastSlot(now, chat.timezone, chat.digestHour);
       if ((chat.lastDigestAt ?? 0) >= slot) continue;
       running.add(chat.chatId);

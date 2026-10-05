@@ -25,7 +25,21 @@ export interface ChatRow {
   /** Written by the improver about its own strategy: the recursive level. */
   improverNotes: string;
   createdAt: number;
+  /**
+   * group   = a group the bot sits in: recorded by the bot, digest posted into it.
+   * watched = a group or channel you do not run: read by the reader account, digest posted to `reportChatId`.
+   * report  = where watched digests go (your DM with the bot, or a private group): never recorded or digested.
+   */
+  kind: ChatKind;
+  reportChatId: number | null;
+  /** How the reader account finds a watched chat: @username or -100… id. */
+  readerRef: string | null;
+  /** Highest message id already pulled by the reader account. */
+  readerCursor: number | null;
+  readerError: string | null;
 }
+
+export type ChatKind = 'group' | 'watched' | 'report';
 
 export interface UserRow {
   userId: number;
@@ -60,6 +74,8 @@ export interface DigestRow {
   metrics: Metrics | null;
   critique: Critique | null;
   postedIds: number[];
+  /** The chat the digest was posted in (the group itself, or a report chat). */
+  postedChatId: number | null;
   createdAt: number;
 }
 
@@ -131,7 +147,12 @@ CREATE TABLE IF NOT EXISTS chats (
   last_calibrated_at INTEGER,
   judge_notes TEXT NOT NULL DEFAULT '',
   improver_notes TEXT NOT NULL DEFAULT '',
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'group',
+  report_chat_id INTEGER,
+  reader_ref TEXT,
+  reader_cursor INTEGER,
+  reader_error TEXT
 );
 CREATE TABLE IF NOT EXISTS users (
   chat_id INTEGER NOT NULL,
@@ -171,7 +192,8 @@ CREATE TABLE IF NOT EXISTS digests (
   metrics_json TEXT,
   critique_json TEXT,
   posted_ids TEXT NOT NULL DEFAULT '[]',
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  posted_chat_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS digests_by_chat ON digests (chat_id, kind, window_end);
 CREATE TABLE IF NOT EXISTS votes (
@@ -246,6 +268,23 @@ export class Store {
     this.clock = clock;
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /** Adds columns introduced after a database was created. */
+  private migrate(): void {
+    const added: [string, string, string][] = [
+      ['chats', 'kind', "TEXT NOT NULL DEFAULT 'group'"],
+      ['chats', 'report_chat_id', 'INTEGER'],
+      ['chats', 'reader_ref', 'TEXT'],
+      ['chats', 'reader_cursor', 'INTEGER'],
+      ['chats', 'reader_error', 'TEXT'],
+      ['digests', 'posted_chat_id', 'INTEGER'],
+    ];
+    for (const [table, column, type] of added) {
+      const cols = (this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes(column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
   }
 
   close(): void {
@@ -306,6 +345,11 @@ export class Store {
       judgeNotes: str(r.judge_notes),
       improverNotes: str(r.improver_notes),
       createdAt: num(r.created_at),
+      kind: (str(r.kind) || 'group') as ChatKind,
+      reportChatId: numOrNull(r.report_chat_id),
+      readerRef: strOrNull(r.reader_ref),
+      readerCursor: numOrNull(r.reader_cursor),
+      readerError: strOrNull(r.reader_error),
     };
   }
 
@@ -357,6 +401,11 @@ export class Store {
         | 'lastCalibratedAt'
         | 'judgeNotes'
         | 'improverNotes'
+        | 'kind'
+        | 'reportChatId'
+        | 'readerRef'
+        | 'readerCursor'
+        | 'readerError'
       >
     >,
   ): void {
@@ -372,6 +421,11 @@ export class Store {
       lastCalibratedAt: 'last_calibrated_at',
       judgeNotes: 'judge_notes',
       improverNotes: 'improver_notes',
+      kind: 'kind',
+      reportChatId: 'report_chat_id',
+      readerRef: 'reader_ref',
+      readerCursor: 'reader_cursor',
+      readerError: 'reader_error',
     };
     for (const [key, value] of Object.entries(patch)) {
       const col = cols[key];
@@ -379,6 +433,25 @@ export class Store {
       const v = typeof value === 'boolean' ? (value ? 1 : 0) : (value as Param);
       this.run(`UPDATE chats SET ${col} = ? WHERE chat_id = ?`, v, chatId);
     }
+  }
+
+  /** Registers (or re-enables) a group or channel the reader account watches, reporting to `reportChatId`. */
+  watchChat(
+    c: { chatId: number; title: string; username: string | null; type: string; ref: string },
+    reportChatId: number,
+    threadId: number | null,
+    defaults: ChatDefaults,
+  ): ChatRow {
+    this.upsertChat({ chatId: c.chatId, title: c.title, username: c.username, type: c.type }, defaults);
+    this.updateChat(c.chatId, { kind: 'watched', reportChatId, threadId, readerRef: c.ref, enabled: true, readerError: null });
+    return this.getChat(c.chatId)!;
+  }
+
+  /** Watched chats whose digests go to `reportChatId`, in the order they were added (that is what #1, #2… refer to). */
+  sourcesReportingTo(reportChatId: number): ChatRow[] {
+    return this.listChats(true)
+      .filter((c) => c.kind === 'watched' && c.reportChatId === reportChatId)
+      .sort((a, b) => a.createdAt - b.createdAt || a.title.localeCompare(b.title));
   }
 
   // ── users (stable per-chat aliases) ──────────────────────────────────────
@@ -507,6 +580,7 @@ export class Store {
       metrics: r.metrics_json ? (JSON.parse(str(r.metrics_json)) as Metrics) : null,
       critique: r.critique_json ? (JSON.parse(str(r.critique_json)) as Critique) : null,
       postedIds: JSON.parse(str(r.posted_ids) || '[]') as number[],
+      postedChatId: numOrNull(r.posted_chat_id),
       createdAt: num(r.created_at),
     };
   }
@@ -539,8 +613,8 @@ export class Store {
     return r ? this.toDigest(r) : null;
   }
 
-  setPosted(id: number, messageIds: number[]): void {
-    this.run('UPDATE digests SET posted_ids = ? WHERE id = ?', JSON.stringify(messageIds), id);
+  setPosted(id: number, messageIds: number[], postedChatId: number | null = null): void {
+    this.run('UPDATE digests SET posted_ids = ?, posted_chat_id = COALESCE(?, chat_id) WHERE id = ?', JSON.stringify(messageIds), postedChatId, id);
   }
 
   setCritique(id: number, critique: Critique): void {
@@ -564,10 +638,11 @@ export class Store {
     return r ? this.toDigest(r) : null;
   }
 
-  digestByPostedMessage(chatId: number, messageId: number): DigestRow | null {
+  /** The digest one of whose messages is `messageId` in `postedChatId` (a group, or a report chat). */
+  digestByPostedMessage(postedChatId: number, messageId: number): DigestRow | null {
     const rows = this.all(
-      "SELECT * FROM digests WHERE chat_id = ? AND kind != 'shadow' AND posted_ids != '[]' ORDER BY id DESC LIMIT 60",
-      chatId,
+      "SELECT * FROM digests WHERE COALESCE(posted_chat_id, chat_id) = ? AND kind != 'shadow' AND posted_ids != '[]' ORDER BY id DESC LIMIT 200",
+      postedChatId,
     );
     for (const r of rows) {
       const d = this.toDigest(r);

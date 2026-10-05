@@ -7,7 +7,7 @@ import { aliasNames, approvalKeyboard, escapeHtml, renderDigest, voteKeyboard } 
 import { checkVeto, evolve, type EvolveReport } from './rsi/evolve.ts';
 import type { ChatRow, Store } from './store.ts';
 import type { InlineKeyboard, TelegramClient } from './telegram.ts';
-import { detectLanguage } from './transcript.ts';
+import { detectLanguage, type Window } from './transcript.ts';
 
 export interface EngineDeps {
   store: Store;
@@ -16,6 +16,8 @@ export interface EngineDeps {
   api: TelegramClient;
   now: () => number;
   log: (line: string) => void;
+  /** The reader account, when one is signed in: refreshes reactions and edits of watched chats before a digest. */
+  reader?: { refresh(chat: ChatRow, window: Window): Promise<void> } | null;
 }
 
 const pct = (x: number | null) => (x === null ? 'n/a' : `${Math.round(x * 100)}%`);
@@ -59,9 +61,20 @@ export class Engine {
     return detectLanguage([chat.title]) === 'zh' || this.deps.config.language === 'zh' ? 'zh' : 'en';
   }
 
-  async send(chat: ChatRow, html: string, opts: { replyTo?: number; keyboard?: InlineKeyboard; threadId?: number | null } = {}): Promise<number> {
-    const m = await this.deps.api.sendMessage(chat.chatId, html, {
-      threadId: opts.threadId === undefined ? chat.threadId : opts.threadId,
+  /** Where a chat's digests and announcements go: the group itself, or the report chat of a watched one. */
+  destination(chat: ChatRow): number {
+    return chat.reportChatId ?? chat.chatId;
+  }
+
+  /** Posts to `opts.to` (the chat a command came from), else to the chat's destination. */
+  async send(
+    chat: ChatRow,
+    html: string,
+    opts: { replyTo?: number; keyboard?: InlineKeyboard; threadId?: number | null; to?: number } = {},
+  ): Promise<number> {
+    const to = opts.to ?? this.destination(chat);
+    const m = await this.deps.api.sendMessage(to, html, {
+      threadId: opts.threadId !== undefined ? opts.threadId : opts.to !== undefined ? null : chat.threadId,
       replyTo: opts.replyTo,
       keyboard: opts.keyboard,
     });
@@ -74,7 +87,7 @@ export class Engine {
    */
   digest(
     chatId: number,
-    opts: { kind: 'production' | 'manual'; hours?: number; end?: number; replyTo?: number; threadId?: number | null },
+    opts: { kind: 'production' | 'manual'; hours?: number; end?: number; replyTo?: number; threadId?: number | null; to?: number },
   ): Promise<'posted' | 'quiet' | 'failed'> {
     return this.serial(chatId, async () => {
       const { store, config, log } = this.deps;
@@ -84,8 +97,11 @@ export class Engine {
       const end = opts.end ?? this.deps.now();
       const window = { start: end - hours * 3600, end };
       const s = strings(this.uiLang(chat));
-      const post = { replyTo: opts.replyTo, threadId: opts.threadId };
+      const post = { replyTo: opts.replyTo, threadId: opts.threadId, to: opts.to };
 
+      if (chat.kind === 'watched' && this.deps.reader) {
+        await this.deps.reader.refresh(chat, window).catch((err) => log(`chat ${chatId}: reader refresh failed: ${describeError(err)}`));
+      }
       const count = store.countMessages(chatId, window.start, window.end);
       if (count < config.minDigestMessages) {
         if (opts.kind === 'manual') await this.send(chat, s.notEnough(count, hours), post);
@@ -119,7 +135,7 @@ export class Engine {
             }),
           );
         }
-        store.setPosted(row.id, ids);
+        store.setPosted(row.id, ids, post.to ?? this.destination(chat));
         const m = row.metrics!;
         log(
           `chat ${chatId}: ${opts.kind} digest #${row.id} posted (v${genome.version}, ${transcript.messages.length} msgs, ` +
@@ -181,7 +197,7 @@ export class Engine {
           await this.send(
             chat,
             s.pending({ from: report.championBefore, to: best.version, rationale: escapeHtml(best.rationale), days: report.windows.length, judge: pct(best.winRate) }),
-            { keyboard: approvalKeyboard(this.uiLang(chat), best.version), threadId: post.threadId },
+            { keyboard: approvalKeyboard(this.uiLang(chat), chatId, best.version), threadId: post.threadId },
           );
         } else if (report.decision === 'vetoed') {
           await this.announceVeto(chat, report.championBefore, report.championAfter);

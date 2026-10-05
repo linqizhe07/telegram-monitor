@@ -60,6 +60,22 @@ export interface Strings {
   nothingToRollBack: string;
   modes: Record<'auto' | 'propose' | 'off', string>;
   langNames: Record<'auto' | 'en' | 'zh', string>;
+
+  ownerStart: string;
+  reportHelp: string;
+  ownerOnly: string;
+  noReader: string;
+  watchUsage: string;
+  watching(p: { title: string; kind: string; members: number | null; ref: string; converted: boolean }): string;
+  firstPull(n: number): string;
+  watchFailed(reason: string): string;
+  unwatched(title: string): string;
+  noSources: string;
+  pickSource(list: string): string;
+  sourcesHeader: string;
+  sourceLine(p: { index: number; title: string; ref: string; messages: number; next: string; error: string | null }): string;
+  optoutNotHere: string;
+  readerStatus(error: string | null): string;
 }
 
 const en: Strings = {
@@ -157,6 +173,37 @@ const en: Strings = {
   nothingToRollBack: 'The current playbook has no earlier version to go back to.',
   modes: { auto: 'auto (adopts what wins)', propose: 'propose (admins approve)', off: 'off' },
   langNames: { auto: 'auto', en: 'English', zh: '中文' },
+
+  ownerStart:
+    '👋 This chat is your report desk. Digests of the groups you watch arrive here; 👍/👎 and replies here teach them.\n\n' +
+    '/watch @group — start watching a public group or channel (through the reader account)\n' +
+    '/sources — what is watched, and its state\n' +
+    '/digest @group [hours] · /rsi @group · /settings @group … · /unwatch @group',
+  reportHelp:
+    '<b>Report chat</b> (digests of watched groups)\n' +
+    '/watch @group · /unwatch @group · /sources\n' +
+    '/digest @group [hours] — digest now\n' +
+    '/rsi @group — how its digest is improving itself\n' +
+    '/feedback @group &lt;text&gt; — or reply to a digest\n' +
+    '/settings @group hour 21 · tz … · lang … · rsi … · here (post its digests to this chat)\n' +
+    'With one watched group, the @group part can be left out.',
+  ownerOnly: 'Only the owner of this Pulse (PULSE_OWNER_IDS) can do that.',
+  noReader:
+    'Watching groups you do not run needs the reader account: set TELEGRAM_API_ID and TELEGRAM_API_HASH, run <code>npm run login</code>, and restart (COOKBOOK.md, step 4).',
+  watchUsage: 'Usage: <code>/watch @groupname</code>, a t.me link, or the -100… id of a group the reader account has joined.',
+  watching: (p) =>
+    `👀 Watching <b>${p.title}</b> (${p.kind}${p.members ? `, ${p.members.toLocaleString('en-US')} members` : ''}, ${p.ref}). Its digest will arrive here.` +
+    (p.converted ? '\nThis group is now a report chat: its own messages are no longer recorded.' : ''),
+  firstPull: (n) => `Read ${n} message${n === 1 ? '' : 's'} from the last 24h. /digest gives a first digest now.`,
+  watchFailed: (r) => `Could not watch it: ${r}.`,
+  unwatched: (t) => `Stopped watching ${t}. What was read stays until the retention period ends.`,
+  noSources: 'No group is watched from here yet: /watch @group.',
+  pickSource: (list) => `Which group? Put it after the command, e.g. <code>/digest @name</code> or <code>/digest #2</code>.\n${list}`,
+  sourcesHeader: '<b>Watched from here</b>',
+  sourceLine: (p) =>
+    `#${p.index} ${p.title} (${p.ref}) · ${p.messages} msgs in 24h · next digest ${p.next}${p.error ? `\n   ⚠️ ${p.error}` : ''}`,
+  optoutNotHere: 'Opt-out applies to groups this bot sits in.',
+  readerStatus: (e) => (e ? `Reader account: ⚠️ ${e}` : 'Read by the reader account'),
 };
 
 const zh: Strings = {
@@ -254,6 +301,37 @@ const zh: Strings = {
   nothingToRollBack: '当前 playbook 没有更早的版本可以回退。',
   modes: { auto: '自动（赢了就采用）', propose: '提议（管理员批准）', off: '关闭' },
   langNames: { auto: '自动', en: 'English', zh: '中文' },
+
+  ownerStart:
+    '👋 这里是你的报告台。你监控的群的摘要会发到这里；在这里点 👍/👎、回复摘要，就是在教它。\n\n' +
+    '/watch @群 — 开始监控一个公开群或频道（通过读者账号）\n' +
+    '/sources — 在监控哪些、状态如何\n' +
+    '/digest @群 [小时] · /rsi @群 · /settings @群 … · /unwatch @群',
+  reportHelp:
+    '<b>报告群</b>（接收被监控群的摘要）\n' +
+    '/watch @群 · /unwatch @群 · /sources\n' +
+    '/digest @群 [小时] — 立即出摘要\n' +
+    '/rsi @群 — 它的摘要怎么改进自己\n' +
+    '/feedback @群 &lt;内容&gt; — 也可以直接回复摘要\n' +
+    '/settings @群 hour 21 · tz … · lang … · rsi … · here（把它的摘要发到这里）\n' +
+    '只监控一个群时，@群 可以省略。',
+  ownerOnly: '只有这个 Pulse 的部署者（PULSE_OWNER_IDS）可以这样做。',
+  noReader:
+    '监控别人的群需要读者账号：在 .env 填 TELEGRAM_API_ID 和 TELEGRAM_API_HASH，运行 <code>npm run login</code>，再重启（见 COOKBOOK.md 第 4 步）。',
+  watchUsage: '用法：<code>/watch @群用户名</code>，或者 t.me 链接，或者读者账号已加入的群的 -100… id。',
+  watching: (p) =>
+    `👀 开始监控 <b>${p.title}</b>（${p.kind}${p.members ? `，${p.members.toLocaleString('zh-CN')} 人` : ''}，${p.ref}），摘要会发到这里。` +
+    (p.converted ? '\n这个群现在是报告群：它自己的消息不再记录。' : ''),
+  firstPull: (n) => `已读取最近 24 小时的 ${n} 条消息。发 /digest 可以马上出第一份摘要。`,
+  watchFailed: (r) => `没能开始监控：${r}。`,
+  unwatched: (t) => `已停止监控 ${t}。已读到的消息到保留期结束后删除。`,
+  noSources: '这里还没有监控任何群：/watch @群。',
+  pickSource: (list) => `哪个群？写在命令后面，例如 <code>/digest @群名</code> 或 <code>/digest #2</code>。\n${list}`,
+  sourcesHeader: '<b>在这里监控的群</b>',
+  sourceLine: (p) =>
+    `#${p.index} ${p.title}（${p.ref}）· 近 24 小时 ${p.messages} 条 · 下一份摘要 ${p.next}${p.error ? `\n   ⚠️ ${p.error}` : ''}`,
+  optoutNotHere: '退出收录只对 bot 所在的群有效。',
+  readerStatus: (e) => (e ? `读者账号：⚠️ ${e}` : '由读者账号读取'),
 };
 
 export const STRINGS: Record<UiLang, Strings> = { en, zh };

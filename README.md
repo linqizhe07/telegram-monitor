@@ -1,10 +1,25 @@
 # Telegram Monitor · 会自我进化的群聊速览
 
-把 bot（在群里自称 Pulse）拉进 Telegram 群，它会做三件事：
+盯住 Telegram 群，包括 Binance、OKX 这类你说了不算的公开大群，每天告诉你群里在聊什么、有什么痛点、新想法和机会。摘要的写法还会自己越改越好。
 
-1. **记录**：群里的每条消息存在本地 SQLite，默认保留 7 天。
-2. **总结**：每天定时发一份 24 小时速览，分**话题 / 痛点 / 新想法 / 机会 / 悬而未决**五栏，每条都链接到原消息。同一个痛点连续出现会标上「↻ 第 3 天」。
-3. **自我进化（RSI）**：每发完一份摘要，就跑一轮递归自我改进。它改写自己的摘要规则（playbook），拿新规则在最近几天的聊天上和现任版本盲测，赢了才采用。读者投 👎 可以否决新版本。
+**完整上手指南：[COOKBOOK.md](COOKBOOK.md)**，从注册账号到 24 小时部署，按步骤来。
+
+## 两种接法
+
+| | 别人的群（Binance、OKX…） | 你自己管的群 |
+|---|---|---|
+| 怎么读到消息 | **读者账号**：一个专用的 Telegram 用户账号，走官方 MTProto 协议。公开群和频道不用加入（跟手机上的预览一样）；私密群要先手动加入 | bot 在群里（关隐私模式，或给 bot 管理员权限） |
+| 摘要发到哪 | 你和 bot 的私聊，或团队私密群；不会发回原群 | 群里 |
+| 反馈来自 | 你和你的团队 | 群成员 |
+| 需要 | bot token + Claude API key + 专用账号的 `api_id/api_hash` | bot token + Claude API key |
+
+为什么别人的群不能直接用 bot：bot 只能由群管理员拉进群，自己不能凭链接加群；官方大群不会同意，在别人群里发摘要也等于刷屏。
+
+## 它做三件事
+
+1. **记录**：消息存在本地 SQLite，默认保留 7 天。
+2. **总结**：每天定时出一份 24 小时速览，分**话题 / 痛点 / 新想法 / 机会 / 悬而未决**五栏，每条都链接到原消息。同一个痛点连续出现会标上「↻ 第 3 天」。
+3. **自我进化（RSI）**：每出一份摘要，就跑一轮递归自我改进。它改写自己的摘要规则（playbook），拿新规则在最近几天的聊天上和现任版本盲测，赢了才采用。读者投 👎 可以否决新版本。
 
 下面是 Claude 在仓库自带的合成群聊（`fixtures/alpha-builders.zh.json`，人物都是虚构的）上写的第一天摘要，节选。这是干跑：由 Claude 子代理代替 API，逐字回答 Pulse 生成的真实请求文件。
 
@@ -37,42 +52,34 @@
 
 ## 快速开始
 
-需要 Node ≥ 22.18。Pulse 直接用 Node 自带的 TypeScript 运行和 SQLite，没有构建步骤。
-
-1. 在 Telegram 找 **@BotFather**，发 `/newbot` 拿到 token。
-2. 还在 @BotFather：`/setprivacy` → 选你的 bot → **Disable**。不关隐私模式，bot 在群里只看得到命令。如果 bot 已经在群里，要移出后重新拉进来；或者直接把它设为群管理员。
-3. 配置并启动：
-
-```bash
-cp .env.example .env
-```
+需要 Node ≥ 22.18（直接用 Node 自带的 TypeScript 运行和 SQLite，没有构建步骤）。细节都在 [COOKBOOK.md](COOKBOOK.md)。
 
 ```bash
 npm install
 ```
 
 ```bash
-npm start
+cp .env.example .env
 ```
 
-   `.env` 里填 `TELEGRAM_BOT_TOKEN` 和 `ANTHROPIC_API_KEY`。建议也填 `PULSE_OWNER_IDS`：私聊 bot 发 `/start`，它会告诉你你的 user id。填了以后，只有你能把它拉进群，别人拉进去它会自己退出，不会花你的 API 额度。
-4. 把 bot 拉进群。它会发一条自我介绍，第二天 09:00（可以改）发第一份摘要；想马上看效果就发 `/digest`。
+1. `.env` 填 `TELEGRAM_BOT_TOKEN`（找 @BotFather 发 `/newbot`）、`ANTHROPIC_API_KEY`、`PULSE_OWNER_IDS`（你的 user id，私聊 bot 发 `/start` 可以看到）。
+2. 要监控别人的群：再填 `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`（用专用账号登录 my.telegram.org 申请），然后运行一次 `npm run login`。
+3. `npm start`。私聊 bot 发 `/watch @某个公开群`，摘要就会发到这个私聊。管理自己的群：把 bot 拉进去，并在 @BotFather 关掉隐私模式。
 
-## 群里的命令
+## 命令
 
-| 命令 | 谁可以用 | 作用 |
+| 命令 | 在哪用 | 作用 |
 |---|---|---|
-| `/digest [小时]` | 所有人（30 分钟冷却） | 立即总结最近 N 小时，默认 24 |
-| `/pulse` | 所有人 | 状态：近 24 小时消息数、下一份摘要的时间、当前 playbook 版本 |
-| `/rsi` | 所有人 | 进化记录：历代版本、胜率、读者投票、改进者的策略笔记、近 7 天花费 |
-| `/rsi playbook` | 所有人 | 当前完整的摘要规则 |
-| `/rsi evolve` · `/rsi rollback [v]` | 管理员 | 立即跑一轮 · 回退版本（回退也算一次否决） |
-| `/feedback 内容` | 所有人 | 告诉摘要哪里该改。直接回复某份摘要也行 |
-| 👍 / 👎 按钮 | 所有人 | 给摘要投票。投票会进入下一轮自我改进，也能否决刚上任的版本 |
-| `/optout` · `/optin` | 所有人 | 不收录自己的消息（并删除已存的）· 恢复收录 |
-| `/settings` | 查看：所有人；修改：管理员 | `hour 21` · `tz Europe/London` · `lang auto\|en\|zh` · `rsi auto\|propose\|off` · `here`（论坛群里在某个话题发，摘要就发到那个话题） |
+| `/watch @群` · `/unwatch @群` · `/sources` | 报告台（你的私聊或团队群，仅 owner） | 开始监控（`@用户名`、`t.me` 链接，或读者账号已加入的私密群的名字）· 停止监控 · 列表和状态 |
+| `/digest [@群] [小时]` | 都可以（30 分钟冷却） | 立即总结最近 N 小时，默认 24 |
+| `/pulse [@群]` | 都可以 | 状态：近 24 小时消息数、下一份摘要的时间、playbook 版本 |
+| `/rsi [@群]` · `playbook` · `evolve` · `rollback [v]` | 都可以；后两个限管理员 | 进化记录、当前规则、立即跑一轮、回退版本（回退也算一次否决） |
+| `/feedback [@群] 内容`，或直接回复某份摘要 | 都可以 | 告诉摘要哪里该改 |
+| 👍 / 👎 按钮 | 都可以 | 投票会进入下一轮自我改进，也能否决刚上任的版本 |
+| `/settings [@群] …` | 查看：都可以；修改：管理员 | `hour 21` · `tz Europe/London` · `lang auto\|en\|zh` · `rsi auto\|propose\|off` · `here` |
+| `/optout` · `/optin` | 只在 bot 模式的群里 | 不收录自己的消息（并删除已存的）· 恢复收录 |
 
-界面文字有中英两套，按群里的主要语言自动切换，也可以用 `/settings lang` 固定。
+报告台里只监控一个群时，`@群` 可以省略；监控多个群时写 `@用户名` 或 `#序号`。界面文字有中英两套，自动切换。
 
 ## RSI：它怎么改进自己
 
@@ -116,6 +123,7 @@ npm start
 - `/optout` 立刻删除这个人已存的消息，之后也不再记录。
 - 宪法禁止给个人画像、禁止输出个人信息，也禁止听从聊天里对 AI 下的指令（防注入）。
 - Bot 进群时会公开说明自己记录什么、保留多久、怎么退出。
+- 监控别人的群时没有这一步：群成员不会知道有人在读，跟任何一个潜水成员一样。请遵守群规和当地的数据保护法，摘要只给自己和团队看，见 [COOKBOOK.md](COOKBOOK.md) 第 13 步。
 
 ## 开发
 
@@ -131,15 +139,24 @@ npm run typecheck
 npm run replay -- --fake
 ```
 
-- `npm test`：41 个测试，覆盖转写、引用核验、渲染、整个 RSI 循环（采用 / 拒绝 / 提议 / 否决 / 校准）、bot 收发和定时器，用的是假 Telegram 加一个确定性的替身模型；另有两个测试用模拟的 HTTP 层驱动真实的 Claude SDK，检查发出的请求和对拒答、截断、格式错误的处理。
+- `npm test`：55 个测试，覆盖这几块：
+  - 转写、引用核验、渲染；
+  - 整个 RSI 循环：采用、拒绝、提议、否决、校准；
+  - bot 收发和定时器；
+  - 读者账号：MTProto 消息转换、分页和游标、报错翻译、按名字找私密群；
+  - 报告台：私聊 `/watch`，摘要、投票和回复都回到被监控的群。
+
+  用的是假 Telegram、假 MTProto 客户端和一个确定性的替身模型。另有两个测试用模拟的 HTTP 层驱动真实的 Claude SDK，检查发出的请求，以及对拒答、截断、格式错误的处理。
 - `npm run replay -- --fake`：在 `fixtures/alpha-builders.zh.json` 上离线回放。这是一个合成的两天群聊，218 条消息，带人工标注的「埋点」（痛点、想法、机会……）。回放先发两天摘要，再跑几代 RSI，并用埋点做外部核对（RSI 循环本身看不到埋点）。
 - `npm run replay -- --generations 2`：同样的回放，用真 Claude，需要 `ANTHROPIC_API_KEY`，约花 $5。
 - `npm run replay -- --answers <dir>`：提示词干跑。每次模型调用都写成一个请求文件，答案从对应的文件读回，方便逐个检查真实请求。
 
 ```
 src/
-  main.ts          启动：长轮询、定时器、保留期清理
-  bot.ts           Telegram 更新：记录消息、命令、按钮、反馈、进群
+  main.ts          启动：长轮询、读者账号、定时器、保留期清理
+  bot.ts           Telegram 更新：记录消息、命令、报告台、/watch、按钮、反馈、进群
+  reader.ts        读者账号：解析群、按游标拉取新消息、摘要前刷新表情数和编辑、报错翻译
+  reader-client.ts 用 npm run login 保存的会话连上 Telegram（GramJS / MTProto）
   engine.ts        每个群串行跑：摘要 → 发群 → 一轮 RSI；采用、否决、回退的公告
   digest.ts        写摘要（窗口太长时分段再合并）、连续天数
   prompts.ts       系统提示词 + 宪法、种子 playbook、各角色的任务
@@ -151,13 +168,15 @@ src/
   render.ts        Telegram HTML、分段、投票按钮
   store.ts         SQLite（node:sqlite）
   fake-llm.ts      测试和 --fake 用的替身模型
+scripts/login.ts   读者账号登录（手机号、验证码、两步验证密码，你本人输入）
 scripts/replay.ts  离线回放
 fixtures/          合成群聊 + 标注
 ```
 
 ## 诚实说明
 
-- **没接过真 Telegram**：这里没有 bot token。客户端按 Bot API 文档写，测试用的是假 Telegram。第一次跑请先在小群试。
+- **没接过真 Telegram**：这里既没有 bot token，也没有可登录的读者账号。Bot 客户端按 Bot API 文档写，读者账号按 GramJS 2.26 的接口写，测试分别用假 Telegram 和假 MTProto 客户端。第一次跑请先监控一个小的公开群。
+- **读者账号有被 Telegram 限制或封号的风险**：程序只读、低频（默认 2 分钟一轮），也不自动进群，但无法保证。所以要用专用账号，见 [COOKBOOK.md](COOKBOOK.md) 第 4、13 步。
 - **没调过真 Claude API**：这里也没有 API key。代码按 SDK 0.131 的类型写，类型检查通过。用到了结构化输出、流式、自适应思考、`fallbacks: "default"`（beta `server-side-fallback-2026-07-01`），这几项都没有实际调用过。提示词另外做过一次干跑：用 Claude 子代理代替 API，逐个回答真实请求文件。
 - **覆盖率靠回复链和对话爆发来识别「热门讨论」**：群里很少用「回复」的话，这个信号会弱一些。
 - **评审和写摘要的是同一类模型**，会有共同盲区。代码检查和读者投票能缓解，不能根除。

@@ -8,13 +8,15 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "start": "node --env-file-if-exists=.env src/main.ts",
+    "start": "node --no-experimental-webstorage --env-file-if-exists=.env src/main.ts",
+    "login": "node --no-experimental-webstorage --env-file-if-exists=.env scripts/login.ts",
     "replay": "node --env-file-if-exists=.env scripts/replay.ts",
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",
+    "telegram": "^2.26.22",
     "zod": "^4.6.5"
   },
   "devDependencies": {

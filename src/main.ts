@@ -2,6 +2,8 @@ import { PulseBot } from './bot.ts';
 import { loadConfig } from './config.ts';
 import { Engine } from './engine.ts';
 import { AnthropicLlm } from './llm.ts';
+import { connectReader } from './reader-client.ts';
+import { Reader } from './reader.ts';
 import { startScheduler } from './scheduler.ts';
 import { Store } from './store.ts';
 import { TelegramApi, type BotCommand } from './telegram.ts';
@@ -15,6 +17,8 @@ const COMMANDS: Record<'en' | 'zh', BotCommand[]> = {
     { command: 'optout', description: 'Leave my messages out of digests' },
     { command: 'optin', description: 'Include my messages again' },
     { command: 'settings', description: 'Time, time zone, language, RSI mode (admins)' },
+    { command: 'watch', description: 'Watch a public group or channel (owner, reader account)' },
+    { command: 'sources', description: 'Watched groups and their state' },
     { command: 'help', description: 'All commands' },
   ],
   zh: [
@@ -25,6 +29,8 @@ const COMMANDS: Record<'en' | 'zh', BotCommand[]> = {
     { command: 'optout', description: '摘要不收录我的消息' },
     { command: 'optin', description: '重新收录我的消息' },
     { command: 'settings', description: '时间、时区、语言、自我进化模式（管理员）' },
+    { command: 'watch', description: '监控一个公开群或频道（部署者，需读者账号）' },
+    { command: 'sources', description: '监控中的群和状态' },
     { command: 'help', description: '全部命令' },
   ],
 };
@@ -52,7 +58,7 @@ async function main(): Promise<void> {
   const me = await api.getMe();
   log(`signed in as @${me.username} · model ${config.model} · db ${config.dbPath} · ${store.listChats().length} group(s)`);
   if (!me.can_read_all_group_messages) {
-    log('warning: privacy mode is on, so the bot only sees commands in groups where it is not an admin. @BotFather → /setprivacy → Disable.');
+    log('note: privacy mode is on. Fine for report chats (DM or a report group); a group you run needs it off (@BotFather → /setprivacy → Disable) or the bot as admin.');
   }
   if (config.ownerIds.length === 0) {
     log('warning: PULSE_OWNER_IDS is empty, so anyone who finds the bot can add it to a group (and spend your API credits).');
@@ -61,10 +67,43 @@ async function main(): Promise<void> {
   await api.setCommands(COMMANDS.en, { type: 'default' });
   await api.setCommands(COMMANDS.zh, { type: 'default' }, 'zh');
 
+  // The reader account: groups you do not run, read through a Telegram user session (see COOKBOOK.md).
+  const defaults = { language: config.language, digestHour: config.digestHour, timezone: config.timezone, rsiMode: config.rsiMode };
+  let reader: Reader | null = null;
+  const connection = config.telegramApiId
+    ? await connectReader(config, log).catch((err) => {
+        log(`reader: could not connect: ${(err as Error).message}`);
+        return null;
+      })
+    : null;
+  if (connection) {
+    reader = new Reader({ client: connection.client, store, config, log, now });
+    log(`reader account: ${connection.name}`);
+    if (config.ownerIds.length === 0) log('warning: the reader account is on but PULSE_OWNER_IDS is empty, so nobody can use /watch');
+    for (const ref of config.watch) {
+      if (config.reportTo === null) {
+        log('PULSE_WATCH needs PULSE_REPORT_TO (or PULSE_OWNER_IDS) to know where to send the digests');
+        break;
+      }
+      try {
+        const info = await reader.resolve(ref);
+        const known = store.getChat(info.chatId);
+        if (known?.kind === 'watched') store.updateChat(info.chatId, { enabled: true });
+        else store.watchChat(info, config.reportTo, null, defaults);
+        log(`watching ${info.title} (${info.ref}) → chat ${store.getChat(info.chatId)!.reportChatId}`);
+      } catch (err) {
+        log(`PULSE_WATCH ${ref}: ${(err as Error).message}`);
+      }
+    }
+  } else if (config.watch.length > 0) {
+    log('PULSE_WATCH is set but the reader account is not signed in (TELEGRAM_API_ID / TELEGRAM_API_HASH, then npm run login)');
+  }
+
   const llm = new AnthropicLlm({ model: config.model });
-  const engine = new Engine({ store, llm, config, api, now, log });
-  const bot = new PulseBot({ store, engine, api, config, me, now, log });
+  const engine = new Engine({ store, llm, config, api, now, log, reader });
+  const bot = new PulseBot({ store, engine, api, config, me, now, log, reader });
   const stopScheduler = startScheduler(engine, store, { now, log });
+  const stopReader = reader ? reader.start() : () => undefined;
 
   const purge = () => {
     const r = store.purgeBefore(now() - config.retentionDays * 86_400);
@@ -81,6 +120,8 @@ async function main(): Promise<void> {
     log(`${signal}: stopping`);
     abort.abort();
     stopScheduler();
+    stopReader();
+    await connection?.disconnect().catch(() => undefined);
     clearInterval(purgeTimer);
     await Promise.race([engine.idle(), new Promise((r) => setTimeout(r, 10_000))]);
     store.close();

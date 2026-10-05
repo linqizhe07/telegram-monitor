@@ -124,12 +124,13 @@ export function voteKeyboard(lang: UiLang, digestId: number, tally: { up: number
   ];
 }
 
-export function approvalKeyboard(lang: UiLang, version: number): InlineKeyboard {
+/** Adopt/reject buttons for a proposed playbook. The chat id travels along: one report chat can serve several groups. */
+export function approvalKeyboard(lang: UiLang, chatId: number, version: number): InlineKeyboard {
   const s = strings(lang);
   return [
     [
-      { text: s.approve, callback_data: `g:${version}:1` },
-      { text: s.reject, callback_data: `g:${version}:0` },
+      { text: s.approve, callback_data: `g:${chatId}:${version}:1` },
+      { text: s.reject, callback_data: `g:${chatId}:${version}:0` },
     ],
   ];
 }

@@ -31,6 +31,15 @@ export interface Config {
   manualCooldownMinutes: number;
   maxTranscriptChars: number;
   maxMessageChars: number;
+  /** Reader account (MTProto user session) for groups you do not run: api id/hash from my.telegram.org. */
+  telegramApiId: number | null;
+  telegramApiHash: string;
+  readerSession: string;
+  readerPollSeconds: number;
+  /** Groups/channels to watch at startup (@username, t.me link or -100… id), reported to `reportTo`. */
+  watch: string[];
+  /** Chat that receives digests of watched groups: your user id (a DM with the bot) or a private group id. */
+  reportTo: number | null;
 }
 
 const EFFORTS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -86,6 +95,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     }
   };
   const timezone = env.PULSE_TIMEZONE?.trim() || 'Asia/Shanghai';
+  const ownerIds = field('PULSE_OWNER_IDS', () => ids(env.PULSE_OWNER_IDS));
   if (!isValidTimezone(timezone)) throw new Error(`PULSE_TIMEZONE: unknown time zone "${timezone}"`);
   return {
     telegramToken: env.TELEGRAM_BOT_TOKEN?.trim() ?? '',
@@ -103,12 +113,24 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     rsiEveryHours: field('PULSE_RSI_EVERY_HOURS', () => int(env.PULSE_RSI_EVERY_HOURS, 20, 0, 24 * 30)),
     rsiMinMessages: field('PULSE_RSI_MIN_MESSAGES', () => int(env.PULSE_RSI_MIN_MESSAGES, 30, 1, 1_000_000)),
     promoteThreshold: field('PULSE_RSI_PROMOTE_AT', () => float(env.PULSE_RSI_PROMOTE_AT, 0.625, 0.5, 1)),
-    ownerIds: field('PULSE_OWNER_IDS', () => ids(env.PULSE_OWNER_IDS)),
+    ownerIds,
     minDigestMessages: field('PULSE_MIN_MESSAGES', () => int(env.PULSE_MIN_MESSAGES, 5, 1, 10_000)),
     manualCooldownMinutes: field('PULSE_DIGEST_COOLDOWN_MIN', () => int(env.PULSE_DIGEST_COOLDOWN_MIN, 30, 0, 1440)),
     maxTranscriptChars: field('PULSE_MAX_TRANSCRIPT_CHARS', () =>
       int(env.PULSE_MAX_TRANSCRIPT_CHARS, 600_000, 20_000, 3_000_000),
     ),
     maxMessageChars: field('PULSE_MAX_MESSAGE_CHARS', () => int(env.PULSE_MAX_MESSAGE_CHARS, 2000, 200, 20_000)),
+    telegramApiId: field('TELEGRAM_API_ID', () => (env.TELEGRAM_API_ID?.trim() ? int(env.TELEGRAM_API_ID, 0, 1, 2 ** 31) : null)),
+    telegramApiHash: env.TELEGRAM_API_HASH?.trim() ?? '',
+    readerSession: env.PULSE_READER_SESSION?.trim() || './data/reader.session',
+    readerPollSeconds: field('PULSE_READER_POLL_SECONDS', () => int(env.PULSE_READER_POLL_SECONDS, 120, 30, 3600)),
+    watch: (env.PULSE_WATCH ?? '').split(/[,\s]+/).map((x) => x.trim()).filter(Boolean),
+    reportTo: field('PULSE_REPORT_TO', () => {
+      const raw = env.PULSE_REPORT_TO?.trim();
+      if (!raw) return ownerIds[0] ?? null;
+      const n = Number(raw);
+      if (!Number.isSafeInteger(n)) throw new Error(`"${raw}" is not a Telegram chat id`);
+      return n;
+    }),
   };
 }
