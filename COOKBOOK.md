@@ -323,11 +323,21 @@ claude mcp add --scope user telegram-monitor -- /opt/homebrew/bin/node --no-expe
 
 ## 11. 长期运行
 
-**Mac 本机**（合上盖子就停）：
+**Mac 本机**：断线、睡眠、重启都没关系，**只要服务在跑**，一联网就会从断点把这段时间的消息全部补回来，活动日志里会记一条「RECOVERED」，写明补回了多少条。前提是服务得在跑，有两种方式：
 
-```bash
-caffeinate -i npm start
-```
+- 手动：在项目目录里运行（插电时不会睡眠；合上盖子仍会睡，除非接了外接显示器）
+
+  ```bash
+  caffeinate -is npm start
+  ```
+
+- 自动（推荐）：装成 macOS 的 LaunchAgent。登录时自动启动、意外退出时自动重启，日志写到 `data/monitor.log`。会在 `~/Library/LaunchAgents/` 里加一个文件，`off` 会删掉它。
+
+  ```bash
+  npm run autostart -- on
+  ```
+
+  `npm run autostart -- status` 查看状态，`-- off` 卸载。装之前先停掉手动跑的那个，两个进程不能同时用同一个会话。
 
 **云服务器**（24/7，推荐）：1 核 1G 的 Linux 就够，地区要能连上 Telegram 和 Anthropic API。
 
