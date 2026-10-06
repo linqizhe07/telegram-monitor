@@ -1,7 +1,7 @@
 // Connects the reader account (GramJS over MTProto) from the session saved by `npm run login`.
 
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { Api, TelegramClient } from 'telegram';
+import { Api, TelegramClient, utils } from 'telegram';
 import { returnBigInt } from 'telegram/Helpers.js';
 import { Logger, LogLevel } from 'telegram/extensions/Logger.js';
 import { UpdateConnectionState } from 'telegram/network/index.js';
@@ -145,6 +145,26 @@ export interface ReaderConnection {
   pausedUntil: () => number;
   /** Called when Telegram says the account joined, left or was removed from some chat (or a chat it is in changed). */
   onMembershipNotice: (l: (n: MembershipNotice) => void) => void;
+  /** Called with the chat id when Telegram pushes a new message in a group or channel the account is in. */
+  onLiveMessage: (l: (chatId: number) => void) => void;
+  /** What Telegram pushed in the last 10 minutes, by kind (to see that the push stream is alive). */
+  pushes: () => { since: number; total: number; messages: number; kinds: Record<string, number> };
+}
+
+/**
+ * The group or channel a pushed update brings a new message for (-100… / -id), or null (a private
+ * chat, an edit, anything else). updateChannelTooLong counts: it means "there is more, fetch it".
+ */
+export function liveMessageChat(update: unknown): number | null {
+  const channel = (id: unknown) => -(1_000_000_000_000 + Number(String(id)));
+  if (update instanceof Api.UpdateChannelTooLong) return channel(update.channelId);
+  if (update instanceof Api.UpdateShortChatMessage) return -Number(String(update.chatId));
+  if (update instanceof Api.UpdateNewChannelMessage || update instanceof Api.UpdateNewMessage) {
+    const p = (update.message as { peerId?: unknown }).peerId;
+    if (p instanceof Api.PeerChannel) return channel(p.channelId);
+    if (p instanceof Api.PeerChat) return -Number(String(p.chatId));
+  }
+  return null;
 }
 
 /** The chat a membership notice is about (-100… for channels and supergroups, -id for basic groups). */
@@ -229,6 +249,15 @@ export function acquireSessionLock(sessionPath: string): { release: () => void }
   return { release };
 }
 
+/** Asks for the update state, which is what makes Telegram push new messages to this session. */
+async function subscribeToUpdates(client: TelegramClient, log: (line: string) => void): Promise<void> {
+  try {
+    await client.invoke(new Api.updates.GetState());
+  } catch (err) {
+    log(`reader: could not subscribe to Telegram's updates (${(err as Error).message}); chats are still read on schedule`);
+  }
+}
+
 /** The connected reader account, or null (with the reason logged) when it is not set up. */
 export async function connectReader(
   config: Config,
@@ -243,6 +272,17 @@ export async function connectReader(
   const client = newClient(config, readFileSync(config.readerSession, 'utf8').trim());
   // Reopen saved chats without resolving their names again (resolving is the scarcest budget).
   (client as unknown as { inputPeer: (p: SavedPeer) => unknown }).inputPeer = inputPeer;
+  // The newest message of many chats in one request (see MtClient.peekTops).
+  (client as unknown as { peekTops: (peers: unknown[]) => Promise<Map<number, number>> }).peekTops = async (peers) => {
+    const res = (await client.invoke(new Api.messages.GetPeerDialogs({ peers: peers.map((p) => new Api.InputDialogPeer({ peer: utils.getInputPeer(p as Api.TypeEntityLike as never) })) }))) as Api.messages.PeerDialogs;
+    const out = new Map<number, number>();
+    for (const d of res.dialogs) {
+      if (!(d instanceof Api.Dialog)) continue;
+      const id = d.peer instanceof Api.PeerChannel ? -(1_000_000_000_000 + Number(String(d.peer.channelId))) : d.peer instanceof Api.PeerChat ? -Number(String(d.peer.chatId)) : null;
+      if (id !== null) out.set(id, d.topMessage);
+    }
+    return out;
+  };
   const lock = acquireSessionLock(config.readerSession);
   const supervisor = opts.activity ? superviseRequests(client, opts.activity, opts.titleOf ?? (() => null)) : null;
   await client.connect();
@@ -252,6 +292,9 @@ export async function connectReader(
     return null;
   }
   const me = (await client.getMe()) as { username?: string; firstName?: string; lastName?: string; id?: unknown };
+  // Telegram starts pushing updates to a session once it asks for the update state; GramJS only
+  // does that after 30 idle minutes, which a busy reader never has. Without it, nothing is pushed.
+  await subscribeToUpdates(client, log);
 
   // Connection state, from GramJS's own connected / disconnected notices.
   let current: { state: ConnectionState; since: number } = { state: 'online', since: Math.floor(Date.now() / 1000) };
@@ -265,12 +308,35 @@ export async function connectReader(
     opts.activity?.event('reader', state === 'online' ? 'connection back' : 'connection lost', 'Telegram', state === 'online' ? `offline for ${now - was.since}s; catching up` : 'network unreachable or the server stopped answering; retrying', state === 'online');
   };
   const membershipListeners = new Set<(n: MembershipNotice) => void>();
+  const liveListeners = new Set<(chatId: number) => void>();
   const selfId = String(me.id);
+  // What Telegram pushed, counted per 10-minute window, so the console can show the stream is alive.
+  let window = { since: Math.floor(Date.now() / 1000), total: 0, messages: 0, kinds: {} as Record<string, number> };
+  let last = { ...window };
   client.addEventHandler((update: unknown) => {
     if (update instanceof UpdateConnectionState) {
       if (update.state === UpdateConnectionState.connected) setState('online');
       else setState('offline');
       return;
+    }
+    const nowS = Math.floor(Date.now() / 1000);
+    if (nowS - window.since >= 600) {
+      last = window;
+      window = { since: nowS, total: 0, messages: 0, kinds: {} };
+    }
+    const kind = (update as { className?: string }).className ?? 'unknown';
+    window.total++;
+    window.kinds[kind] = (window.kinds[kind] ?? 0) + 1;
+    const live = liveMessageChat(update);
+    if (live !== null) window.messages++;
+    if (live !== null) {
+      for (const l of liveListeners) {
+        try {
+          l(live);
+        } catch (err) {
+          log(`reader: pushed message: ${(err as Error).message}`);
+        }
+      }
     }
     if (!isMembershipNotice(update, selfId)) return;
     const chatId = membershipNoticeChat(update);
@@ -301,13 +367,20 @@ export async function connectReader(
     onMembershipNotice: (l: (n: MembershipNotice) => void) => {
       membershipListeners.add(l);
     },
+    onLiveMessage: (l: (chatId: number) => void) => {
+      liveListeners.add(l);
+    },
+    pushes: () => (Math.floor(Date.now() / 1000) - window.since < 300 && last.total > 0 ? last : window),
     reconnect: () => {
       reconnecting ??= (async () => {
         setState('offline');
         opts.activity?.event('reader', 'reconnect', 'Telegram', 'a request hung: dropping the connection and opening a new one', false);
         await client.disconnect().catch(() => undefined);
         await client.connect();
-        if (await client.checkAuthorization()) setState('online');
+        if (await client.checkAuthorization()) {
+          setState('online');
+          await subscribeToUpdates(client, log);
+        }
       })().finally(() => {
         reconnecting = null;
       });

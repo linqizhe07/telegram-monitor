@@ -15,6 +15,8 @@ import { Activity } from './activity.ts';
 import { loadConfig } from './config.ts';
 import { denoise, formatSignal } from './denoise.ts';
 import { formatInviteStatus, InviteBudget } from './invite-rules.ts';
+import { NewsRadar } from './news.ts';
+import { formatLag } from './news-rules.ts';
 import { SEED_PLAYBOOK } from './prompts.ts';
 import { escapeHtml } from './render.ts';
 import { Store, type ChatRow } from './store.ts';
@@ -86,6 +88,20 @@ function freshness(c: ChatRow): string {
   const lag = caught ? Math.round((now() - caught) / 60) : null;
   if (!running) return `service NOT running: nothing new since ${caught ? when(caught, c.timezone) : 'start'}; messages posted since then come in when it starts again`;
   return lag === null ? 'service running; first catch-up not finished' : `service running; caught up ${lag <= 1 ? 'just now' : `${lag} min ago`}`;
+}
+
+// The news radar, read-only here: the running service fetches the feeds; this only reads what it
+// stored and matches it against the groups' messages.
+const radar = new NewsRadar({ store, config, now, log: () => undefined, live: false });
+
+function newsFreshness(): string {
+  if (!config.news) return 'the news radar is OFF (PULSE_NEWS=off)';
+  const feeds = store.newsSources().filter((x) => x.kind === 'rss' && x.enabled);
+  const last = Math.max(0, ...feeds.map((x) => x.lastOkAt ?? 0));
+  const failing = feeds.filter((x) => x.lastError).map((x) => x.name);
+  const running = service() !== null;
+  const age = last ? Math.round((now() - last) / 60) : null;
+  return `${running ? 'service running' : 'service NOT running (feeds are not being read)'}; feeds last read ${age === null ? 'never' : age <= 1 ? 'just now' : `${age} min ago`}${failing.length ? `; not answering: ${failing.join(', ')}` : ''}`;
 }
 
 const server = new McpServer({ name: 'telegram-monitor', version: '0.1.0' });
@@ -296,10 +312,89 @@ server.registerTool(
         `Playbook v${g.version} for ${c.title}:`,
         g.playbook,
         '',
-        'Write the digest in the language the group mostly writes in. Sections: Topics, Pain points, New ideas, Opportunities, Open questions.',
+        'Write the digest in the language the group mostly writes in. Sections: Topics, Pain points, New ideas, Opportunities, Open questions, and News in the chat.',
         'Every item cites the messages it rests on as #id, and says only what those messages support. Merge repeats; skip greetings, spam and bot noise.',
+        'News in the chat: call news_in_group for this source first. List the first-tier news the group talked about: the keyword, which outlet reported it first and when, how soon the group picked it up (or that it was talking about it before the first report), and the #ids. Leave the section out when nothing matched.',
       ].join('\n'),
     );
+  },
+);
+
+server.registerTool(
+  'news_keywords',
+  {
+    title: 'Keywords of the day from first-tier news',
+    description:
+      'The day\'s news topics from first-tier sources (Bloomberg, The New York Times, a16z, Y Combinator / Hacker News, The Block, CoinDesk, Odaily, and the news channels among the Telegram sources), ' +
+      'ranked by how many outlets carry them, each with where it showed up in the Telegram groups: how many messages, how soon after the first report, or before it. ' +
+      'Use it for "what is the news today" and "what are the groups reacting to". Read-only, from the local database.',
+    inputSchema: {
+      source: z.string().optional().describe('Only this group\'s reactions (title, @username or #n from list_sources). Optional.'),
+      limit: z.number().int().min(1).max(60).default(25),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  async ({ source, limit }) => {
+    let chat: ChatRow | undefined;
+    if (source) {
+      try {
+        chat = pick(source);
+      } catch (err) {
+        return fail((err as Error).message);
+      }
+    }
+    await radar.rebuild();
+    const v = radar.view({ limit: Math.max(limit, 60), chatId: chat?.chatId });
+    const tz = chat?.timezone ?? config.timezone;
+    const at = (t: number) => when(t, tz);
+    const ranked = [...v.keywords].sort((a, b) => Number(b.groups.length > 0) - Number(a.groups.length > 0) || b.score - a.score);
+    const multi = ranked.filter((k) => k.sources.length >= 2 || k.groups.length > 0).slice(0, limit);
+    const single = v.keywords.filter((k) => !multi.includes(k)).slice(0, Math.max(0, limit - multi.length));
+    const block = (k: (typeof v.keywords)[number], i: number) => {
+      const lines = [`${i + 1}. ${k.label} — ${k.sources.length} source${k.sources.length === 1 ? '' : 's'}: ${k.sources.map((x) => `${x.name} ${at(x.at)}`).join(', ')}`, `   "${k.headline}"${k.link ? ` ${k.link}` : ''}`];
+      if (k.groups.length === 0) lines.push('   In the groups: not mentioned.');
+      for (const g of k.groups) {
+        const lead = g.firstLag < 0 ? `first mention ${formatLag(g.firstLag)} the first report` : `first mention ${formatLag(g.firstLag)} after the first report`;
+        const level = g.level === 'hot' ? ' · HOT (several people at once)' : g.level === 'first' ? ' · the group had it FIRST' : '';
+        lines.push(`   In ${g.title}: ${g.count} message${g.count === 1 ? '' : 's'} from ${g.people} ${g.people === 1 ? 'person' : 'people'}, ${lead}${level} · ${g.messages.slice(0, 6).map((m) => `#${m.messageId}`).join(' ')}`);
+      }
+      return lines.join('\n');
+    };
+    const head = `Keywords of the day · last 24h · ${v.items24h} news items from ${v.sources.filter((x) => x.enabled && x.items24h > 0).length} sources · ${newsFreshness()} · times ${tz}`;
+    const parts = [head, '', 'Carried by two or more outlets, or showing up in the groups:', ...(multi.length ? multi.map(block) : ['(none yet)'])];
+    if (single.length) parts.push('', 'Single-source headlines:', ...single.map((k, i) => `${multi.length + i + 1}. ${k.label} — ${k.sources[0].name} ${at(k.firstAt)}: "${k.headline.slice(0, 140)}"`));
+    return text(parts.join('\n'));
+  },
+);
+
+server.registerTool(
+  'news_in_group',
+  {
+    title: 'Messages of a group that named the news',
+    description:
+      'The messages of one group (last 24 hours) that named one of the day\'s first-tier news topics, oldest first: #id, time, who, what they named, and how long after the first report (or before it). Cite them as #id in the digest\'s "News in the chat" section.',
+    inputSchema: { source: z.string().optional() },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  async ({ source }) => {
+    let c: ChatRow;
+    try {
+      c = pick(source);
+    } catch (err) {
+      return fail((err as Error).message);
+    }
+    await radar.rebuild();
+    const v = radar.view({ limit: 200, chatId: c.chatId });
+    const rows = v.keywords.filter((k) => k.groups.some((g) => g.chatId === c.chatId));
+    if (rows.length === 0) return text(`${c.title}: no message in the last 24 hours named the day's first-tier news. ${newsFreshness()}.`);
+    const at = (t: number) => when(t, c.timezone);
+    const out = [`${c.title} · news in the chat · last 24h · ${newsFreshness()} · times ${c.timezone}`];
+    for (const k of rows) {
+      const g = k.groups.find((x) => x.chatId === c.chatId)!;
+      out.push('', `${k.label} — first report: ${k.sources[0].name} ${at(k.sources[0].at)} "${k.headline.slice(0, 160)}"${k.sources.length > 1 ? ` (also ${k.sources.slice(1).map((x) => x.name).join(', ')})` : ''}${g.level === 'hot' ? ' · HOT here' : g.level === 'first' ? ' · this group had it FIRST' : ''}`);
+      for (const m of g.messages) out.push(`  [#${m.messageId} ${at(m.date)} ${m.author} · ${formatLag(m.lag)}${m.lag < 0 ? ' the report' : ''} · named ${m.terms.join(', ')}] ${m.text.replace(/\s+/g, ' ').slice(0, 300)}`);
+    }
+    return text(out.join('\n'));
   },
 );
 

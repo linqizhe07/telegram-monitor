@@ -213,6 +213,46 @@ export interface MembershipRow {
   recheckCount: number;
 }
 
+/** A news source the radar reads: an RSS/Atom feed, or a Telegram channel among the sources. */
+export interface NewsSourceRow {
+  id: string;
+  kind: 'rss' | 'telegram';
+  name: string;
+  url: string | null;
+  tier: number;
+  everyS: number;
+  enabled: boolean;
+  /** Shipped with the monitor (it can be switched off, not deleted). */
+  builtin: boolean;
+  etag: string | null;
+  lastModified: string | null;
+  lastFetchAt: number | null;
+  lastOkAt: number | null;
+  lastError: string | null;
+  itemsTotal: number;
+  createdAt: number;
+}
+
+export interface NewsItemRow {
+  id: number;
+  sourceId: string;
+  guid: string;
+  title: string;
+  summary: string;
+  link: string | null;
+  publishedAt: number;
+  seenAt: number;
+  backlog: boolean;
+}
+
+export interface NewsAlertRow {
+  chatId: number;
+  topicId: number;
+  kind: string;
+  at: number;
+  detail: string;
+}
+
 export interface ChatDefaults {
   language: Lang;
   digestHour: number;
@@ -403,6 +443,46 @@ CREATE TABLE IF NOT EXISTS memberships (
   next_check_at INTEGER,
   checks_day TEXT NOT NULL DEFAULT '',
   recheck_count INTEGER NOT NULL DEFAULT 0
+);
+-- The news radar (news.ts): first-tier news sources, what they published, and what was flagged.
+CREATE TABLE IF NOT EXISTS news_sources (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  url TEXT,
+  tier INTEGER NOT NULL DEFAULT 1,
+  every_s INTEGER NOT NULL DEFAULT 120,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  builtin INTEGER NOT NULL DEFAULT 0,
+  etag TEXT,
+  last_modified TEXT,
+  last_fetch_at INTEGER,
+  last_ok_at INTEGER,
+  last_error TEXT,
+  items_total INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS news_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id TEXT NOT NULL,
+  guid TEXT NOT NULL,
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  link TEXT,
+  published_at INTEGER NOT NULL,
+  seen_at INTEGER NOT NULL,
+  backlog INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (source_id, guid)
+);
+CREATE INDEX IF NOT EXISTS news_items_by_time ON news_items (published_at);
+-- One row per escalation (a notification), so it fires once.
+CREATE TABLE IF NOT EXISTS news_alerts (
+  chat_id INTEGER NOT NULL,
+  topic_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (chat_id, topic_id, kind)
 );
 `;
 
@@ -703,6 +783,12 @@ export class Store {
       reactions: num(r.reactions),
       edited: num(r.edited) === 1,
     }));
+  }
+
+  /** How many messages a chat has in a period, and the oldest one's date (how much of the period is covered). */
+  messageSpan(chatId: number, from: number, to: number): { count: number; oldest: number | null } {
+    const r = this.get('SELECT COUNT(*) AS n, MIN(date) AS oldest FROM messages WHERE chat_id = ? AND date >= ? AND date < ?', chatId, from, to);
+    return { count: num(r?.n ?? 0), oldest: numOrNull(r?.oldest) };
   }
 
   countMessages(chatId: number, from: number, to: number): number {
@@ -1159,7 +1245,7 @@ export class Store {
 
   // ── storage: what is kept, and clearing it ───────────────────────────────
 
-  storageCounts(): { messages: number; sources: number; people: number; activity: number; digests: number; outbox: number } {
+  storageCounts(): { messages: number; sources: number; people: number; activity: number; digests: number; outbox: number; news: number } {
     const n = (sql: string) => num(this.get(sql)?.n ?? 0);
     return {
       messages: n('SELECT COUNT(*) AS n FROM messages'),
@@ -1168,6 +1254,7 @@ export class Store {
       activity: n('SELECT COUNT(*) AS n FROM activity'),
       digests: n('SELECT COUNT(*) AS n FROM digests'),
       outbox: n('SELECT COUNT(*) AS n FROM outbox'),
+      news: n('SELECT COUNT(*) AS n FROM news_items'),
     };
   }
 
@@ -1183,6 +1270,10 @@ export class Store {
       if (what.messages) {
         deleted.messages = this.run('DELETE FROM messages').changes;
         deleted.people = this.run('DELETE FROM users').changes;
+        // The news radar's record of what it saw and flagged goes too; feeds are read afresh.
+        deleted.news = this.run('DELETE FROM news_items').changes;
+        this.run('DELETE FROM news_alerts');
+        this.run('UPDATE news_sources SET etag = NULL, last_modified = NULL, last_ok_at = NULL');
       }
       if (what.activity) deleted.activity = this.run('DELETE FROM activity').changes;
       if (what.digests) {
@@ -1370,6 +1461,139 @@ export class Store {
 
   dueMemberships(now: number): MembershipRow[] {
     return this.all('SELECT * FROM memberships WHERE next_check_at IS NOT NULL AND next_check_at <= ? ORDER BY next_check_at', now).map((r) => this.toMembership(r));
+  }
+
+  // ── news radar ───────────────────────────────────────────────────────────
+
+  private toNewsSource(r: Row): NewsSourceRow {
+    return {
+      id: str(r.id),
+      kind: str(r.kind) as NewsSourceRow['kind'],
+      name: str(r.name),
+      url: strOrNull(r.url),
+      tier: num(r.tier),
+      everyS: num(r.every_s),
+      enabled: num(r.enabled) === 1,
+      builtin: num(r.builtin) === 1,
+      etag: strOrNull(r.etag),
+      lastModified: strOrNull(r.last_modified),
+      lastFetchAt: numOrNull(r.last_fetch_at),
+      lastOkAt: numOrNull(r.last_ok_at),
+      lastError: strOrNull(r.last_error),
+      itemsTotal: num(r.items_total),
+      createdAt: num(r.created_at),
+    };
+  }
+
+  /** Adds a source if it is not there yet (a builtin one keeps the owner's switch and fetch state). */
+  ensureNewsSource(s: Pick<NewsSourceRow, 'id' | 'kind' | 'name' | 'url' | 'tier' | 'everyS'> & { builtin?: boolean; enabled?: boolean }): NewsSourceRow {
+    this.run(
+      `INSERT INTO news_sources (id, kind, name, url, tier, every_s, enabled, builtin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET name = excluded.name, url = excluded.url, tier = excluded.tier, every_s = excluded.every_s`,
+      s.id,
+      s.kind,
+      s.name,
+      s.url,
+      s.tier,
+      s.everyS,
+      s.enabled === false ? 0 : 1,
+      s.builtin ? 1 : 0,
+      this.clock(),
+    );
+    return this.newsSource(s.id)!;
+  }
+
+  newsSource(id: string): NewsSourceRow | null {
+    const r = this.get('SELECT * FROM news_sources WHERE id = ?', id);
+    return r ? this.toNewsSource(r) : null;
+  }
+
+  newsSources(): NewsSourceRow[] {
+    return this.all('SELECT * FROM news_sources ORDER BY tier, builtin DESC, name').map((r) => this.toNewsSource(r));
+  }
+
+  updateNewsSource(id: string, patch: Partial<Pick<NewsSourceRow, 'enabled' | 'etag' | 'lastModified' | 'lastFetchAt' | 'lastOkAt' | 'lastError' | 'itemsTotal' | 'name' | 'tier' | 'everyS'>>): void {
+    const cols: Record<string, string> = { enabled: 'enabled', etag: 'etag', lastModified: 'last_modified', lastFetchAt: 'last_fetch_at', lastOkAt: 'last_ok_at', lastError: 'last_error', itemsTotal: 'items_total', name: 'name', tier: 'tier', everyS: 'every_s' };
+    for (const [key, value] of Object.entries(patch)) {
+      const col = cols[key];
+      if (!col || value === undefined) continue;
+      this.run(`UPDATE news_sources SET ${col} = ? WHERE id = ?`, typeof value === 'boolean' ? (value ? 1 : 0) : (value as Param), id);
+    }
+  }
+
+  removeNewsSource(id: string): void {
+    this.transaction(() => {
+      this.run('DELETE FROM news_items WHERE source_id = ?', id);
+      this.run('DELETE FROM news_sources WHERE id = ?', id);
+    });
+  }
+
+  private toNewsItem(r: Row): NewsItemRow {
+    return {
+      id: num(r.id),
+      sourceId: str(r.source_id),
+      guid: str(r.guid),
+      title: str(r.title),
+      summary: str(r.summary),
+      link: strOrNull(r.link),
+      publishedAt: num(r.published_at),
+      seenAt: num(r.seen_at),
+      backlog: num(r.backlog) === 1,
+    };
+  }
+
+  /** Stores an item unless this source already has it. Returns the new row, or null when it was known. */
+  addNewsItem(i: Omit<NewsItemRow, 'id'>): NewsItemRow | null {
+    const r = this.run(
+      'INSERT OR IGNORE INTO news_items (source_id, guid, title, summary, link, published_at, seen_at, backlog) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      i.sourceId,
+      i.guid,
+      i.title,
+      i.summary,
+      i.link,
+      i.publishedAt,
+      i.seenAt,
+      i.backlog ? 1 : 0,
+    );
+    return r.changes > 0 ? { ...i, id: r.lastId } : null;
+  }
+
+  newsItems(since: number): NewsItemRow[] {
+    return this.all('SELECT * FROM news_items WHERE published_at >= ? ORDER BY published_at, id', since).map((r) => this.toNewsItem(r));
+  }
+
+  newsItemCounts(since: number): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const r of this.all('SELECT source_id, COUNT(*) AS n FROM news_items WHERE published_at >= ? GROUP BY source_id', since)) out.set(str(r.source_id), num(r.n));
+    return out;
+  }
+
+  /** Publish-to-seen delays (seconds) of a source's recent non-backlog items, newest first. */
+  newsDelays(sourceId: string, limit = 20): number[] {
+    return this.all('SELECT seen_at - published_at AS d FROM news_items WHERE source_id = ? AND backlog = 0 ORDER BY id DESC LIMIT ?', sourceId, limit).map((r) => num(r.d));
+  }
+
+  addNewsAlert(a: NewsAlertRow): boolean {
+    return this.run('INSERT OR IGNORE INTO news_alerts (chat_id, topic_id, kind, at, detail) VALUES (?, ?, ?, ?, ?)', a.chatId, a.topicId, a.kind, a.at, a.detail).changes > 0;
+  }
+
+  newsAlerts(since: number): NewsAlertRow[] {
+    return this.all('SELECT * FROM news_alerts WHERE at >= ? ORDER BY at DESC LIMIT 200', since).map((r) => ({ chatId: num(r.chat_id), topicId: num(r.topic_id), kind: str(r.kind), at: num(r.at), detail: str(r.detail) }));
+  }
+
+  /** Messages of a group naming any of these forms (a coarse LIKE prefilter; the caller checks each). */
+  messagesLike(chatId: number, from: number, to: number, forms: string[]): { text: string }[] {
+    if (forms.length === 0) return [];
+    const like = forms.map(() => 'text LIKE ?').join(' OR ');
+    return this.db
+      .prepare(`SELECT text FROM messages WHERE chat_id = ? AND date >= ? AND date < ? AND (${like})`)
+      .all(chatId, from, to, ...forms.map((f) => `%${f.replace(/[%_\\]/g, '')}%`)) as { text: string }[];
+  }
+
+  pruneNews(before: number): number {
+    const a = this.run('DELETE FROM news_items WHERE published_at < ?', before).changes;
+    const b = this.run('DELETE FROM news_alerts WHERE at < ?', before).changes;
+    return a + b;
   }
 
   // ── key/value ────────────────────────────────────────────────────────────

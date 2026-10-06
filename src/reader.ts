@@ -87,6 +87,12 @@ export interface MtClient {
    */
   /** Builds an input peer from a saved address, with no request (see reader-client.ts). */
   inputPeer?(p: { type: 'channel' | 'chat'; id: string; accessHash?: string }): MtEntity;
+  /**
+   * The newest message id of each of these chats, in ONE request (messages.getPeerDialogs; only
+   * chats in the account's chat list). How the reader notices new messages within seconds without
+   * reading every chat: Telegram does not push big supergroups' messages to every session.
+   */
+  peekTops?(peers: MtEntity[]): Promise<Map<number, number>>;
   getMessages(
     entity: MtEntity,
     params: { limit?: number; offsetId?: number; minId?: number; ids?: number[]; reverse?: boolean; offsetDate?: number },
@@ -362,6 +368,8 @@ export interface ReaderDeps {
   };
   /** Every history page fetched, before it is stored (the private-group flow looks for checks addressed to the account). */
   onBatch?: (chatId: number, batch: MtMessage[]) => void;
+  /** What a page stored, once it is committed (the news radar matches it against the day's news). */
+  onStored?: (chatId: number, messages: StoredMessage[]) => void;
   /** A pull failed because the account cannot see the chat any more (CHANNEL_PRIVATE / CHAT_FORBIDDEN). */
   onAccessLost?: (chatId: number, err: ReaderError) => Promise<void>;
 }
@@ -500,6 +508,67 @@ export class Reader {
 
   private lastReconcile = 0;
   private reconcileCount = 0;
+  /** Chats the account is in, from the last chat-list check: Telegram pushes their new messages. */
+  private members = new Set<number>();
+  /** When Telegram last pushed a new message for each chat (ms). */
+  private readonly pushedAt = new Map<number, number>();
+  private readonly wakeTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  private readonly lastWakePull = new Map<number, number>();
+  /** Wakes the polling loop's sleep (set while it sleeps). */
+  private nudge: (() => void) | null = null;
+  /** When each chat is next due for a read (ms epoch); a chat not in the map is due now. */
+  private readonly due = new Map<number, number>();
+  /** The last chat-list check worked (false after a failure, until one works again). */
+  private peekOk = true;
+  private peeking = false;
+  private peekFailedAt = 0;
+
+  /**
+   * One request for all chats the account is in: their newest message ids. A chat with a newer
+   * message than what is stored is read right away.
+   */
+  async peek(): Promise<number> {
+    const { client, store } = this.deps;
+    if (!client.peekTops || this.peeking) return 0;
+    const chats = store.listChats(true).filter((c) => c.kind === 'watched' && this.members.has(c.chatId));
+    if (chats.length === 0) return 0;
+    this.peeking = true;
+    let woken = 0;
+    try {
+      const pairs: [ChatRow, MtEntity][] = [];
+      for (const c of chats) {
+        try {
+          pairs.push([c, await this.entity(c)]);
+        } catch {
+          // not resolvable right now: the scheduled read reports it
+        }
+      }
+      for (let i = 0; i < pairs.length; i += 50) {
+        const batch = pairs.slice(i, i + 50);
+        const tops = await withTimeout(client.peekTops(batch.map(([, e]) => e)), 30_000, 'checking the chat list for new messages');
+        for (const [c] of batch) {
+          const top = tops.get(c.chatId);
+          const cursor = store.getChat(c.chatId)?.readerCursor ?? 0;
+          if (top !== undefined && top > cursor) {
+            this.wake(c.chatId, 'peek');
+            woken++;
+          }
+        }
+      }
+      if (!this.peekOk) this.deps.activity?.event('reader', 'chat check back', 'Telegram', 'new messages are noticed within seconds again');
+      this.peekOk = true;
+    } catch (err) {
+      const e = explain(err);
+      if (this.peekOk || Date.now() - this.peekFailedAt > 3_600_000) {
+        this.peekFailedAt = Date.now();
+        this.deps.activity?.event('reader', 'chat check failed', 'Telegram', `${e.message}; chats are read on their schedule meanwhile`, false);
+      }
+      this.peekOk = false;
+    } finally {
+      this.peeking = false;
+    }
+    return woken;
+  }
   private reconcileTimer: ReturnType<typeof setTimeout> | null = null;
   private reconciling: Promise<Reconciled> | null = null;
   /** Chats a notice already sent to a chat-list check, and when (so one chat cannot keep triggering it). */
@@ -526,6 +595,9 @@ export class Reader {
     if (!d) return { added: [], left: [], back: [] };
     this.lastReconcile = Date.now();
     const { chats, complete, skipped } = await this.membership();
+    // The chats Telegram pushes new messages for (the account is in them); the rest are polled.
+    if (complete) this.members = new Set(chats.map((c) => c.chatId));
+    else for (const c of chats) this.members.add(c.chatId);
     const added: SourceInfo[] = [];
     const left: ChatRow[] = [];
     const back: SourceInfo[] = [];
@@ -780,12 +852,14 @@ export class Reader {
       }
       const last = batch[batch.length - 1];
       if (epoch !== this.epoch) throw new ReaderError('pull abandoned: the connection was replaced while it was waiting');
+      const stored: StoredMessage[] = [];
       store.transaction(() => {
         for (const m of batch) {
           const s = toStored(m, chatId);
           if (!s) continue;
           store.upsertUser(chatId, s.author.id, s.author.name, s.author.username);
           store.saveMessage(s.message);
+          stored.push(s.message);
           saved++;
         }
         // Forward only: a late pull never moves the cursor back.
@@ -794,6 +868,11 @@ export class Reader {
           store.setKv(`reader_cursor_date:${chatId}`, String(last.date));
         }
       });
+      try {
+        if (stored.length) this.deps.onStored?.(chatId, stored);
+      } catch (err) {
+        this.deps.log(`reader: after storing ${stored.length} messages: ${(err as Error).message}`); // the capture itself is done
+      }
       cursor = last.id;
       if (batch.length < PAGE) {
         caughtUp = true;
@@ -908,7 +987,82 @@ export class Reader {
     }
   }
 
-  /** Polls every watched chat, one after another, every `readerPollSeconds` (±15%). Returns a stop function. */
+  /**
+   * Telegram pushed a new message for a chat (the account is in it): read it now. Pushes are
+   * gathered for a moment, and one chat is read at most every 2 seconds, so a busy group costs
+   * one request per burst, not one per message.
+   */
+  wake(chatId: number, why: 'push' | 'peek' = 'push'): void {
+    const chat = this.deps.store.getChat(chatId);
+    if (!chat || chat.kind !== 'watched' || !chat.enabled) return;
+    if (why === 'push') this.pushedAt.set(chatId, Date.now());
+    if (this.wakeTimers.has(chatId)) return;
+    const wait = Math.max(800, 2_000 - (Date.now() - (this.lastWakePull.get(chatId) ?? 0)));
+    const timer = setTimeout(() => {
+      this.wakeTimers.delete(chatId);
+      this.lastWakePull.set(chatId, Date.now());
+      const row = this.deps.store.getChat(chatId);
+      if (!row?.enabled) return;
+      void withTimeout(this.pull(row), this.deps.pullTimeoutMs ?? 180_000, `reading ${row.title}`)
+        .then((n) => {
+          if (n > 0) {
+            this.deps.log(`reader: ${n} new message${n === 1 ? '' : 's'} from ${row.title} (${why === 'push' ? 'pushed' : 'noticed'})`);
+            this.deps.activity?.event('reader', 'stored', row.title, `${n} new message${n === 1 ? '' : 's'} · ${why === 'push' ? 'pushed by Telegram' : 'noticed by the chat-list check'}`);
+          }
+        })
+        .catch(() => {
+          this.due.delete(chatId); // the loop reads it again now, and reports what went wrong
+          this.nudge?.();
+        });
+    }, why === 'peek' ? 0 : wait);
+    timer.unref?.();
+    this.wakeTimers.set(chatId, timer);
+  }
+
+  /**
+   * Pushed: Telegram has actually pushed a new message for this chat in the last 15 minutes, so
+   * polling is only a safety net. Being a member is not enough: Telegram does not push every
+   * supergroup's messages to every session (seen on 2026-10-06: none for 币安官方中文群 while
+   * private messages and read receipts came through).
+   */
+  isPushed(chatId: number): boolean {
+    const t = this.pushedAt.get(chatId);
+    return t !== undefined && Date.now() - t < 15 * 60_000;
+  }
+
+  /** The account is in this chat (from the chat list). */
+  isMember(chatId: number): boolean {
+    return this.members.has(chatId);
+  }
+
+  lastPush(chatId: number): number | null {
+    const t = this.pushedAt.get(chatId);
+    return t ? Math.floor(t / 1000) : null;
+  }
+
+  /** Checked for new messages every few seconds through the chat list (one request for all of them). */
+  isPeeked(chatId: number): boolean {
+    return Boolean(this.deps.client.peekTops) && this.peekOk && this.members.has(chatId);
+  }
+
+  /**
+   * Seconds between two reads of a chat: the safety net for chats Telegram pushes or the chat-list
+   * check covers; the live cadence for the rest while they are active; the slower one for chats
+   * quiet for 6 hours.
+   */
+  intervalOf(chatId: number): number {
+    const { config, store, now } = this.deps;
+    if (this.isPushed(chatId) || this.isPeeked(chatId)) return config.readerPollSeconds;
+    const live = Math.min(config.readerLiveSeconds, config.readerPollSeconds);
+    const newest = Number(store.getKv(`reader_cursor_date:${chatId}`) ?? 0);
+    return newest && now() - newest > 6 * 3600 ? Math.max(live, config.readerPollSeconds) : live;
+  }
+
+  /**
+   * Reads every watched chat when it is due: chats the account is NOT in every `readerLiveSeconds`
+   * (Telegram pushes nothing for them), the others every `readerPollSeconds` as a safety net
+   * behind the pushes (each ±15%). Returns a stop function.
+   */
   start(): () => void {
     const { store, config, log } = this.deps;
     let stopped = false;
@@ -917,8 +1071,11 @@ export class Reader {
     const sleep = (ms: number) =>
       new Promise<void>((resolve) => {
         wake = resolve;
+        this.nudge = resolve;
         timer = setTimeout(resolve, ms);
       });
+    const due = this.due;
+    const jitter = () => 0.85 + Math.random() * 0.3;
     const loop = async () => {
       while (!stopped) {
         let retrySoon = false;
@@ -926,8 +1083,11 @@ export class Reader {
         if (this.deps.discovery && Date.now() - this.lastReconcile >= (this.deps.discovery.everyMs ?? 3_600_000)) {
           await withTimeout(this.reconcile(), 120_000, 'checking the chat list').catch((err) => log(`reader: chat list check failed: ${(err as Error).message}`));
         }
-        for (const chat of store.listChats(true).filter((c) => c.kind === 'watched')) {
+        const watched = store.listChats(true).filter((c) => c.kind === 'watched');
+        for (const chat of watched) {
           if (stopped) break;
+          if ((due.get(chat.chatId) ?? 0) > Date.now() && !this.behind.has(chat.chatId)) continue;
+          due.set(chat.chatId, Date.now() + this.intervalOf(chat.chatId) * 1000 * jitter());
           try {
             const n = await withTimeout(this.pull(chat), this.deps.pullTimeoutMs ?? 180_000, `reading ${chat.title}`);
             if (chat.readerError) store.updateChat(chat.chatId, { readerError: null });
@@ -943,6 +1103,7 @@ export class Reader {
             if (/^(CHANNEL_PRIVATE|CHAT_FORBIDDEN)$/.test(e.code)) await this.deps.onAccessLost?.(chat.chatId, e).catch(() => undefined);
             if (e.retryAfter) await sleep(e.retryAfter * 1000);
             else if (/took longer than|Not connected|disconnected|TIMEOUT/i.test(e.message) && this.deps.reconnect) {
+              due.delete(chat.chatId); // read it again as soon as the new connection is up
               // The watchdog: a hung request means a dead connection; open a new one (at most once a minute).
               const now = Date.now();
               if (now - this.lastReconnect > 60_000) {
@@ -966,14 +1127,26 @@ export class Reader {
             `back after ${minutes} min: ${back.messages} message${back.messages === 1 ? '' : 's'} recovered across ${back.chats - back.quiet} chat${back.chats - back.quiet === 1 ? '' : 's'}; ${back.quiet} had nothing new${this.behind.size ? `; still catching up on ${this.behind.size}` : '; everything is up to date'}`,
           );
         }
-        // Still catching up somewhere (back from a long time offline): go again soon.
-        if (!stopped) await sleep(retrySoon ? 5_000 : this.behind.size > 0 ? 2_000 : config.readerPollSeconds * 1000 * (0.85 + Math.random() * 0.3));
+        // Still catching up somewhere (back from a long time offline): go again soon. Otherwise
+        // sleep until the next chat is due (a push or a failed pushed read wakes it sooner).
+        const ids = new Set(store.listChats(true).filter((c) => c.kind === 'watched').map((c) => c.chatId));
+        const next = Math.min(...[...due].filter(([id]) => ids.has(id)).map(([, at]) => at), Date.now() + config.readerPollSeconds * 1000);
+        const nap = retrySoon ? 5_000 : this.behind.size > 0 ? 2_000 : Math.max(1_000, next - Date.now());
+        if (!stopped) await sleep(nap);
+        this.nudge = null;
       }
     };
     void loop();
+    // The chat-list check: every few seconds, one request for all chats the account is in.
+    const peekEvery = Math.max(3, config.readerPeekSeconds) * 1000;
+    const peeker = setInterval(() => void this.peek(), peekEvery);
+    peeker.unref?.();
     return () => {
       stopped = true;
+      clearInterval(peeker);
       if (this.reconcileTimer) clearTimeout(this.reconcileTimer);
+      for (const t of this.wakeTimers.values()) clearTimeout(t);
+      this.wakeTimers.clear();
       if (timer) clearTimeout(timer);
       wake?.();
     };

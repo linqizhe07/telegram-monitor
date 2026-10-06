@@ -35,6 +35,7 @@ export interface Config {
   telegramApiId: number | null;
   telegramApiHash: string;
   readerSession: string;
+  /** Seconds between safety-net reads of a chat the account is in (its new messages arrive as Telegram pushes them). */
   readerPollSeconds: number;
   /** Groups/channels to watch at startup (@username, t.me link or -100… id), reported to `reportTo`. */
   watch: string[];
@@ -48,6 +49,14 @@ export interface Config {
   notify: boolean;
   /** Show the group's title in those notifications (off: "A group", for the lock screen). */
   notifyTitles: boolean;
+  /** Seconds between reads of a chat the account is NOT in (read from outside: Telegram pushes nothing for those). */
+  readerLiveSeconds: number;
+  /** Seconds between two checks of the chats the account IS in for new messages (one request for all of them). */
+  readerPeekSeconds: number;
+  /** The news radar: first-tier news feeds, keywords of the day, matched against the groups. */
+  news: boolean;
+  /** A notification when a group reacts to the news, or talks about it before the first report. */
+  newsNotify: boolean;
 }
 
 const EFFORTS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -137,6 +146,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     autoWatchNew: field('PULSE_AUTO_WATCH_NEW', () => oneOf(env.PULSE_AUTO_WATCH_NEW, ['on', 'off'] as const, 'on') === 'on'),
     notify: field('PULSE_NOTIFY', () => oneOf(env.PULSE_NOTIFY, ['on', 'off'] as const, 'on') === 'on'),
     notifyTitles: field('PULSE_NOTIFY_TITLES', () => oneOf(env.PULSE_NOTIFY_TITLES, ['1', '0'] as const, '1') === '1'),
+    readerLiveSeconds: field('PULSE_READER_LIVE_SECONDS', () => int(env.PULSE_READER_LIVE_SECONDS, 30, 10, 3600)),
+    readerPeekSeconds: field('PULSE_READER_PEEK_SECONDS', () => int(env.PULSE_READER_PEEK_SECONDS, 10, 3, 600)),
+    news: field('PULSE_NEWS', () => oneOf(env.PULSE_NEWS, ['on', 'off'] as const, 'on') === 'on'),
+    newsNotify: field('PULSE_NEWS_NOTIFY', () => oneOf(env.PULSE_NEWS_NOTIFY, ['on', 'off'] as const, 'on') === 'on'),
     reportTo: field('PULSE_REPORT_TO', () => {
       const raw = env.PULSE_REPORT_TO?.trim();
       if (!raw) return ownerIds[0] ?? null;

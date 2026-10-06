@@ -27,6 +27,43 @@
   <div id="verify-banner" role="alert" hidden></div>
   <section class="cards" id="cards" aria-label="Status"></section>
 
+  <section class="panel" aria-labelledby="news-h" id="news-panel" hidden>
+    <div class="panel-head">
+      <h2 id="news-h">News radar</h2>
+      <div class="controls">
+        <span class="src-ref" id="news-status"></span>
+        <button class="btn" id="news-refresh" title="Read every feed now (each is also read on its own schedule)">Check feeds now</button>
+      </div>
+    </div>
+    <p class="hint">Keywords of the day from first-tier sources (Bloomberg, The New York Times, a16z, Y Combinator, the crypto wires, and the news channels among your sources), matched against every group message as it arrives. A group reacting to a story, or talking about it before the first report, is flagged here and in a notification.</p>
+    <ol class="news-alerts" id="news-alerts" aria-live="polite"></ol>
+    <div class="news-split">
+      <div class="news-col">
+        <h3>Keywords today</h3>
+        <ol class="topics" id="news-topics"></ol>
+        <details class="news-more" id="news-more" hidden>
+          <summary id="news-more-label">Single-source headlines</summary>
+          <ol class="topics single" id="news-single"></ol>
+        </details>
+      </div>
+      <div class="news-col">
+        <h3>In your groups</h3>
+        <p class="hint">Messages that named the day's news, newest first, with how long after the first report (or before it) they came.</p>
+        <ol class="news-hits" id="news-hits"></ol>
+      </div>
+    </div>
+    <details class="news-sources" id="news-sources-box">
+      <summary id="news-sources-label">News sources</summary>
+      <div class="table-wrap"><table class="sources news-src" id="news-sources"></table></div>
+      <form class="add" id="feed-form" autocomplete="off">
+        <input id="feed-url" placeholder="RSS or Atom feed link, e.g. https://example.com/feed" aria-label="Feed link">
+        <input id="feed-name" class="short" placeholder="Name (optional)" aria-label="Feed name">
+        <button type="submit" id="feed-btn">Add feed</button>
+      </form>
+      <p class="hint">Telegram channels among your sources count as news sources by themselves (add one under Sources: Check, then Watch). Feeds are read from this computer with plain web requests; nothing from your groups is ever sent anywhere.</p>
+    </details>
+  </section>
+
   <section class="panel" aria-labelledby="sources-h">
     <div class="panel-head">
       <h2 id="sources-h">Sources</h2>

@@ -218,6 +218,7 @@ console: http://127.0.0.1:4830
 
 | 区块 | 看什么 |
 |---|---|
+| News radar | 一线新闻（Bloomberg、纽约时报、a16z、YC、加密媒体、你订阅的新闻频道）今天的关键词，和它们在你的群里什么时候、被谁提到（见下文「新闻雷达」） |
 | Reader account | 登录的是哪个号；随时可以在 Telegram → 设置 → 设备里终止 |
 | Account actions | 24 小时内账号发给 Telegram 的请求：读几次、**写几次**（加群、发言、按按钮、标已读都算写）。正常是 0 次写：所有请求都过同一个入口，入口在代码里直接拒绝任何写操作（记为 ERROR「blocked write」，什么都没发出去） |
 | Sources | 每个群：从外面读，还是已是成员；过去 24 小时存了多少条；群的日均量；门口的守卫（入群审批、群里的机器人）；是否已追平。「隐藏历史」和「反垃圾」只有管理员能看到，从外面看显示为未知，不代表没有 |
@@ -280,6 +281,51 @@ console: http://127.0.0.1:4830
 
 2026-10-05 用真实群验证过：离线两次、共约 7 分钟，补回后对账结果是「476 条中 468 条已存，8 条是机器人，缺失 0」。2026-10-06 遇到一次真实断网：前后约 25 分钟，中间完全断了近 10 分钟，服务自己重连后补回 21 条；对账 4 个群近 2 小时的 266 条：253 条已存，13 条是机器人，缺失 0。
 
+### 新闻雷达：一线新闻关键词 × 群聊
+
+控制台最上面的 **News radar**。它做三件事：
+
+1. **从一线来源挖当天的关键词**。默认读 15 个 RSS 源（2026-10-06 逐个核对过能用）：
+   - Bloomberg：Markets、Crypto、Technology、Economics、Politics；
+   - 纽约时报：首页、Business、Technology；
+   - a16z、a16z crypto；
+   - Y Combinator：Hacker News 首页和 YC 博客；
+   - The Block、CoinDesk、Odaily 快讯。
+
+   另外，你 Sources 里的 Telegram 频道（Watcher Guru、infinityhedge、Cointelegraph 等）自动算新闻源，不用另外请求。几家同时报道的同一件事会合成一个话题，比如 The Block、Cointelegraph、Odaily 都报了「Winklevoss 申请 Zcash ETF」，就合成一个「Zcash · Winklevoss · ETF」。排序时，报道的一线来源越多越靠前。
+2. **每条群消息一存下就和关键词配对**。中文群写的是「大饼」「鲍威尔」「大零币」，不是 Bitcoin、Powell、Zcash，所以内置了一张别名表（`src/news-words.ts`），把常见币种、公司、人物、机构的中英文和黑话对到同一个概念。一个词在这个群里有多常见，按这个群过去一周的消息算：币安群天天说的「BTC」不算信号，难得出现的「SpaceX」「ZEC」才算。Bitcoin、Google、OpenAI、特朗普这种大词，单独出现不触发，要和同一条新闻里的另一个词一起出现。
+3. **更要关注**：页面上每条命中都标出离第一篇报道过了多久（`+13m after Watcher Guru`），或者比报道还早（`5h59m before the first report`）。两种情况会额外弹一条 macOS 通知，每个话题每个群只弹一次，每小时最多 6 条：
+   - **HOT**：报道后半小时内，至少 2 个人、3 条消息在聊；
+   - **HAD IT FIRST**：第一篇报道前 6 小时内，2 小时之内出现了 2 个人、3 条以上的讨论。
+
+时效：
+- Odaily 每 60 秒读一次，Bloomberg、The Block、CoinDesk 每 2 分钟，其余 3 到 60 分钟不等，都是条件请求（ETag），没更新就几乎不花流量。
+- 群消息方面，**你账号所在的群和频道**，每 10 秒用一个请求（`messages.getPeerDialogs`，只读）同时问 Telegram 它们的最新消息号，有新消息的群当场去读。2026-10-06 实测：一条新消息 8 秒内入库。
+- **从外面读的群**（不在你的群列表里，比如币安英文群）活跃时每 30 秒读一次，6 小时没动静就降到 2 分钟。
+- 为什么不靠 Telegram 推送：2026-10-06 实测，这个会话能收到私聊、已读回执、输入状态的推送，但收不到大群的新消息。所以推送只当加速：真推过来就立刻读，不推也不耽误。
+
+Sources 表的状态一栏写明每个群是哪种：`new messages noticed within ~10s`、`every ~30s`，或 `instant`（真的收到了推送）。
+
+新闻源可以在 News radar 底部的 **News sources** 里管理：
+- 每个源一个开关；
+- 能看到每个源最近一次读取、24 小时条数，以及从发布到被读到的中位延迟；
+- 可以贴 RSS/Atom 链接加自己的源，只接受公网 http(s) 地址。
+
+内置源只能关不能删。Telegram 新闻频道照常在 Sources 里加（Check → Watch）。
+
+新闻源都是从这台电脑发的普通网页请求，**群里的任何内容都不会发出去**。
+
+Claude 那边：
+- `news_keywords`：今天的关键词，以及各自在群里的反应；
+- `news_in_group`：某个群里提到新闻的消息，带 #id。
+
+摘要规则里多了一栏「群里聊到的新闻」：哪条一线新闻、谁先报的、群里多快跟上，或者比报道还早。
+
+`.env` 里：
+- `PULSE_NEWS=off` 关掉整个雷达；
+- `PULSE_NEWS_NOTIFY=off` 只关通知；
+- `PULSE_READER_PEEK_SECONDS`（默认 10）和 `PULSE_READER_LIVE_SECONDS`（默认 30）调读群的节奏。
+
 ### 去噪
 
 大群一天几千条，大部分是贴纸、「哈哈」、碎句、刷屏和拉人私聊的骗子。读之前先用代码过一遍（`src/denoise.ts`，规则固定，不靠模型）：
@@ -300,13 +346,13 @@ claude mcp add --scope user telegram-monitor -- /opt/homebrew/bin/node --no-expe
 
 这条命令是给 Claude Code 和定时任务用的。桌面端的聊天要在 `~/Library/Application Support/Claude/claude_desktop_config.json` 的 `mcpServers` 里加同样的 command 和 args，然后重启 Claude。
 
-工具：`list_sources`、`read_messages`（默认是去噪后的信号，可切 `off-topic` 或 `all`，分页）、`overview`、`search_messages`、`get_playbook`、`save_digest`、`account_activity`、`catch_up_now`、`audit_capture`、`check_group`（只读查看一个群；邀请链接会给出预览和提醒）、`watch_source`（开始读，从不加群）、`set_monitoring`（开关某个群）、`refresh_sources`（立刻核对群列表）、`invite_status`（私密群的跟踪状态，只读）。
+工具：`list_sources`、`read_messages`（默认是去噪后的信号，可切 `off-topic` 或 `all`，分页）、`overview`、`search_messages`、`get_playbook`、`save_digest`、`account_activity`、`catch_up_now`、`audit_capture`、`check_group`（只读查看一个群；邀请链接会给出预览和提醒）、`watch_source`（开始读，从不加群）、`set_monitoring`（开关某个群）、`refresh_sources`（立刻核对群列表）、`invite_status`（私密群的跟踪状态，只读）、`news_keywords`（今天一线新闻的关键词，以及各自在群里的反应）、`news_in_group`（某个群里提到新闻的消息，带 #id）。
 
 需要动用 Telegram 的工具，会通过正在运行的服务去请求，**不会**另开一个连接：同一个会话在两处同时使用，可能被 Telegram 判定冲突而作废（AUTH_KEY_DUPLICATED）。
 
 Claude 拿到的令牌（`data/console.json`）只能调用它的工具本来就用的那几个接口：查看、开始读、追平、对账、开关、刷新群列表。确认入群、清空存储、改设置这些，只有控制台页面能做。这样 Claude 读到的群消息里就算藏了指令，也碰不到这些操作。
 
-每天的摘要用 Claude 桌面端的定时任务跑（侧边栏 Scheduled → 「Telegram 群每日摘要（去噪）」，每天 9:03）：先追平，读完所有去噪后的信号页，按 话题 / 痛点 / 新想法 / 机会 / 待解问题 写成摘要，每条都标上引用的消息 #id，最后存进控制台（Digests 里这个群的文件夹）和 `data/digests/<群名>/`。第一次请在侧边栏点 **Run now**，把它要用的工具批准一次，之后自动运行。注意定时任务只在桌面端开着时运行；错过的会在下次打开时补跑。
+每天的摘要用 Claude 桌面端的定时任务跑（侧边栏 Scheduled → 「Telegram 群每日摘要（去噪）」，每天 9:03）：先追平，读完所有去噪后的信号页，按 话题 / 痛点 / 新想法 / 机会 / 待解问题 / 群里聊到的新闻 写成摘要，每条都标上引用的消息 #id，最后存进控制台（Digests 里这个群的文件夹）和 `data/digests/<群名>/`。第一次请在侧边栏点 **Run now**，把它要用的工具批准一次，之后自动运行。注意定时任务只在桌面端开着时运行；错过的会在下次打开时补跑。
 
 ---
 
@@ -325,7 +371,12 @@ Claude 拿到的令牌（`data/console.json`）只能调用它的工具本来就
 - **公开频道**也能监控，比如交易所的公告频道。它的摘要更像「本周公告要点」。
 - **私密群**：把邀请链接贴进控制台查看，然后在官方 App 里加入，回控制台点「I've joined」（见 6A「私密群」）。入群验证由你本人在 App 里完成，程序不会也不应该替你过验证。加入后它会自动出现在 Sources 里；bot 模式下也可以在报告台发 `/watch 群名`，在读者账号自己的聊天列表里按名字找。
 - **批量配置**：`.env` 里写 `PULSE_WATCH=@群A,@群B` 和 `PULSE_REPORT_TO=报告台 id`（不填就是第一个 owner 的私聊），启动时自动登记。
-- 读取频率：每 120 秒（±15%）轮询一遍所有被监控的群，可以用 `PULSE_READER_POLL_SECONDS` 调整。群太多（几十个）就适当调大，别让读者账号显得像在刷接口。
+- 读取频率：
+  - 账号所在的群和频道：每 10 秒一个请求，查一遍有没有新消息，有就当场读（`PULSE_READER_PEEK_SECONDS`）；
+  - 从外面读的群：活跃时每 30 秒读一次（`PULSE_READER_LIVE_SECONDS`）；
+  - 兜底：每个群至少每 120 秒读一次（`PULSE_READER_POLL_SECONDS`）。
+
+  所有请求共用每秒约 1 次的节奏。群太多（几十个）就把这几个值调大，别让读者账号显得像在刷接口。
 
 检查点：控制台 Sources 表的「Captured · 24h」一列有数字；bot 模式下 `/sources` 列出每个群「近 24 小时 N 条」，⚠️ 后面跟着的是读取出的问题，以及该怎么处理。
 
@@ -453,7 +504,10 @@ journalctl -u telegram-monitor -f
 | `PULSE_OWNER_IDS` | 空 | 你的 Telegram id，多个用逗号分隔。**必须填**：摘要归在第一个 id 下，不填就不会添加任何群。bot 模式下也是能拉 bot 进群、能用 `/watch` 的人 |
 | `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` | 空 | 读者账号；不填就只有 bot 模式 |
 | `PULSE_READER_SESSION` | `./data/reader.session` | `npm run login` 保存的会话 |
-| `PULSE_READER_POLL_SECONDS` | 120 | 读者账号轮询间隔，30–3600 |
+| `PULSE_READER_POLL_SECONDS` | 120 | 兜底读取间隔（新消息另有更快的途径发现），30–3600 |
+| `PULSE_READER_PEEK_SECONDS` | 10 | 每隔几秒用一个请求查一遍账号所在的群有没有新消息，3–600 |
+| `PULSE_READER_LIVE_SECONDS` | 30 | 从外面读的群活跃时多久读一次，10–3600 |
+| `PULSE_NEWS` / `PULSE_NEWS_NOTIFY` | on / on | 新闻雷达；群里在聊新闻（或比报道还早）时弹通知 |
 | `PULSE_WATCH` / `PULSE_REPORT_TO` | 空 / 第一个 owner | 启动时自动监控的群，以及摘要发到哪 |
 | `PULSE_CONSOLE_PORT` | 4830 | 控制台端口，0 关闭 |
 | `PULSE_AUTO_WATCH_NEW` | on | 账号新加入的群自动开始读（off：只列出来，默认关） |
@@ -477,7 +531,7 @@ journalctl -u telegram-monitor -f
 
 ## 13. 风险、合规与边界
 
-- **Telegram 条款**：Telegram 允许第三方客户端通过官方 API 使用账号，但禁止刷屏、滥用，以及用来骚扰或冒充。读者账号**只读**，而且这一点写在代码里：所有请求都过同一个入口，加群、退群、发言、按按钮、投票、标已读、打开机器人页面、付款，一律在发出前拒绝。轮询频率也很低，行为接近潜水的普通用户。即便如此，Telegram 仍可能对它认为异常的账号限流或封号；用主号就要接受这个风险（第 0 节）。被限流时日志会出现「slow down for N s」，程序会自动等待。
+- **Telegram 条款**：Telegram 允许第三方客户端通过官方 API 使用账号，但禁止刷屏、滥用，以及用来骚扰或冒充。读者账号**只读**，而且这一点写在代码里：所有请求都过同一个入口，加群、退群、发言、按按钮、投票、标已读、打开机器人页面、付款，一律在发出前拒绝。读取用的都是普通客户端也会发的只读请求，整个账号每秒最多约 1 个，行为接近开着 App 潜水的普通用户。即便如此，Telegram 仍可能对它认为异常的账号限流或封号；用主号就要接受这个风险（第 0 节）。被限流时日志会出现「slow down for N s」，程序会自动等待。
 - **群规**：有的群明确禁止机器人或记录聊天。监控之前先看群规，尊重别人的社区。
 - **个人信息**：群消息里有别人的名字和言论，在有的地区（例如欧盟）受数据保护法约束。程序的做法是：
   - 发给模型分析前把名字换成代号；
@@ -507,7 +561,7 @@ journalctl -u telegram-monitor -f
 | 「the account cannot see this chat」 | 私密群：要先加入。**公开群**出现这个提示，通常意味着账号被这个群封了（公开群没有「关闭预览」这种设置），重新加入也没用 | 私密群：贴邀请链接，在 App 里加入；公开群：别再尝试 |
 | 「has joined no group or channel with that name」 | 读者账号还没加入，或名字写得不对 | 先加入；名字写一部分即可，按读者账号聊天列表里显示的名字 |
 | 群里发命令 bot 没反应 | 群里有别的 bot，命令没点名 | 写成 `/命令@你的bot用户名` |
-| 「FLOOD_WAIT Ns」（控制台的 Errors 里） | Telegram 要求账号放慢 | 整个账号的请求都会自动暂停到时间结束。所有请求本来就按每秒约 1 次的节奏发。经常出现就调大 `PULSE_READER_POLL_SECONDS`、少监控几个群。千万别在等待期间反复重启：用户名解析每天只有约 200 次额度，超了可能要等十几个小时 |
+| 「FLOOD_WAIT Ns」（控制台的 Errors 里） | Telegram 要求账号放慢 | 整个账号的请求都会自动暂停到时间结束。所有请求本来就按每秒约 1 次的节奏发。经常出现就调大 `PULSE_READER_PEEK_SECONDS`、`PULSE_READER_LIVE_SECONDS` 和 `PULSE_READER_POLL_SECONDS`，少监控几个群。千万别在等待期间反复重启：用户名解析每天只有约 200 次额度，超了可能要等十几个小时 |
 | 「Invite checks are rationed」 | 24 小时内查邀请链接的配额（20 次）用完了，或两次间隔不到 30 秒 | 等到提示里的时间。同一个链接 10 分钟内再看，不花额度 |
 | 「invite checks PAUSED」 | 查邀请链接时 Telegram 要求账号等待 | 至少 6 小时后自动恢复，读群不受影响。别反复点 |
 | 「This invite link no longer works」 | 链接过期、被撤销，或者是一次性链接、已经用掉了 | 找群里的人要新链接。你要是已经用它加入了，群会自动出现在 Sources |

@@ -332,3 +332,88 @@ test('Telegram errors become reasons a person can act on', async () => {
   assert.equal(explain({ errorMessage: 'FLOOD_WAIT_42', seconds: 42 }).retryAfter, 42);
   assert.match(explain({ errorMessage: 'AUTH_KEY_UNREGISTERED' }).message, /npm run login/);
 });
+
+test('a message Telegram pushes is read within a second or two; a burst of pushes is one read; chats the account is not in are read on the faster schedule', async () => {
+  const env = setup();
+  env.store.watchChat(await env.reader.resolve('@binance_cn_test'), 42, null, { language: 'auto', digestHour: 9, timezone: 'UTC', rsiMode: 'auto' });
+  const stored: number[] = [];
+  const reader = new Reader({
+    client: env.mt,
+    store: env.store,
+    config: { ...testConfig(), readerPollSeconds: 120, readerLiveSeconds: 30 },
+    log: () => undefined,
+    now: env.clock.now,
+    pageDelayMs: 0,
+    onStored: (_chat, messages) => stored.push(...messages.map((m) => m.messageId)),
+  });
+  assert.equal(reader.intervalOf(GROUP_ID), 30, 'nothing pushed: read from outside every 30 seconds');
+  env.mt.messages.push(msg(1, T0 - 10, 'hello'));
+  reader.wake(GROUP_ID);
+  assert.equal(reader.isPushed(GROUP_ID), true);
+  assert.equal(reader.intervalOf(GROUP_ID), 120, 'pushed: polling is only the safety net');
+  for (let i = 0; i < 40 && stored.length === 0; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(stored, [1], 'read, and handed on once stored');
+  env.mt.messages.push(msg(2, T0 - 5, 'a'), msg(3, T0 - 4, 'b'));
+  const before = env.mt.historyCalls;
+  reader.wake(GROUP_ID);
+  reader.wake(GROUP_ID);
+  reader.wake(GROUP_ID);
+  for (let i = 0; i < 80 && stored.length < 3; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(stored, [1, 2, 3]);
+  assert.equal(env.mt.historyCalls - before, 1, 'three pushes, one request');
+  reader.wake(-1009999999999); // not a source: ignored
+  assert.equal(reader.isPushed(-1009999999999), false);
+});
+
+test('the chat-list check: one request notices new messages in the chats the account is in, and only those chats are read', async () => {
+  const env = setup();
+  const defaults = { language: 'auto' as const, digestHour: 9, timezone: 'UTC', rsiMode: 'auto' as const };
+  env.store.watchChat(await env.reader.resolve('@binance_cn_test'), 42, null, defaults);
+  env.mt.dialogs = [{ entity: GROUP, title: 'Binance 中文' }];
+  let peeks = 0;
+  let failing = false;
+  const mt = env.mt as FakeMt & { peekTops?: (peers: MtEntity[]) => Promise<Map<number, number>> };
+  mt.peekTops = async (peers) => {
+    peeks++;
+    if (failing) throw Object.assign(new Error('TIMEOUT'), { errorMessage: 'TIMEOUT' });
+    assert.equal(peers.length, 1);
+    return new Map([[GROUP_ID, Math.max(0, ...env.mt.messages.map((m) => m.id))]]);
+  };
+  const stored: number[] = [];
+  const events: string[] = [];
+  const reader = new Reader({
+    client: mt,
+    store: env.store,
+    config: testConfig(),
+    log: () => undefined,
+    now: env.clock.now,
+    pageDelayMs: 0,
+    activity: { event: (_a: string, method: string) => events.push(method) } as never,
+    discovery: { autoWatch: () => true, reportTo: 42, defaults },
+    onStored: (_c, ms) => stored.push(...ms.map((m) => m.messageId)),
+  });
+  await reader.reconcile();
+  assert.equal(reader.isMember(GROUP_ID), true);
+  assert.equal(reader.isPeeked(GROUP_ID), true);
+  assert.equal(reader.intervalOf(GROUP_ID), testConfig().readerPollSeconds, 'covered by the check: the schedule is only a safety net');
+  env.mt.messages.push(msg(1, T0 - 10, 'hello'));
+  await reader.pull(env.store.getChat(GROUP_ID)!);
+  const calls = env.mt.historyCalls;
+  assert.equal(await reader.peek(), 0, 'nothing newer than what is stored');
+  assert.equal(env.mt.historyCalls, calls, 'so nothing is read');
+  env.mt.messages.push(msg(2, T0 - 5, 'new'));
+  assert.equal(await reader.peek(), 1);
+  for (let i = 0; i < 40 && !stored.includes(2); i++) await new Promise((r) => setTimeout(r, 25));
+  assert.deepEqual(stored, [1, 2]);
+  assert.equal(reader.isPushed(GROUP_ID), false, 'noticed by the check, not pushed');
+  failing = true;
+  await reader.peek();
+  await reader.peek();
+  assert.equal(events.filter((e) => e === 'chat check failed').length, 1, 'said once');
+  assert.equal(reader.isPeeked(GROUP_ID), false);
+  assert.equal(reader.intervalOf(GROUP_ID), testConfig().readerLiveSeconds, 'while the check fails, read on the live schedule');
+  failing = false;
+  await reader.peek();
+  assert.ok(events.includes('chat check back'));
+  assert.equal(peeks, 5);
+});

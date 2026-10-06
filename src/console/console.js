@@ -74,6 +74,7 @@ const METHODS = {
   'channels.GetMessages': 're-read messages (edits, reactions)',
   'messages.GetMessages': 're-read messages',
   'messages.GetDialogs': "list the account's own chats",
+  'messages.GetPeerDialogs': 'check chats for new messages',
   'users.GetUsers': 'read a profile',
   'users.GetFullUser': 'read a profile',
   'messages.CheckChatInvite': 'look at an invite (no join)',
@@ -136,6 +137,20 @@ const METHODS = {
   'notification failed': 'notification failed',
   'notification shown': 'macOS notification',
   'internal error': 'internal error',
+  'chat check failed': 'checking chats for new messages FAILED',
+  'chat check back': 'checking chats for new messages works again',
+  'feed failed': 'news feed not answering',
+  'feed back': 'news feed answering again',
+  'in the group': 'NEWS came up in a group',
+  'news in the group': 'NEWS: a group is reacting',
+  'group was first': 'NEWS: a group had it first',
+  'news checked': 'news feeds checked',
+  'news source added': 'news source added',
+  'news source on': 'news source on',
+  'news source off': 'news source off',
+  'news source removed': 'news source removed',
+  news: 'notification: news in a group',
+  ahead: 'notification: a group had it first',
 };
 const KIND = {
   read: ['READ', 'read'],
@@ -161,6 +176,7 @@ function renderCards(s) {
     const offline = conn && conn.state === 'offline';
     cards.append(card(offline ? 'bad' : 'ok', 'Reader account', el('div', { class: 'big', text: s.account.name }),
       conn ? el('div', { class: 'line' }, el('span', { class: `pill ${offline ? 'bad' : 'ok'}`, text: offline ? 'Telegram unreachable' : 'connected' }), ` since ${fmtDateTime(conn.since)}${offline ? ' · retrying every 3s; missed messages are fetched when it is back' : ''}`) : null,
+      s.peekSeconds ? `New messages in your chats are noticed within ~${s.peekSeconds}s (one check for all of them); chats read from outside every ~${s.liveSeconds}s${s.account.pushes && s.account.pushes.messages ? `; Telegram also pushed ${n(s.account.pushes.messages)} since ${fmtTime(s.account.pushes.since).slice(0, 5)}` : ''}` : null,
       `Telegram id ${s.account.id} · signed in`,
       'Revoke any time: Telegram → Settings → Devices → Group Pulse → Terminate.'));
   } else {
@@ -196,6 +212,13 @@ function accessPill(a) {
   return el('span', { class: 'pill warn', text: a });
 }
 
+function cadence(src) {
+  if (src.pushed) return `instant: Telegram pushes it (last ${ago(src.lastPushAt)})`;
+  if (src.peeked) return `new messages noticed within ~${state && state.peekSeconds ? state.peekSeconds : 10}s`;
+  const every = src.everyS >= 60 ? `every ~${Math.round(src.everyS / 60)}m` : `every ~${src.everyS}s`;
+  return src.everyS > 60 && !src.member ? `${every} (quiet lately)` : every;
+}
+
 function renderSources(s) {
   const t = $('sources');
   t.replaceChildren(el('thead', {}, el('tr', {}, ...['Read', 'Source', 'Access', 'Captured · 24h', 'Group volume', 'Guards at the door', 'Next digest', 'Status', ''].map((h) => el('th', { text: h })))));
@@ -228,7 +251,7 @@ function renderSources(s) {
           ? el('span', { class: 'pill warn', text: 'catching up on missed messages' })
           : el('div', {},
             el('span', { class: 'pill ok', text: 'up to date' }),
-            el('div', { class: 'src-ref', text: src.caughtUpAt ? `caught up ${ago(src.caughtUpAt)} · every ~${Math.round(s.pollSeconds / 60)}m` : `every ~${Math.round(s.pollSeconds / 60)}m` }));
+            el('div', { class: 'src-ref', text: `${src.caughtUpAt ? `caught up ${ago(src.caughtUpAt)} · ` : ''}${cadence(src)}`, title: src.pushed ? 'Telegram pushes this chat\'s new messages: they are read within a second or two. A safety-net read runs every few minutes too.' : src.peeked ? 'The account is in this chat: one request every few seconds asks Telegram for the newest message of all such chats, and a chat with something new is read at once.' : 'The account is not in this chat (read from outside), so it is read on a schedule: every ~30 seconds while active.' }));
     const act = el('div', { class: 'actions' },
       el('button', { class: 'btn', text: 'Messages', onclick: () => selectSource(src.chatId) }),
       src.kind === 'watched' && src.enabled ? el('button', { class: 'btn', text: 'Catch up', onclick: (e) => action(e.target, '/api/pull', { chatId: src.chatId }) }) : null,
@@ -580,6 +603,7 @@ function addActivity(a) {
   }
   const sel = $('msg-source').value;
   if (a.method === 'messages.GetHistory' && /→ [1-9]/.test(a.detail) && state?.sources.some((s) => String(s.chatId) === sel && s.title === a.target)) scheduleMessages();
+  if (a.actor === 'news' || (a.actor === 'reader' && a.method === 'stored')) scheduleNews();
   scheduleRefresh();
 }
 
@@ -768,6 +792,197 @@ function renderOutbox(s) {
   }));
 }
 
+// ── news radar ─────────────────────────────────────────────────────────────
+
+let newsSignature = '';
+const openTopics = new Set();
+
+function span(lag) {
+  const s = Math.abs(Math.round(lag));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h ? `${h}h${String(m).padStart(2, '0')}m` : m ? `${m}m` : `${s}s`;
+}
+
+function lagBadge(lag, source) {
+  if (lag < 0) return el('span', { class: 'lag before', text: `${span(lag)} before the first report`, title: 'The group was talking about it before the first outlet reported it' });
+  return el('span', { class: `lag${lag < 1800 ? ' fast' : ''}`, text: `+${span(lag)}${source ? ` after ${source}` : ''}`, title: 'How long after the first report this came up in the group' });
+}
+
+/** Message text with the named keywords marked (text nodes only). */
+function marked(text, marks) {
+  const out = [];
+  let last = 0;
+  for (const [a, b] of marks || []) {
+    if (a < last || b > text.length) continue;
+    if (a > last) out.push(text.slice(last, a));
+    out.push(el('mark', { text: text.slice(a, b) }));
+    last = b;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+function safeLink(href, text) {
+  return /^https:\/\//i.test(href || '') ? el('a', { href, target: '_blank', rel: 'noopener noreferrer', text }) : el('span', { text });
+}
+
+const LEVEL = { hot: ['HOT', 'warn'], first: ['HAD IT FIRST', 'llm'], echo: ['came up', 'read'] };
+
+function topicItem(k) {
+  const d = el('details', { class: 'topic', open: openTopics.has(k.id) });
+  d.addEventListener('toggle', () => (d.open ? openTopics.add(k.id) : openTopics.delete(k.id)));
+  const echoes = k.groups.map((g) => {
+    const [label, cls] = LEVEL[g.level] || LEVEL.echo;
+    return el('span', { class: `pill ${cls}`, text: `${g.level === 'echo' ? `×${g.count}` : label} · ${g.title}`, title: `${g.count} message${g.count === 1 ? '' : 's'} from ${g.people} ${g.people === 1 ? 'person' : 'people'}` });
+  });
+  d.append(
+    el('summary', {},
+      el('div', { class: 'topic-head' }, el('span', { class: 'topic-label', text: k.label }), ...echoes),
+      el('div', { class: 'topic-sources' }, k.sources.map((src) => el('span', { class: `src-chip${src.tier === 1 ? ' t1' : ''}`, text: `${src.name} ${fmtTime(src.at).slice(0, 5)}`, title: src.title }))),
+      el('div', { class: 'topic-headline', text: k.headline })),
+    el('div', { class: 'topic-body' },
+      el('div', {}, k.sources.map((src) => el('div', { class: 'echo-msg' }, el('span', { class: 'meta', text: `${src.name} · ${fmtDateTime(src.at)} · ` }), safeLink(src.link, src.title)))),
+      k.terms.length ? el('div', { class: 'src-ref', text: `Looked for: ${k.terms.join(', ')}` }) : null,
+      k.groups.length === 0 ? el('div', { class: 'src-ref', text: 'Not mentioned in your groups (yet).' }) : null,
+      ...k.groups.map((g) => el('div', { class: 'echo-group' },
+        el('div', { class: 'who' }, el('b', { text: g.title }), ` · ${g.count} message${g.count === 1 ? '' : 's'} from ${g.people} ${g.people === 1 ? 'person' : 'people'} · first `, lagBadge(g.firstLag, k.sources[0] && k.sources[0].name)),
+        ...g.messages.map((m) => el('div', { class: 'echo-msg' },
+          el('span', { class: 'meta', text: `${fmtTime(m.date).slice(0, 5)} ${m.author} · #${m.messageId} · ` }),
+          ...marked(m.text, m.marks)))))));
+  return el('li', {}, d);
+}
+
+function sourceRows(v) {
+  const t = $('news-sources');
+  t.replaceChildren(el('thead', {}, el('tr', {}, ...['Use', 'Source', 'Kind', 'Tier', 'Read', 'Last read', 'Items · 24h', 'Delay', 'Status', ''].map((h) => el('th', { text: h })))));
+  const body = el('tbody');
+  for (const src of v.sources) {
+    const sw = el('input', { type: 'checkbox', role: 'switch', 'aria-label': `Use ${src.name}` });
+    sw.checked = src.enabled;
+    sw.addEventListener('change', async () => {
+      sw.disabled = true;
+      try {
+        toast((await api('/api/news/toggle', { id: src.id, on: sw.checked })).message);
+      } catch (err) {
+        toast(err.message);
+        sw.checked = !sw.checked;
+      } finally {
+        sw.disabled = false;
+        loadNews(true);
+      }
+    });
+    const status = !src.enabled ? el('span', { class: 'pill muted', text: 'off' })
+      : src.error ? el('span', { class: 'pill bad', text: src.error, title: src.error })
+      : src.kind === 'telegram' ? el('span', { class: 'pill ok', text: 'read with the groups' })
+      : src.lastOkAt ? el('span', { class: 'pill ok', text: 'answering' }) : el('span', { class: 'pill muted', text: 'not read yet' });
+    let host = '';
+    try {
+      host = src.url ? new URL(src.url).hostname.replace(/^www\./, '') : '';
+    } catch {
+      host = '';
+    }
+    body.append(el('tr', { class: src.enabled ? '' : 'off' },
+      el('td', {}, sw),
+      el('td', {}, el('div', { class: 'src-title', text: src.name }), el('div', { class: 'src-ref', text: host })),
+      el('td', { text: src.kind === 'rss' ? 'RSS feed' : 'Telegram channel' }),
+      el('td', { text: src.tier === 1 ? 'first tier' : 'tier 2' }),
+      el('td', { text: src.kind === 'rss' ? (src.everyS >= 60 ? `every ${Math.round(src.everyS / 60)}m` : `every ${src.everyS}s`) : 'with the sources' }),
+      el('td', { text: ago(src.lastFetchAt) }),
+      el('td', { text: n(src.items24h) }),
+      el('td', { text: src.delayMin === null ? '—' : `~${src.delayMin}m`, title: 'Median time from publication to the radar seeing it (recent items)' }),
+      el('td', {}, status),
+      el('td', {}, src.builtin || src.kind === 'telegram' ? null : el('button', { class: 'btn', text: 'Remove', onclick: (e) => newsAction(e.target, '/api/news/remove', { id: src.id }) }))));
+  }
+  t.append(body);
+}
+
+async function newsAction(button, path, body) {
+  button.disabled = true;
+  try {
+    const r = await api(path, body);
+    toast(r.message || (r.ok ? 'Done.' : 'Failed.'));
+    await loadNews(true);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderNews(v) {
+  const panel = $('news-panel');
+  panel.hidden = !v.enabled;
+  if (!v.enabled) return;
+  const on = v.sources.filter((x) => x.enabled);
+  const failing = on.filter((x) => x.kind === 'rss' && x.error);
+  $('news-status').textContent = `${n(v.items24h)} items today from ${on.filter((x) => x.items24h > 0).length} sources${failing.length ? ` · ${failing.length} not answering` : ''}`;
+  $('news-sources-label').textContent = `News sources: ${on.length} on${failing.length ? ` · not answering: ${failing.map((x) => x.name).join(', ')}` : ''}`;
+  const signature = JSON.stringify([v.keywords.map((k) => [k.id, k.sources.length, k.groups.map((g) => [g.chatId, g.count, g.level])]), v.hits.map((h) => [h.chatId, h.messageId]), v.alerts.map((a) => [a.chatId, a.topicId, a.kind]), v.sources.map((x) => [x.id, x.enabled, x.error, x.items24h, x.lastFetchAt])]);
+  if (signature === newsSignature) return;
+  newsSignature = signature;
+  // Alerts: what was escalated today.
+  $('news-alerts').replaceChildren(...v.alerts.map((a) => el('li', { class: a.kind },
+    el('div', { class: 'head' }, el('span', { class: `pill ${a.kind === 'hot' ? 'warn' : 'llm'}`, text: a.kind === 'hot' ? 'HOT' : 'HAD IT FIRST' }), el('span', { text: a.group }), el('span', { class: 'src-ref', text: fmtDateTime(a.at) })),
+    el('div', { class: 'detail', text: a.detail }))));
+  // Keywords: confirmed by two outlets, or showing up in a group, first.
+  const rank = (k) => (k.groups.some((g) => g.level === 'hot') ? 3 : k.groups.some((g) => g.level === 'first') ? 2 : k.groups.length ? 1 : 0);
+  const main = v.keywords.filter((k) => k.sources.length >= 2 || k.groups.length > 0).sort((a, b) => rank(b) - rank(a) || b.score - a.score);
+  const single = v.keywords.filter((k) => !(k.sources.length >= 2 || k.groups.length > 0));
+  $('news-topics').replaceChildren(...(main.length ? main.map(topicItem) : [el('li', { class: 'empty', text: v.items24h ? 'No story carried by two outlets yet today.' : 'Reading the feeds… the first keywords appear within a minute.' })]));
+  const more = $('news-more');
+  more.hidden = single.length === 0;
+  $('news-more-label').textContent = `Single-source headlines (${single.length})`;
+  $('news-single').replaceChildren(...single.slice(0, 40).map(topicItem));
+  // In the groups: newest first.
+  $('news-hits').replaceChildren(...(v.hits.length
+    ? v.hits.map((h) => el('li', {},
+      el('div', { class: 'who' }, el('b', { text: h.group }), el('span', { text: `${fmtDateTime(h.date)} · ${h.author} · #${h.messageId}` }), lagBadge(h.lag, h.source)),
+      el('div', { class: 'text' }, ...marked(h.text, h.marks)),
+      el('div', { class: 'src-ref', text: `about ${h.label}` })))
+    : [el('li', { class: 'empty', text: "Nothing in your groups has named today's news yet." })]));
+  sourceRows(v);
+}
+
+let newsLoading = false;
+async function loadNews(force) {
+  if (newsLoading && !force) return;
+  newsLoading = true;
+  try {
+    const v = await api('/api/news');
+    if (force) newsSignature = '';
+    renderNews(v);
+  } catch {
+    // the console is reconnecting; the next refresh tries again
+  } finally {
+    newsLoading = false;
+  }
+}
+
+$('news-refresh').addEventListener('click', (e) => newsAction(e.target, '/api/news/refresh', {}));
+$('feed-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const url = $('feed-url').value.trim();
+  if (!url) return;
+  const b = $('feed-btn');
+  b.disabled = true;
+  b.textContent = 'Reading…';
+  try {
+    const r = await api('/api/news/feed', { url, name: $('feed-name').value.trim() });
+    toast(r.message);
+    if (r.ok) {
+      $('feed-url').value = '';
+      $('feed-name').value = '';
+    }
+    await loadNews(true);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    b.disabled = false;
+    b.textContent = 'Add feed';
+  }
+});
+
 // ── storage ────────────────────────────────────────────────────────────────
 
 let storageNow = null;
@@ -818,6 +1033,15 @@ $('clear-btn').addEventListener('click', async (e) => {
 
 // ── refresh loop and live stream ───────────────────────────────────────────
 
+let newsTimer = null;
+function scheduleNews() {
+  if (newsTimer) return;
+  newsTimer = setTimeout(() => {
+    newsTimer = null;
+    loadNews();
+  }, 2500);
+}
+
 let refreshTimer = null;
 function scheduleRefresh() {
   if (refreshTimer) return;
@@ -836,6 +1060,8 @@ async function refresh() {
     renderInvites(state);
     renderOutbox(state);
     $('notify-test').hidden = !state.notifications;
+    if (state.news) loadNews();
+    else $('news-panel').hidden = true;
   } catch (err) {
     setLive(false, 'console not reachable');
   }

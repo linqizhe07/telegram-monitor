@@ -5,6 +5,7 @@ import { ConsoleServer } from './console/server.ts';
 import { Engine } from './engine.ts';
 import { InviteTracker, type Invoker } from './invites.ts';
 import { AnthropicLlm } from './llm.ts';
+import { NewsRadar } from './news.ts';
 import { MacNotifier, NullNotifier, type Notifier } from './notify.ts';
 import { connectReader, type ReaderConnection } from './reader-client.ts';
 import { Reader } from './reader.ts';
@@ -86,6 +87,9 @@ async function main(): Promise<void> {
           onError: (err) => activity.event('notify', 'notification failed', 'macOS', `${err.message.slice(0, 200)} (allow notifications for Script Editor in System Settings)`, false),
         })
       : NullNotifier;
+  // The news radar: first-tier news, turned into keywords of the day and matched against every
+  // group message as it is stored. It needs no Telegram request of its own.
+  const news = new NewsRadar({ store, config, now, log, activity, notifier, live: true });
   // The last thing recorded before this start: read before connecting, which records requests itself.
   const [lastSeen] = store.activity({ limit: 1 });
   const connection: ReaderConnection | null = config.telegramApiId
@@ -115,6 +119,7 @@ async function main(): Promise<void> {
         onReconciled: (r, first) => invites?.onReconciled(r, first),
       },
       onBatch: (chatId, batch) => invites?.onBatch(chatId, batch),
+      onStored: (chatId, messages) => news.onStored(chatId, messages),
       onAccessLost: (chatId, err) => invites?.onAccessLost(chatId, err) ?? Promise.resolve(),
     });
     const followed = reader;
@@ -135,6 +140,8 @@ async function main(): Promise<void> {
       followed.membershipNotice(n);
       tracker.onNotice(n);
     });
+    // Telegram pushes new messages for chats the account is in: read them within a second or two.
+    connection.onLiveMessage((chatId) => followed.wake(chatId));
     log(`reader account: ${connection.name}`);
     activity.event('reader', 'signed in', connection.name, `Telegram id ${connection.id}`);
     if (config.ownerIds.length === 0) log('warning: the reader account is on but PULSE_OWNER_IDS is empty, so nobody can use /watch');
@@ -173,6 +180,8 @@ async function main(): Promise<void> {
   else log('no ANTHROPIC_API_KEY: messages are collected, but no digests are written until it is set');
   const stopReader = reader ? reader.start() : () => undefined;
   const stopInvites = invites ? invites.start() : () => undefined;
+  const stopNews = news.start();
+  if (config.news) log(`news radar: ${store.newsSources().filter((s) => s.enabled).length} sources (console → News radar)`);
 
   let consoleServer: ConsoleServer | null = null;
   if (config.consolePort > 0) {
@@ -184,13 +193,14 @@ async function main(): Promise<void> {
       now,
       log,
       startedAt,
-      account: connection ? { name: connection.name, id: connection.id, raw: connection.raw, state: connection.state } : null,
+      account: connection ? { name: connection.name, id: connection.id, raw: connection.raw, state: connection.state, pushes: connection.pushes } : null,
       reader,
       bot: me?.username ? { username: me.username } : null,
       claude: { ready: claudeReady, model: config.model },
       handoffFile: './data/console.json',
       invites,
       notifier,
+      news,
       digestNow: (chatId) => {
         const chat = store.getChat(chatId);
         return engine.digest(chatId, { kind: 'manual', to: chat?.kind === 'watched' ? (chat.reportChatId ?? undefined) : undefined });
@@ -210,6 +220,7 @@ async function main(): Promise<void> {
     const r = store.purgeBefore(now() - config.retentionDays * 86_400);
     const a = store.pruneActivity(now() - config.retentionDays * 86_400);
     store.pruneInvites(now());
+    store.pruneNews(now() - config.retentionDays * 86_400);
     if (r.messages || r.shadows || a) log(`retention: deleted ${r.messages} messages, ${r.shadows} shadow digests and ${a} activity rows`);
   };
   purge();
@@ -225,6 +236,7 @@ async function main(): Promise<void> {
     stopScheduler();
     stopReader();
     stopInvites();
+    stopNews();
     await consoleServer?.stop().catch(() => undefined);
     await connection?.disconnect().catch(() => undefined);
     clearInterval(purgeTimer);

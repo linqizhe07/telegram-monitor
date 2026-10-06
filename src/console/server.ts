@@ -16,6 +16,7 @@ import { denoise, formatSignal } from '../denoise.ts';
 import { digestFolders } from '../digest-folders.ts';
 import { inviteHash } from '../invite-rules.ts';
 import type { InviteTracker } from '../invites.ts';
+import type { NewsRadar } from '../news.ts';
 import type { Notifier } from '../notify.ts';
 import { probe, type ProbeResult } from '../probe.ts';
 import { parseRef, withTimeout, type Reader } from '../reader.ts';
@@ -30,7 +31,7 @@ export interface ConsoleDeps {
   now: () => number;
   log: (line: string) => void;
   startedAt: number;
-  account: { name: string; id: string; raw: GramClient; state?: () => { state: 'online' | 'offline'; since: number } } | null;
+  account: { name: string; id: string; raw: GramClient; state?: () => { state: 'online' | 'offline'; since: number }; pushes?: () => { since: number; total: number; messages: number; kinds: Record<string, number> } } | null;
   reader: Reader | null;
   bot: { username: string } | null;
   claude: { ready: boolean; model: string };
@@ -45,6 +46,8 @@ export interface ConsoleDeps {
   invites?: InviteTracker | null;
   /** macOS notifications (for the test button). */
   notifier?: Notifier | null;
+  /** The news radar (keywords of the day from first-tier sources, matched against the groups). */
+  news?: NewsRadar | null;
 }
 
 /** The only actions local tools (Claude's MCP server) may take: the ones its tools call. */
@@ -183,6 +186,8 @@ export class ConsoleServer {
           return this.json(res, 200, this.storage());
         case '/api/signal':
           return this.json(res, 200, this.signal(Number(url.searchParams.get('chat')), Number(url.searchParams.get('hours') ?? 24)));
+        case '/api/news':
+          return this.json(res, 200, this.deps.news && this.deps.config.news ? this.deps.news.view() : { enabled: false, sources: [], keywords: [], hits: [], alerts: [], items24h: 0 });
         case '/api/events':
           res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
           res.write(': connected\n\n');
@@ -236,6 +241,14 @@ export class ConsoleServer {
           return this.json(res, 200, this.settings(body));
         case '/api/clear':
           return this.json(res, 200, this.clear(body));
+        case '/api/news/feed':
+          return this.json(res, 200, this.deps.news ? await withTimeout(this.deps.news.addFeed(String(body.url ?? ''), String(body.name ?? '')), 30_000, 'reading the feed').catch((err) => ({ ok: false, message: (err as Error).message })) : { ok: false, message: 'The news radar is off.' });
+        case '/api/news/toggle':
+          return this.json(res, 200, this.deps.news?.setEnabled(String(body.id ?? ''), body.on === true) ?? { ok: false, message: 'The news radar is off.' });
+        case '/api/news/remove':
+          return this.json(res, 200, this.deps.news?.remove(String(body.id ?? '')) ?? { ok: false, message: 'The news radar is off.' });
+        case '/api/news/refresh':
+          return this.json(res, 200, await this.newsRefresh());
       }
       res.writeHead(404).end('not found');
       return;
@@ -276,6 +289,12 @@ export class ConsoleServer {
           origin: c.readerOrigin,
           offReason: c.enabled ? null : store.getKv(`reader_off_reason:${c.chatId}`) || null,
           caughtUpAt: Number(store.getKv(`reader_caught_up:${c.chatId}`) ?? 0) || null,
+          // How fast it is read: pushed by Telegram (the account is in it), or polled from outside.
+          pushed: this.deps.reader?.isPushed(c.chatId) ?? false,
+          peeked: this.deps.reader?.isPeeked(c.chatId) ?? false,
+          member: this.deps.reader?.isMember(c.chatId) ?? c.readerOrigin === 'dialog',
+          everyS: this.deps.reader?.intervalOf(c.chatId) ?? config.readerPollSeconds,
+          lastPushAt: this.deps.reader?.lastPush(c.chatId) ?? null,
           error: c.readerError,
           reportTo: c.reportChatId,
           lastDigestAt: c.lastDigestAt,
@@ -288,7 +307,7 @@ export class ConsoleServer {
       now,
       startedAt: this.deps.startedAt,
       account: this.deps.account
-        ? { name: this.deps.account.name, id: this.deps.account.id, session: config.readerSession, connection: this.deps.account.state?.() ?? null }
+        ? { name: this.deps.account.name, id: this.deps.account.id, session: config.readerSession, connection: this.deps.account.state?.() ?? null, pushes: this.deps.account.pushes?.() ?? null }
         : null,
       readerConfigured: Boolean(config.telegramApiId),
       bot: this.deps.bot,
@@ -298,6 +317,9 @@ export class ConsoleServer {
       privateGroups: this.deps.invites?.views() ?? null,
       notifications: Boolean(this.deps.notifier) && config.notify && process.platform === 'darwin',
       pollSeconds: config.readerPollSeconds,
+      liveSeconds: config.readerLiveSeconds,
+      peekSeconds: config.readerPeekSeconds,
+      news: this.newsSummary(),
       retentionDays: config.retentionDays,
       sources,
       activity: store.activitySummary(day),
@@ -315,6 +337,35 @@ export class ConsoleServer {
       })),
       digestFolders: digestFolders(store.outbox(200), store.recentDigests(200), store.listChats(false)),
     };
+  }
+
+  /** For the status card: how many news sources answer, and what was flagged today. */
+  private newsSummary() {
+    const { store, config, now } = this.deps;
+    if (!config.news || !this.deps.news) return null;
+    const sources = store.newsSources().filter((x) => x.enabled);
+    const day = now() - 86_400;
+    const alerts = store.newsAlerts(day).filter((a) => a.kind !== 'echo');
+    return {
+      sources: sources.length,
+      failing: sources.filter((x) => x.kind === 'rss' && x.lastError).map((x) => x.name),
+      items24h: [...store.newsItemCounts(day).values()].reduce((a, b) => a + b, 0),
+      alerts24h: alerts.length,
+      lastAlert: alerts[0] ?? null,
+    };
+  }
+
+  private async newsRefresh(): Promise<{ ok: boolean; message: string }> {
+    const news = this.deps.news;
+    if (!news || !this.deps.config.news) return { ok: false, message: 'The news radar is off (PULSE_NEWS=off).' };
+    const before = this.deps.store.newsItemCounts(this.deps.now() - 86_400);
+    await withTimeout(news.fetchDue(true), 120_000, 'reading the feeds').catch(() => undefined);
+    await news.rebuild();
+    const after = this.deps.store.newsItemCounts(this.deps.now() - 86_400);
+    const added = [...after.values()].reduce((a, b) => a + b, 0) - [...before.values()].reduce((a, b) => a + b, 0);
+    const failing = this.deps.store.newsSources().filter((x) => x.enabled && x.kind === 'rss' && x.lastError);
+    this.deps.activity.event('console', 'news checked', 'all feeds', `${Math.max(0, added)} new items${failing.length ? `; not answering: ${failing.map((x) => x.name).join(', ')}` : ''}`);
+    return { ok: true, message: `Feeds checked: ${Math.max(0, added)} new item${added === 1 ? '' : 's'}${failing.length ? `; not answering: ${failing.map((x) => x.name).join(', ')}` : ''}.` };
   }
 
   private messages(chatId: number, limit: number) {

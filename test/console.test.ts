@@ -166,14 +166,14 @@ test('clearing storage deletes what was collected and keeps sources, switches an
   store.addOutbox(42, '<b>digest</b>', false);
 
   const before = store.storageCounts();
-  assert.deepEqual(before, { messages: 3, sources: 1, people: 1, activity: 1, digests: 0, outbox: 1 });
+  assert.deepEqual(before, { messages: 3, sources: 1, people: 1, activity: 1, digests: 0, outbox: 1, news: 0 });
 
   const { deleted } = store.clearStored({ messages: true, activity: true, digests: true });
   assert.equal(deleted.messages, 3);
   assert.equal(deleted.people, 1);
   assert.equal(deleted.activity, 1);
   assert.equal(deleted.outbox, 1);
-  assert.deepEqual(store.storageCounts(), { messages: 0, sources: 0, people: 0, activity: 0, digests: 0, outbox: 0 });
+  assert.deepEqual(store.storageCounts(), { messages: 0, sources: 0, people: 0, activity: 0, digests: 0, outbox: 0, news: 0 });
 
   const kept = store.getChat(-100777)!;
   assert.equal(kept.kind, 'watched');
@@ -213,7 +213,7 @@ test('two tokens: the page can do everything; local tools (Claude) only the acti
     assert.notEqual(pageToken, toolToken);
     assert.ok(!page.body.includes(toolToken), 'the page never carries the tool token');
     const post = (path: string, token: string, body = '{}') => call(port, path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-console-token': token }, body });
-    for (const path of ['/api/invite/confirm', '/api/invite/recheck', '/api/invite/dismiss', '/api/membership/check', '/api/digest', '/api/settings', '/api/clear', '/api/unwatch', '/api/notify-test']) {
+    for (const path of ['/api/invite/confirm', '/api/invite/recheck', '/api/invite/dismiss', '/api/membership/check', '/api/digest', '/api/settings', '/api/clear', '/api/unwatch', '/api/notify-test', '/api/news/feed', '/api/news/toggle', '/api/news/remove', '/api/news/refresh']) {
       assert.equal((await post(path, toolToken)).status, 403, `${path}: not for local tools`);
       assert.notEqual((await post(path, pageToken)).status, 403, `${path}: the page may`);
     }
@@ -222,6 +222,7 @@ test('two tokens: the page can do everything; local tools (Claude) only the acti
     }
     const state = JSON.parse((await call(port, '/api/state')).body);
     assert.equal(state.privateGroups, null, 'no reader account: no private-group state');
+    assert.equal(JSON.parse((await call(port, '/api/news')).body).enabled, false, 'no radar: the panel stays hidden');
   } finally {
     await server.stop();
   }
