@@ -154,9 +154,12 @@ export interface ActivityRow {
 export interface OutboxRow {
   id: number;
   at: number;
+  /** Where it went (or would have gone): a report chat, the owner. */
   chatId: number;
   html: string;
   delivered: boolean;
+  /** The group a digest is about, when the writer knew it (null for other messages and older rows). */
+  sourceChatId: number | null;
 }
 
 /** An invite link being followed (docs/private-groups.md, section 2). */
@@ -437,6 +440,7 @@ export class Store {
       ['chats', 'reader_peer', 'TEXT'],
       ['chats', 'reader_origin', 'TEXT'],
       ['digests', 'posted_chat_id', 'INTEGER'],
+      ['outbox', 'source_chat_id', 'INTEGER'],
     ];
     for (const [table, column, type] of added) {
       const cols = (this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
@@ -1121,8 +1125,8 @@ export class Store {
     return this.run('DELETE FROM activity WHERE at < ?', before).changes;
   }
 
-  addOutbox(chatId: number, html: string, delivered: boolean): number {
-    return this.run('INSERT INTO outbox (at, chat_id, html, delivered) VALUES (?, ?, ?, ?)', this.clock(), chatId, html, delivered ? 1 : 0).lastId;
+  addOutbox(chatId: number, html: string, delivered: boolean, sourceChatId: number | null = null): number {
+    return this.run('INSERT INTO outbox (at, chat_id, html, delivered, source_chat_id) VALUES (?, ?, ?, ?, ?)', this.clock(), chatId, html, delivered ? 1 : 0, sourceChatId).lastId;
   }
 
   outbox(limit = 50): OutboxRow[] {
@@ -1132,6 +1136,7 @@ export class Store {
       chatId: num(r.chat_id),
       html: str(r.html),
       delivered: Boolean(r.delivered),
+      sourceChatId: numOrNull(r.source_chat_id),
     }));
   }
 

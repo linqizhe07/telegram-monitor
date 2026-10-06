@@ -226,3 +226,36 @@ test('two tokens: the page can do everything; local tools (Claude) only the acti
     await server.stop();
   }
 });
+
+test('clearing digests removes the files in every group folder, and the empty folders', async (t) => {
+  const { existsSync, mkdirSync, mkdtempSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dataDir = mkdtempSync(join(tmpdir(), 'pulse-digests-'));
+  mkdirSync(join(dataDir, 'digests', '币安官方中文群'), { recursive: true });
+  writeFileSync(join(dataDir, 'digests', '币安官方中文群', '2026-10-07 0044.md'), '# a');
+  writeFileSync(join(dataDir, 'digests', '2026-10-06-Old.md'), '# older layout');
+  writeFileSync(join(dataDir, 'digests', 'notes.txt'), 'not a digest');
+  const clock = new Clock();
+  const store = memoryStore(clock);
+  const activity = new Activity(store);
+  const config = testConfig({ reportTo: 700000001, dbPath: join(dataDir, 'pulse.db') });
+  const server = new ConsoleServer({ store, activity, config, port: 0, now: clock.now, log: () => undefined, startedAt: clock.now(), account: null, reader: null, bot: null, claude: { ready: false, model: config.model } });
+  try {
+    await server.start();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EPERM') return t.skip('this sandbox does not allow listening on a local port');
+    throw err;
+  }
+  const port = Number(new URL(server.url).port);
+  try {
+    const token = /name="console-token" content="([^"]+)"/.exec((await call(port, '/')).body)![1];
+    assert.equal(JSON.parse((await call(port, '/api/storage')).body).digestFiles, 2, 'files in group folders are counted');
+    const r = JSON.parse((await call(port, '/api/clear', { method: 'POST', headers: { 'content-type': 'application/json', 'x-console-token': token }, body: '{"digests":true}' })).body);
+    assert.match(r.message, /2 digest files/);
+    assert.equal(existsSync(join(dataDir, 'digests', '币安官方中文群')), false, 'the empty group folder is gone');
+    assert.equal(existsSync(join(dataDir, 'digests', 'notes.txt')), true, 'only digests are deleted');
+  } finally {
+    await server.stop();
+  }
+});

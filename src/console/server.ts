@@ -13,6 +13,7 @@ import type { TelegramClient as GramClient } from 'telegram';
 import type { Activity } from '../activity.ts';
 import type { Config } from '../config.ts';
 import { denoise, formatSignal } from '../denoise.ts';
+import { digestFolders } from '../digest-folders.ts';
 import { inviteHash } from '../invite-rules.ts';
 import type { InviteTracker } from '../invites.ts';
 import type { Notifier } from '../notify.ts';
@@ -57,6 +58,12 @@ const ASSETS: Record<string, { file: URL; type: string }> = {
 };
 const PAGE = new URL('./page.html', import.meta.url);
 const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/** Every digest file under data/digests (one folder per group, and older files at the top). */
+function digestFiles(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  return (readdirSync(dir, { recursive: true }) as string[]).filter((f) => f.endsWith('.md')).map((f) => join(dir, f));
+}
 
 export function probeKey(chatId: number): string {
   return `probe:${chatId}`;
@@ -306,7 +313,7 @@ export class ConsoleServer {
         version: d.genomeVersion,
         delivered: d.postedIds.some((id) => id > 0),
       })),
-      outbox: store.outbox(20),
+      digestFolders: digestFolders(store.outbox(200), store.recentDigests(200), store.listChats(false)),
     };
   }
 
@@ -365,10 +372,9 @@ export class ConsoleServer {
     const { store, config } = this.deps;
     const dataDir = dirname(config.dbPath);
     const size = (f: string) => (existsSync(f) ? statSync(f).size : 0);
-    const digestDir = join(dataDir, 'digests');
     return {
       ...store.storageCounts(),
-      digestFiles: existsSync(digestDir) ? readdirSync(digestDir).filter((f) => f.endsWith('.md')).length : 0,
+      digestFiles: digestFiles(join(dataDir, 'digests')).length,
       bytes: size(config.dbPath) + size(`${config.dbPath}-wal`) + size(join(dataDir, 'monitor.log')),
       retentionDays: config.retentionDays,
     };
@@ -489,12 +495,12 @@ export class ConsoleServer {
     let files = 0;
     if (what.digests) {
       const dir = join(dataDir, 'digests');
-      if (existsSync(dir)) {
-        for (const f of readdirSync(dir).filter((x) => x.endsWith('.md'))) {
-          rmSync(join(dir, f), { force: true });
-          files++;
-        }
+      for (const f of digestFiles(dir)) {
+        rmSync(f, { force: true });
+        files++;
       }
+      // The per-group folders, once empty.
+      if (existsSync(dir)) for (const d of readdirSync(dir, { withFileTypes: true })) if (d.isDirectory() && readdirSync(join(dir, d.name)).length === 0) rmSync(join(dir, d.name), { recursive: true });
     }
     if (what.activity && existsSync(join(dataDir, 'monitor.log'))) truncateSync(join(dataDir, 'monitor.log'));
     const { deleted, compacted } = store.clearStored(what);

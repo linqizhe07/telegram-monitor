@@ -674,18 +674,98 @@ function sanitize(html) {
   return walk(doc.body.firstChild);
 }
 
+// Folders: one per group, newest first. The page refreshes every few seconds, so what the owner
+// opened stays open (remembered here), and an unchanged panel is not redrawn at all.
+const openFolders = new Set();
+const openItems = new Set();
+const closedItems = new Set();
+let outboxSignature = '';
+
+function folderIcon() {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 20 16');
+  svg.setAttribute('class', 'folder-icon');
+  svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS(NS, 'path');
+  path.setAttribute('d', 'M1.5 3.5A1.5 1.5 0 0 1 3 2h4.2l1.6 1.8H17a1.5 1.5 0 0 1 1.5 1.5v8.2A1.5 1.5 0 0 1 17 15H3a1.5 1.5 0 0 1-1.5-1.5z');
+  svg.append(path);
+  return svg;
+}
+
+// Claude's digests are Markdown. Shown as text nodes only (headings, list lines, **bold**): nothing
+// from the digest is ever parsed as HTML.
+function renderMarkdown(escaped) {
+  const decode = (t) => t.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+  const inline = (text) => {
+    const out = [];
+    const re = /\*\*(.+?)\*\*/g;
+    let last = 0;
+    let m;
+    while ((m = re.exec(text))) {
+      if (m.index > last) out.push(text.slice(last, m.index));
+      out.push(el('b', { text: m[1] }));
+      last = re.lastIndex;
+    }
+    if (last < text.length) out.push(text.slice(last));
+    return out;
+  };
+  const box = el('div', { class: 'md' });
+  for (const raw of decode(escaped).split('\n')) {
+    const line = raw.replace(/\s+$/, '');
+    const heading = /^#{1,4}\s+(.*)$/.exec(line);
+    const item = /^(\s*)((?:\d+\.)|[-*])\s+(.*)$/.exec(line);
+    if (!line) box.append(el('div', { class: 'md-gap' }));
+    else if (heading) box.append(el('div', { class: 'md-h' }, inline(heading[1])));
+    else if (item) box.append(el('div', { class: `md-li${item[1].length >= 2 ? ' md-li2' : ''}` }, el('span', { class: 'md-mark', text: item[2] === '*' ? '-' : item[2] }), ' ', inline(item[3])));
+    else box.append(el('div', { class: 'md-p' }, inline(line.trim())));
+  }
+  return box;
+}
+
 function renderOutbox(s) {
   $('out-hint').textContent = s.bot
-    ? 'What the service sent to Telegram, newest first.'
-    : 'No bot token, so nothing is sent to Telegram: digests are kept here, newest first.';
+    ? 'What the service sent to Telegram, one folder per group, newest first.'
+    : 'No bot token, so nothing is sent to Telegram: digests are kept here, one folder per group, newest first. Files: data/digests/<group>/.';
+  const folders = s.digestFolders || [];
+  const signature = JSON.stringify(folders.map((f) => [f.key, f.items.map((i) => [i.id, i.delivered])]));
+  if (signature === outboxSignature) return;
+  outboxSignature = signature;
   const list = $('outbox');
-  if (s.outbox.length === 0) {
-    list.replaceChildren(el('li', { class: 'empty', text: s.claude.ready ? 'No digests yet. They run at the daily hour, or press Digest now.' : 'No digests yet: Claude is not configured.' }));
+  if (folders.length === 0) {
+    list.replaceChildren(el('li', { class: 'empty', text: s.claude.ready ? 'No digests yet. They run at the daily hour, or press Digest now.' : 'No digests yet. Ask Claude Desktop to summarise a group, or wait for the daily task.' }));
     return;
   }
-  list.replaceChildren(...s.outbox.map((o) => el('li', {},
-    el('div', { class: 'head' }, el('span', { class: `pill ${o.delivered ? 'ok' : 'muted'}`, text: o.delivered ? 'sent' : 'kept here' }), el('span', { text: `${fmtDateTime(o.at)} · to chat ${o.chatId}` })),
-    el('div', { class: 'body' }, sanitize(o.html)))));
+  list.replaceChildren(...folders.map((f) => {
+    const folder = el('details', { class: 'folder', open: openFolders.has(f.key) },
+      el('summary', {},
+        folderIcon(),
+        el('span', { class: 'folder-title', text: f.title }),
+        el('span', { class: 'folder-meta', text: `${f.count} ${f.key === 'other' ? 'message' : 'digest'}${f.count === 1 ? '' : 's'} · latest ${fmtDateTime(f.latestAt)}` })),
+      el('ol', { class: 'folder-items' }, f.items.map((item, i) => {
+        const key = String(item.id);
+        // The newest one opens with its folder, unless the owner closed it.
+        const open = openItems.has(key) || (i === 0 && !closedItems.has(key));
+        const d = el('details', { class: 'digest-item', open },
+          el('summary', {},
+            el('span', { class: `pill ${item.delivered ? 'ok' : 'muted'}`, text: item.delivered ? 'sent' : 'kept here' }),
+            el('span', { class: 'digest-heading', text: item.heading || fmtDateTime(item.at) }),
+            el('span', { class: 'digest-at', text: fmtDateTime(item.at) })),
+          el('div', { class: 'body' }, item.format === 'markdown' ? renderMarkdown(item.body) : sanitize(item.body)));
+        d.addEventListener('toggle', () => {
+          if (d.open) {
+            openItems.add(key);
+            closedItems.delete(key);
+          } else {
+            openItems.delete(key);
+            closedItems.add(key);
+          }
+        });
+        return el('li', {}, d);
+      })));
+    folder.addEventListener('toggle', () => (folder.open ? openFolders.add(f.key) : openFolders.delete(f.key)));
+    return el('li', {}, folder);
+  }));
 }
 
 // ── storage ────────────────────────────────────────────────────────────────

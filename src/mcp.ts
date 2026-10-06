@@ -303,12 +303,18 @@ server.registerTool(
   },
 );
 
+/** A folder name for a group: its title, safe for any file system. */
+function folderName(c: ChatRow): string {
+  const safe = c.title.normalize('NFC').replace(/[\u0000-\u001F\u007F/\\:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').replace(/^[.\s]+|[.\s]+$/g, '').slice(0, 60);
+  return safe || String(c.chatId);
+}
+
 server.registerTool(
   'save_digest',
   {
     title: 'Save a digest',
     description:
-      'Saves a digest you wrote for one source: it appears in the monitor console (http://127.0.0.1:4830) and as a Markdown file under data/digests/. Nothing is posted to Telegram.',
+      "Saves a digest you wrote for one source: it appears in the monitor console (http://127.0.0.1:4830), in that group's folder under Digests, and as a Markdown file in data/digests/<group>/. Nothing is posted to Telegram.",
     inputSchema: {
       source: z.string().optional(),
       markdown: z.string().min(20).describe('The digest, in Markdown, citing messages as #id.'),
@@ -324,12 +330,13 @@ server.registerTool(
     }
     const end = now();
     const head = `${c.title} · ${when(end - hours * 3600, c.timezone)} → ${when(end, c.timezone)} (${c.timezone}) · written by Claude`;
-    store.addOutbox(c.reportChatId ?? c.chatId, `<b>${escapeHtml(head)}</b>\n\n${escapeHtml(markdown)}`, false);
-    mkdirSync(join('data', 'digests'), { recursive: true });
-    const file = join('data', 'digests', `${localDate(end, c.timezone)}-${String(c.readerRef ?? c.chatId).replace(/[^A-Za-z0-9_-]/g, '')}.md`);
+    store.addOutbox(c.reportChatId ?? c.chatId, `<b>${escapeHtml(head)}</b>\n\n${escapeHtml(markdown)}`, false, c.chatId);
+    const dir = join('data', 'digests', folderName(c));
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${localDate(end, c.timezone)} ${localTime(end, c.timezone).replace(':', '')}.md`);
     writeFileSync(file, `# ${head}\n\n${markdown}\n`);
     activity.event('claude', 'digest saved', c.title, `${markdown.length} chars → ${file}`);
-    return text(`Saved. It shows in the console (Digests & outgoing messages) and in ${join(process.cwd(), file)}.`);
+    return text(`Saved. It shows in the console (Digests & outgoing messages → ${c.title}) and in ${join(process.cwd(), file)}.`);
   },
 );
 
