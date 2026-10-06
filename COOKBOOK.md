@@ -11,7 +11,7 @@
 | 场景 | 能不能做 | 用什么 | 摘要发到哪 |
 |---|---|---|---|
 | **别人的公开群 / 频道**（例：Binance、OKX 的官方中文群，有 `@用户名`） | 能，**不用进群** | 读者账号（第 4 步） | 你的私聊或团队私密群 |
-| **别人的私密群**（只有邀请链接） | 能，前提是有人能进去 | 读者账号先在手机上**手动加入** | 同上 |
+| **别人的私密群**（只有邀请链接） | 能，前提是你拿得到邀请链接 | 读者账号由你本人在官方 App 里**加入**；控制台先预览链接，加入后自动开始读（6A） | 同上 |
 | **你自己管的群**，或群主同意加 bot | 能 | bot 模式（第 8 步） | 群里 |
 | 别人的群，想让 bot 进去在群里发摘要 | **基本不行** | — | — |
 
@@ -27,21 +27,22 @@
 | 东西 | 什么时候需要 | 从哪来 | 第几步 |
 |---|---|---|---|
 | Node ≥ 22.18 | 总是 | nodejs.org 或 `brew install node` | 1 |
-| **Bot token** | 总是：bot 负责发摘要、收投票 | Telegram 里的 @BotFather | 2 |
-| **Anthropic API key** | 总是：负责读和写摘要 | console.anthropic.com | 3 |
-| 你的 Telegram user id | 建议总是填；监控模式必填 | 私聊 bot 发 `/start` | 2、6 |
-| **一个专用 Telegram 账号**（另一个手机号） | 只在监控别人的群时 | 新手机号 / eSIM | 4.1 |
-| `api_id` + `api_hash` | 只在监控别人的群时 | my.telegram.org，用专用账号登录 | 4.2 |
+| 你的 Telegram user id（`PULSE_OWNER_IDS`） | **总是**：没有它，服务不会添加任何群 | 控制台 Reader account 卡片上的 Telegram id；有 bot 时私聊它发 `/start` 也能看到 | 6 |
+| 读者账号（一个 Telegram 账号） | 监控别人的群时 | 专用号，或你自己的号（见下） | 4.1 |
+| `api_id` + `api_hash` | 监控别人的群时 | my.telegram.org，用读者账号登录 | 4.2 |
+| Bot token | 可选：要把摘要发到 Telegram，或用在你自己管的群里 | Telegram 里的 @BotFather | 2 |
+| Anthropic API key | 可选：要服务自己写摘要、跑 RSI。摘要交给 Claude 桌面端写（6A）就不用 | console.anthropic.com | 3 |
 
-**要不要新开 Telegram 账号？** 技术上用你自己的号也能跑，但强烈建议另开一个，原因有三：
+最省事的用法是第 6A 节：只要读者账号，摘要由 Claude 桌面端来写，bot token 和 API key 都不用。
 
-1. 登录后保存的会话文件，等于这个账号的全部权限，而它要放在服务器上。
-2. 自动读取有被 Telegram 限制或封号的风险，别拿主号冒险。
-3. 和你的身份隔离。
+**用专用号还是自己的号？** 两种都能跑：
+
+- **专用号**（长期放在服务器上跑时推荐）：登录后保存的会话文件等于这个账号的全部权限，泄露了也不连累你自己的号；被 Telegram 限流或封号时，主号不受影响；和你的身份隔离。
+- **自己的主号**：不用另买号、养号；你已经在的私密群直接就能读，不用再过一遍入群验证。代价是风险都落在主号上，加入新的私密群时别人看到的就是你本人。会话文件最好只放在你自己的电脑上。
 
 ### 要花多少钱？
 
-全部花在 Claude API 上，Telegram 免费。以下按 Claude Opus 5.5 标价估算（$4 / $20 每百万 token）：
+Telegram 免费。摘要交给 Claude 桌面端写（6A）时不走 API，用的是你的 Claude 订阅。只有服务自己写摘要、跑 RSI 才花 API 的钱，以下按 Claude Opus 5.5 标价估算（$4 / $20 每百万 token）：
 
 | 群的活跃度 | 每日摘要 | 一轮自我进化（RSI） |
 |---|---|---|
@@ -76,11 +77,13 @@ npm install
 cp .env.example .env
 ```
 
-检查点：`npm test` 显示 55 个测试全部通过。
+检查点：`npm test` 全部通过（目前 111 个）。
 
 ---
 
-## 2. 创建 bot（两种模式都要）
+## 2. 创建 bot（可选）
+
+只用控制台 + Claude 桌面端（6A）的话，这一步和第 3 步都可以跳过。要把摘要发到 Telegram，或者用在你自己管的群里，才需要 bot。
 
 1. Telegram 搜 **@BotFather** → 发 `/newbot` → 起名字和用户名（必须以 `bot` 结尾）→ 它会给你一串 token，填进 `.env` 的 `TELEGRAM_BOT_TOKEN`。
 2. **只监控别人的群**：隐私模式不用动，保持默认（开）。报告台只需要收命令和对 bot 消息的回复，隐私模式下这些都能收到。
@@ -91,9 +94,9 @@ cp .env.example .env
 
 ---
 
-## 3. Claude API key
+## 3. Claude API key（可选）
 
-在 console.anthropic.com 创建 API key，填进 `.env` 的 `ANTHROPIC_API_KEY`。
+只在要服务自己写摘要、跑 RSI 时需要；摘要交给 Claude 桌面端写（6A）就不用填。在 console.anthropic.com 创建 API key，填进 `.env` 的 `ANTHROPIC_API_KEY`。
 
 - 默认模型是 `claude-opus-5-5`，可以用 `PULSE_MODEL` 改。
 - 运行环境要能连上 `api.anthropic.com`，而且要在 Anthropic 支持的国家或地区。中国大陆不在其中；服务器放在美国、新加坡、日本等地都可以。
@@ -102,7 +105,9 @@ cp .env.example .env
 
 ## 4. 读者账号（只在监控别人的群时需要）
 
-### 4.1 准备一个专用账号
+### 4.1 准备账号
+
+用你自己的主号可以跳过这一步（取舍见第 0 节）。用专用号：
 
 - 换一个手机号，用**官方 Telegram App** 注册：第二张 SIM 卡或 eSIM 都行。Telegram 也在 Fragment 上卖 +888 的匿名号码。很多虚拟号（VoIP）会被 Telegram 拒收。
 - **先养几天号再接程序**：设好名字和头像，手动加一两个群，像正常人一样用两三天。刚注册的号马上接第三方程序高频读取，最容易被风控。
@@ -110,11 +115,11 @@ cp .env.example .env
 
 ### 4.2 申请 api_id / api_hash
 
-1. 浏览器打开 https://my.telegram.org ，用**专用账号**的手机号登录。验证码会发到这个账号的 Telegram App 里，不走短信。
-2. 进 **API development tools**，App title 和 Short name 随便填，但**不要带 "Telegram" 字样**（API 条款 2.3），例如 `Group Pulse` / `grouppulse`。Platform 选 Desktop，点 Create application。如果弹出 "ERROR"：不要反复重试，换成手机流量、关掉 VPN，等一天再试（这条来自多份用户反馈）。
+1. 浏览器打开 https://my.telegram.org ，用**读者账号**的手机号登录。验证码会发到这个账号的 Telegram App 里，不走短信。
+2. 进 **API development tools**，App title 和 Short name 随便填，但**不要带 "Telegram" 字样**（API 条款 2.3），例如 `Group Pulse` / `grouppulse`。Platform 选 Desktop，点 Create application。
 3. 把 **App api_id** 和 **App api_hash** 填进 `.env` 的 `TELEGRAM_API_ID`、`TELEGRAM_API_HASH`。
 
-如果创建时一直报 `ERROR`：换个浏览器、关掉广告拦截插件、换个网络再试。这是 my.telegram.org 的老毛病。
+创建时弹出 `ERROR` 是 my.telegram.org 的老毛病，不要反复重试：换个浏览器、关掉广告拦截插件、换成手机流量或关掉 VPN；还不行就等一天再试（多份用户反馈）。
 
 ### 4.3 登录（只做一次）
 
@@ -127,8 +132,8 @@ npm run login
 默认是**扫码登录**，不用输手机号和登录码：
 
 1. 终端里会出现一个二维码（同时存一份 `data/login-qr.png`，终端里扫不出来就打开这张图）。二维码大约 30 秒换一次，窗口别关。
-2. 在**登录着专用账号的手机**上：Telegram → Settings → Devices → **Link Desktop Device**，扫这个码。
-3. 如果专用账号开了**两步验证**，回到终端输入密码，输入时不显示。
+2. 在**登录着读者账号的手机**上：Telegram → Settings → Devices → **Link Desktop Device**，扫这个码。
+3. 如果读者账号开了**两步验证**，回到终端输入密码，输入时不显示。
 
 不方便扫码时用手机号登录：
 
@@ -136,7 +141,7 @@ npm run login
 npm run login -- --phone
 ```
 
-依次输入手机号（国际格式，例如 `+8613812345678`）、Telegram 发到专用账号 App 里的登录码，以及两步验证密码。这个号码如果还没有 Telegram 账号，程序会直接停下，**不会替你注册**。账号请先在官方 App 里注册好。
+依次输入手机号（国际格式，例如 `+8613812345678`）、Telegram 发到读者账号 App 里的登录码，以及两步验证密码。这个号码如果还没有 Telegram 账号，程序会直接停下，**不会替你注册**。账号请先在官方 App 里注册好。
 
 成功后会话保存到 `data/reader.session`，文件权限是 600，二维码图片随即删除。
 
@@ -167,17 +172,22 @@ npm run login -- --phone
 
 ## 6. 启动
 
-`.env` 至少要有这些：
+只用控制台 + Claude 桌面端（6A），`.env` 至少要有：
+
+```
+PULSE_OWNER_IDS=你的 Telegram id
+TELEGRAM_API_ID=…
+TELEGRAM_API_HASH=…
+```
+
+要用 bot 发摘要，再加上：
 
 ```
 TELEGRAM_BOT_TOKEN=…
 ANTHROPIC_API_KEY=…
-PULSE_OWNER_IDS=你的 user id
-TELEGRAM_API_ID=…（监控模式）
-TELEGRAM_API_HASH=…（监控模式）
 ```
 
-不知道自己的 user id：先只填前两项，启动后私聊 bot 发 `/start`，它会告诉你；填进去再重启。
+不知道自己的 Telegram id：先启动一次，控制台的 Reader account 卡片上写着读者账号的 id（用自己的号时就是你的 id；只用控制台时，填这个就行）。有 bot 时也可以私聊 bot 发 `/start`，它会告诉你。填进去再重启。
 
 ```bash
 npm start
@@ -186,8 +196,10 @@ npm start
 日志里应该看到：
 
 ```
-signed in as @your_bot · model claude-opus-5-5 · …
-reader account: @your_reader_account        ← 监控模式才有
+no TELEGRAM_BOT_TOKEN: console-only mode …   ← 没配 bot 时
+bot @your_bot · model claude-opus-5-5 · …    ← 配了 bot 时
+reader account: @your_reader_account
+console: http://127.0.0.1:4830
 ```
 
 ---
@@ -198,10 +210,11 @@ reader account: @your_reader_account        ← 监控模式才有
 
 - 没有 bot：摘要不发 Telegram，留在本地控制台里。
 - 没有 API key：服务只负责收消息，摘要由 Claude 桌面端来写，用你自己的 Claude 订阅。
+- `PULSE_OWNER_IDS` 必须填（第 6 步）：摘要都归在这个 id 下。不填的话，服务不会添加任何群。
 
 ### 控制台：它到底干了什么
 
-浏览器打开 http://127.0.0.1:4830 。只有本机能访问，页面的每个操作都要带一个随机令牌，别的网站伪造不了请求。
+浏览器打开 http://127.0.0.1:4830 。只有本机能访问，页面的每个操作都要带一个随机令牌，别的网站伪造不了请求（页面和 Claude 各用一个，Claude 那个能做的事更少，见下文「接入 Claude 桌面端」）。
 
 | 区块 | 看什么 |
 |---|---|
@@ -211,6 +224,8 @@ reader account: @your_reader_account        ← 监控模式才有
 | Activity | 账号发出的**每一个**请求，实时滚动。GramJS 所有请求都经过同一个被记录的入口，只有建连接的握手和心跳不记（它们不涉及任何群） |
 | Captured messages | `Signal` = 去噪后 Claude 实际读到的内容；`All` = 原始消息 |
 | Digests | Claude 写好的摘要 |
+| 顶部黄色横幅 | 某个刚加入的私密群里有入群验证在等你，去 App 里回答（见下文「私密群」） |
+| Private groups | 你贴过的邀请链接和各自的状态：已预览、申请中、已加入、被移出…… |
 
 每个群有两个按钮：**Catch up**（立刻追平）和 **Audit 1h**（拿 Telegram 那边最近一小时的消息逐条对账：要么已存，要么写明为什么跳过，比如机器人或系统消息；其余都会报「缺失」）。
 
@@ -220,7 +235,7 @@ reader account: @your_reader_account        ← 监控模式才有
 
 - **你在 Telegram 里新加入的群或频道，自动出现在 Sources 里，并开始读取**，从最近 24 小时读起。Telegram 一推送"你加入了"，一分钟内就会核对；另外每小时、以及每次启动时，也会各核对一次。离线期间加入的群，上线后照样补上。
 - 只有可能是加群、退群、被移出的推送才会触发核对；群改了头像、标题这类日常推送不会。同一个群一小时最多触发一次。原因：反复拉群列表是 Telegram 最常用长时间限流来惩罚的行为。
-- **你退出或被移出的群**：自动停止读取，状态显示「you left it in Telegram」。之后再加入，会自动恢复读取。
+- **你退出或被移出的群**：自动停止读取，状态里写明情况；能分清时（比如读取时发现进不去了），还会写明是被踢（到几点）还是被封。之后再加入，会自动恢复读取。
 - **每个群前面都有一个开关**：关掉就不再读，已经存下的消息保留到保留期结束；重新打开时，从断点继续补，但最多补最近 24 小时。**你手动关掉的群，核对群列表时不会被重新打开。**
 - 页面顶部有「Read new groups I join automatically」总开关：关掉后，新加入的群只会出现在列表里，默认不读。对应 `.env` 里的 `PULSE_AUTO_WATCH_NEW`。
 - 「Refresh from Telegram」按钮会立刻核对一次。
@@ -285,7 +300,7 @@ claude mcp add --scope user telegram-monitor -- /opt/homebrew/bin/node --no-expe
 
 这条命令是给 Claude Code 和定时任务用的。桌面端的聊天要在 `~/Library/Application Support/Claude/claude_desktop_config.json` 的 `mcpServers` 里加同样的 command 和 args，然后重启 Claude。
 
-工具：`list_sources`、`read_messages`（默认是去噪后的信号，可切 `off-topic` 或 `all`，分页）、`overview`、`search_messages`、`get_playbook`、`save_digest`、`account_activity`、`catch_up_now`、`audit_capture`、`check_group`（只读查看一个群；邀请链接会给出预览和提醒）、`watch_source`（开始读，从不加群）、`invite_status`（私密群的跟踪状态，只读）。
+工具：`list_sources`、`read_messages`（默认是去噪后的信号，可切 `off-topic` 或 `all`，分页）、`overview`、`search_messages`、`get_playbook`、`save_digest`、`account_activity`、`catch_up_now`、`audit_capture`、`check_group`（只读查看一个群；邀请链接会给出预览和提醒）、`watch_source`（开始读，从不加群）、`set_monitoring`（开关某个群）、`refresh_sources`（立刻核对群列表）、`invite_status`（私密群的跟踪状态，只读）。
 
 需要动用 Telegram 的工具，会通过正在运行的服务去请求，**不会**另开一个连接：同一个会话在两处同时使用，可能被 Telegram 判定冲突而作废（AUTH_KEY_DUPLICATED）。
 
@@ -297,7 +312,9 @@ Claude 拿到的令牌（`data/console.json`）只能调用它的工具本来就
 
 ## 7. 开始监控
 
-在报告台（私聊 bot，或团队私密群）里发：
+**控制台**：在 Sources 下面的输入框贴 `@用户名` 或 `t.me/…` 链接，点 **Check (read-only)**，再点 **Watch it**，就开始读，从最近 24 小时读起。Claude 里用 `watch_source`。你在 Telegram 里已经加入的群不用加，它们会自动出现（6A）。
+
+**bot 模式**：在报告台（私聊 bot，或团队私密群）里发：
 
 ```
 /watch @某个公开群
@@ -310,7 +327,7 @@ Claude 拿到的令牌（`data/console.json`）只能调用它的工具本来就
 - **批量配置**：`.env` 里写 `PULSE_WATCH=@群A,@群B` 和 `PULSE_REPORT_TO=报告台 id`（不填就是第一个 owner 的私聊），启动时自动登记。
 - 读取频率：每 120 秒（±15%）轮询一遍所有被监控的群，可以用 `PULSE_READER_POLL_SECONDS` 调整。群太多（几十个）就适当调大，别让读者账号显得像在刷接口。
 
-检查点：`/sources` 列出每个群「近 24 小时 N 条」。⚠️ 后面跟着的是读取出的问题，以及该怎么处理。
+检查点：控制台 Sources 表的「Captured · 24h」一列有数字；bot 模式下 `/sources` 列出每个群「近 24 小时 N 条」，⚠️ 后面跟着的是读取出的问题，以及该怎么处理。
 
 ---
 
@@ -365,7 +382,7 @@ Claude 拿到的令牌（`data/console.json`）只能调用它的工具本来就
 
 ## 11. 长期运行
 
-**Mac 本机**：断线、睡眠、重启都没关系，**只要服务在跑**，一联网就会从断点把这段时间的消息全部补回来，活动日志里会记一条「RECOVERED」，写明补回了多少条。前提是服务得在跑，有两种方式：
+**Mac 本机**：断线、睡眠、重启都没关系：服务一联网（或者下次启动时），就会从断点把这段时间的消息全部补回来（保留期内），活动日志里会记一条「RECOVERED」，写明补回了多少条。要让它一直在收，服务得开着，有两种方式：
 
 - 手动：在项目目录里运行（插电时不会睡眠；合上盖子仍会睡，除非接了外接显示器）
 
@@ -395,7 +412,7 @@ cd /opt/telegram-monitor
 npm ci
 ```
 
-把 `.env` 拷上去（用 scp 之类，别放进 git）。如果要监控别人的群，在服务器上运行一次 `npm run login`（SSH 里交互输入）。建一个专门跑它的系统用户（`sudo useradd -r monitor`），把 `/opt/telegram-monitor` 的所有权给它（`sudo chown -R monitor /opt/telegram-monitor`），然后写一个 systemd 服务 `/etc/systemd/system/telegram-monitor.service`：
+把 `.env` 拷上去（用 scp 之类，别放进 git）。如果要监控别人的群，在服务器上运行一次 `npm run login`（SSH 里交互输入；二维码也能在 SSH 终端里显示）。建一个专门跑它的系统用户（`sudo useradd -r monitor`），把 `/opt/telegram-monitor` 的所有权给它（`sudo chown -R monitor /opt/telegram-monitor`），然后写一个 systemd 服务 `/etc/systemd/system/telegram-monitor.service`：
 
 ```ini
 [Unit]
@@ -423,6 +440,7 @@ journalctl -u telegram-monitor -f
 
 注意：
 
+- **控制台只监听服务器的 127.0.0.1**：在自己电脑上运行 `ssh -L 4830:127.0.0.1:4830 你的服务器`，然后打开 http://localhost:4830 。macOS 通知只在 Mac 上有。
 - **同一个 bot token 只能跑一个实例**。Telegram 长轮询只允许一个消费者，开两个会报 409。
 - **备份** `data/pulse.db`（消息、摘要、playbook 谱系、投票）。迁移到别的机器时，**先停掉旧机器上的服务**，再在新机器上重新 `npm run login`，不要拷贝 `reader.session` 两边同时跑。换 IP 或国家也可能触发风控（用户反馈）。
 
@@ -432,7 +450,7 @@ journalctl -u telegram-monitor -f
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `PULSE_OWNER_IDS` | 空 | 能拉 bot 进群、能用 `/watch` 的人；多个用逗号分隔 |
+| `PULSE_OWNER_IDS` | 空 | 你的 Telegram id，多个用逗号分隔。**必须填**：摘要归在第一个 id 下，不填就不会添加任何群。bot 模式下也是能拉 bot 进群、能用 `/watch` 的人 |
 | `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` | 空 | 读者账号；不填就只有 bot 模式 |
 | `PULSE_READER_SESSION` | `./data/reader.session` | `npm run login` 保存的会话 |
 | `PULSE_READER_POLL_SECONDS` | 120 | 读者账号轮询间隔，30–3600 |
@@ -451,6 +469,7 @@ journalctl -u telegram-monitor -f
 | `PULSE_RSI_MIN_MESSAGES` | 30 | 一天至少多少条消息才拿来评估 |
 | `PULSE_RSI_PROMOTE_AT` | 0.625 | 采用所需的评审胜率 |
 | `PULSE_RETENTION_DAYS` | 7 | 原始消息保留天数，过期自动删除 |
+| `PULSE_DB` | `./data/pulse.db` | 数据库文件 |
 | `PULSE_MIN_MESSAGES` | 5 | 少于这么多条就不出摘要 |
 | `PULSE_DIGEST_COOLDOWN_MIN` | 30 | 非管理员两次 `/digest` 的最短间隔 |
 
@@ -458,7 +477,7 @@ journalctl -u telegram-monitor -f
 
 ## 13. 风险、合规与边界
 
-- **Telegram 条款**：Telegram 允许第三方客户端通过官方 API 使用账号，但禁止刷屏、滥用，以及用来骚扰或冒充。读者账号**只读**：不发言、不点赞、不自动进群，而且轮询频率很低，这样的行为接近正常用户。即便如此，Telegram 仍可能对它认为异常的账号限流或封号，所以要用专用账号。被限流时日志会出现「slow down for N s」，程序会自动等待。
+- **Telegram 条款**：Telegram 允许第三方客户端通过官方 API 使用账号，但禁止刷屏、滥用，以及用来骚扰或冒充。读者账号**只读**，而且这一点写在代码里：所有请求都过同一个入口，加群、退群、发言、按按钮、投票、标已读、打开机器人页面、付款，一律在发出前拒绝。轮询频率也很低，行为接近潜水的普通用户。即便如此，Telegram 仍可能对它认为异常的账号限流或封号；用主号就要接受这个风险（第 0 节）。被限流时日志会出现「slow down for N s」，程序会自动等待。
 - **群规**：有的群明确禁止机器人或记录聊天。监控之前先看群规，尊重别人的社区。
 - **个人信息**：群消息里有别人的名字和言论，在有的地区（例如欧盟）受数据保护法约束。程序的做法是：
   - 发给模型分析前把名字换成代号；
@@ -467,10 +486,11 @@ journalctl -u telegram-monitor -f
   - 原始消息默认 7 天后删除。
 
   别把含个人信息的摘要公开转发，也别用它针对具体的人。
-- **入群验证码**由你本人在手机上完成。程序不会、也不应该自动通过任何人机验证。
+- **入群验证**由你本人在官方 App 里完成（6A「私密群」）。程序不会、也不应该自动通过任何人机验证；控制台只把验证显示出来，按不了任何按钮。
 - **⚠️ Telegram 关于 AI 的条款（请你自己判断）**：Telegram 的 Content Licensing 条款（telegram.org/tos/content-licensing，「Large Language Models and AI」一节）和 API 条款第 1.5 条，禁止把平台数据用于人工智能的「训练、微调、验证……或部署」。例外不是自动给的：要所有相关用户逐个、明确、持续地同意，而且仅限那个聊天，之后 Telegram「可能」批准。Bot 开发者条款第 4.3 条还单独禁止为 AI 产品抓取公开群和频道的内容，所以换成 bot 模式也绕不开。把群消息交给 Claude 写摘要，和这些条款直接冲突。个人自用和做成产品，风险也不一样。这不是法律意见：请读原文，必要时问律师。
 - **非官方客户端**：Telegram 说用非官方客户端登录的账号会被「观察」，可能出现资料页警告（用户反馈）。所以要少写、慢读、不刷接口。
-- **数据去向**：消息内容会发给 Anthropic 的 Claude API 处理；其他数据都存在本机或你的服务器上。
+- **数据去向**：消息内容会发给 Claude 处理（Anthropic 的 API，或你的 Claude 桌面端）；其他数据都存在本机或你的服务器上。
+- **群消息里可能藏着对 AI 的指令**：Claude 读的是别人写的消息。所以 Claude 拿到的令牌碰不到确认入群、清空存储、改设置（6A），它的工具也不能加群或回答验证。
 
 ---
 
@@ -482,11 +502,18 @@ journalctl -u telegram-monitor -f
 | 在自己的群里 bot 只回命令，摘要说「消息太少」 | 隐私模式开着 | 第 2 步关掉后重新拉 bot，或给 bot 管理员权限 |
 | 日志 `409 Conflict` | 同一个 token 开了两个实例 | 关掉另一个 |
 | `/watch` 回复「需要读者账号」 | 没填 `TELEGRAM_API_ID/HASH`，或没登录 | 第 4 步，然后重启 |
-| 「no public group or channel has that username」 | 用户名写错，或者那是私密群 | 核对 `t.me/` 链接；私密群先加入再用 id |
-| 「the account cannot see this chat」 | 私密群：要先加入。**公开群**出现这个提示，通常意味着账号被这个群封了（公开群没有「关闭预览」这种设置），重新加入也没用 | 私密群：在手机上加入后再监控；公开群：别再尝试 |
+| 控制台 Sources 一直是空的，或提示「Set PULSE_OWNER_IDS」 | `.env` 没填 `PULSE_OWNER_IDS`（或 `PULSE_REPORT_TO`） | 填上你的 Telegram id（控制台 Reader account 卡片上有），重启 |
+| 「no public group or channel has that username」 | 用户名写错，或者那是私密群 | 核对 `t.me/` 链接；私密群贴邀请链接（6A「私密群」） |
+| 「the account cannot see this chat」 | 私密群：要先加入。**公开群**出现这个提示，通常意味着账号被这个群封了（公开群没有「关闭预览」这种设置），重新加入也没用 | 私密群：贴邀请链接，在 App 里加入；公开群：别再尝试 |
 | 「has joined no group or channel with that name」 | 读者账号还没加入，或名字写得不对 | 先加入；名字写一部分即可，按读者账号聊天列表里显示的名字 |
 | 群里发命令 bot 没反应 | 群里有别的 bot，命令没点名 | 写成 `/命令@你的bot用户名` |
 | 「FLOOD_WAIT Ns」（控制台的 Errors 里） | Telegram 要求账号放慢 | 整个账号的请求都会自动暂停到时间结束。所有请求本来就按每秒约 1 次的节奏发。经常出现就调大 `PULSE_READER_POLL_SECONDS`、少监控几个群。千万别在等待期间反复重启：用户名解析每天只有约 200 次额度，超了可能要等十几个小时 |
+| 「Invite checks are rationed」 | 24 小时内查邀请链接的配额（20 次）用完了，或两次间隔不到 30 秒 | 等到提示里的时间。同一个链接 10 分钟内再看，不花额度 |
+| 「invite checks PAUSED」 | 查邀请链接时 Telegram 要求账号等待 | 至少 6 小时后自动恢复，读群不受影响。别反复点 |
+| 「This invite link no longer works」 | 链接过期、被撤销，或者是一次性链接、已经用掉了 | 找群里的人要新链接。你要是已经用它加入了，群会自动出现在 Sources |
+| 横幅「Verification in progress」不消失 | 你在群里还不能发言，或者机器人点名你之后的 15 分钟还没过 | 在 App 里回答，然后点「I've answered it — check now」。7 天后仍被禁言，会转为「muted（能读）」 |
+| 没弹 macOS 通知 | 系统没允许，或开着专注模式 | 系统设置 → 通知 → 脚本编辑器 → 允许；再用右上角的 Send test notification 试一次 |
+| Errors 里出现「blocked write」 | 有代码想发写请求（加群、发言等），在发出前被拦下了，什么都没发出去 | 这是程序的 bug，把那一行发给开发者 |
 | 「session is no longer valid」 | 会话在 Devices 里被终止，或账号退出 | 重新 `npm run login` |
 | 「used by two processes at once」 | 同一个会话被两个进程同时使用（AUTH_KEY_DUPLICATED） | 先停掉另一个进程，再重新登录 |
 | 「FROZEN」/「BANNED」/「limited」 | 账号被冻结、封禁或限制 | 不要重试，也**不要换号绕过**（这是 Telegram 不允许的账号轮换）。按 Telegram App 里给出的申诉链接申诉，或联系 recover@telegram.org、@SpamBot |
@@ -510,8 +537,12 @@ journalctl -u telegram-monitor -f
 | `usage` | 每次调用的 token 数和估算花费 | 长期 |
 | `activity` | 控制台的活动日志：账号发出的每个请求，以及各类事件 | 随保留期删除 |
 | `outbox` | 没有 bot 时留在控制台里的摘要 | 长期 |
+| `invites` | 你贴过的邀请链接和跟踪状态 | 链接用完以后（已加入、被移出、失效、过期，或你放弃跟踪），30 天后抹掉链接本身（有了它谁都能进群），90 天后删整行 |
+| `memberships` | 账号在加入的私密群里的状态：成员、等待验证、被移出 | 长期，每个群一行 |
 
-- **清空存储（控制台最下方的 Storage）**：可以勾选清除三类数据：消息和其中的人名、活动日志、摘要和对外消息（含 `data/digests/` 下的文件）。点「Clear now…」确认后**永久删除**，并压缩数据库文件，被删的内容不会留在磁盘的空闲页里。**不会删除**的是：群列表和开关、每个群读到哪里的进度（所以不会重新下载旧消息）、设置和 Telegram 登录。这个按钮只在控制台里，Claude 的工具不能触发。删除后活动日志里只留一条「清空过存储」的记录，不含被删的内容。
+机器人发来的验证消息只在内存里显示（每个群最多 10 条），从不存盘，也不交给 Claude。
+
+- **清空存储（控制台最下方的 Storage）**：可以勾选清除三类数据：消息和其中的人名、活动日志、摘要和对外消息（含 `data/digests/` 下的文件）。点「Clear now…」确认后**永久删除**，并压缩数据库文件，被删的内容不会留在磁盘的空闲页里。**不会删除**的是：群列表和开关、每个群读到哪里的进度（所以不会重新下载旧消息）、邀请链接和私密群状态的跟踪、设置和 Telegram 登录。这个按钮只在控制台里，Claude 的工具不能触发。删除后活动日志里只留一条「清空过存储」的记录，不含被删的内容。
 - 停止监控某个群：在控制台关掉它的开关。它的消息到期后自然删除；想立刻删，用上面的清空存储。
 - 全部删除（包括群列表和设置）：停掉程序，删除 `data/` 目录。
 - 读者账号的会话：除了删 `data/reader.session`，还要在 Telegram 的 Devices 里 Terminate。

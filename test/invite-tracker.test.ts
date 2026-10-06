@@ -105,6 +105,13 @@ test('preview, open, "I\'ve joined": one invite check, three reads of the standi
   assert.equal(env.store.getInvite(preview.invite.id)!.state, 'watching');
   assert.deepEqual(env.pulls, [CHAT_ID]);
   assert.equal(env.store.activity().filter((a) => a.kind === 'write').length, 0);
+
+  // The link has done its job: anyone holding it could join, so it is forgotten 30 days later.
+  env.clock.t += 31 * 86_400;
+  env.store.pruneInvites(env.clock.t);
+  assert.equal(env.store.getInvite(preview.invite.id)!.hash, null);
+  assert.equal(env.store.getChat(CHAT_ID)!.enabled, true, 'reading goes on: it never needed the link');
+  assert.equal(env.store.membership(CHAT_ID)!.historyFrom, 900);
 });
 
 test('a group the chat-list check listed switched off is switched on when the owner confirms it', async () => {

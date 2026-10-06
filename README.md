@@ -13,10 +13,10 @@
 
 | | 别人的群（Binance、OKX…） | 你自己管的群 |
 |---|---|---|
-| 怎么读到消息 | **读者账号**：一个专用的 Telegram 用户账号，走官方 MTProto 协议。公开群和频道不用加入（跟手机上的预览一样）；私密群要先手动加入 | bot 在群里（关隐私模式，或给 bot 管理员权限） |
-| 摘要发到哪 | 你和 bot 的私聊，或团队私密群；不会发回原群 | 群里 |
+| 怎么读到消息 | **读者账号**：一个 Telegram 用户账号（专用号或你自己的号），走官方 MTProto 协议。公开群和频道不用加入（跟手机上的预览一样）；私密群由你在官方 App 里加入，控制台先预览邀请链接 | bot 在群里（关隐私模式，或给 bot 管理员权限） |
+| 摘要发到哪 | 不配 bot：留在本地控制台，由 Claude 桌面端来写。配了 bot：你和 bot 的私聊，或团队私密群。都不会发回原群 | 群里 |
 | 反馈来自 | 你和你的团队 | 群成员 |
-| 需要 | bot token + Claude API key + 专用账号的 `api_id/api_hash` | bot token + Claude API key |
+| 需要 | 读者账号的 `api_id/api_hash` + `PULSE_OWNER_IDS`；bot token 和 Claude API key 可选 | bot token + Claude API key |
 
 为什么别人的群不能直接用 bot：bot 只能由群管理员拉进群，自己不能凭链接加群；官方大群不会同意，在别人群里发摘要也等于刷屏。
 
@@ -67,9 +67,13 @@ npm install
 cp .env.example .env
 ```
 
-1. `.env` 填 `TELEGRAM_BOT_TOKEN`（找 @BotFather 发 `/newbot`）、`ANTHROPIC_API_KEY`、`PULSE_OWNER_IDS`（你的 user id，私聊 bot 发 `/start` 可以看到）。
-2. 要监控别人的群：再填 `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`（用专用账号登录 my.telegram.org 申请），然后运行一次 `npm run login`。
-3. `npm start`。私聊 bot 发 `/watch @某个公开群`，摘要就会发到这个私聊。管理自己的群：把 bot 拉进去，并在 @BotFather 关掉隐私模式。
+**只看别人的群（不配 bot、不配 API key）**
+
+1. `.env` 填 `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`（用读者账号登录 my.telegram.org 申请）和 `PULSE_OWNER_IDS`（你的 Telegram id，控制台 Reader account 卡片上就有）。
+2. 运行一次 `npm run login`（扫码登录），然后 `npm start`，打开 http://127.0.0.1:4830 。账号已经在的群会自动出现；公开群贴 `@用户名` 查看后点 Watch it；私密群贴邀请链接，在 Telegram App 里加入。
+3. 摘要交给 Claude 桌面端写：见 [COOKBOOK.md 第 6A 节](COOKBOOK.md#6a-不配-bot不配-api-key控制台--claude-桌面端)。
+
+**要把摘要发到 Telegram，或用在自己的群里**：再填 `TELEGRAM_BOT_TOKEN`（找 @BotFather 发 `/newbot`）和 `ANTHROPIC_API_KEY`，私聊 bot 发 `/watch @某个公开群`，摘要就会发到这个私聊。管理自己的群：把 bot 拉进去，并在 @BotFather 关掉隐私模式。
 
 ## 命令
 
@@ -144,12 +148,18 @@ npm run typecheck
 npm run replay -- --fake
 ```
 
-- `npm test`：55 个测试，覆盖这几块：
+- `npm test`：111 个测试，覆盖这几块：
   - 转写、引用核验、渲染；
   - 整个 RSI 循环：采用、拒绝、提议、否决、校准；
   - bot 收发和定时器；
-  - 读者账号：MTProto 消息转换、分页和游标、报错翻译、按名字找私密群；
+  - 读者账号：MTProto 消息转换、分页和游标、报错翻译、按名字找私密群、离线补齐和断点续传、对账、请求节奏和限流时整号暂停；
+  - 去噪规则；
+  - 跟随群列表：新群加入、退出和重新加入、每个群的开关、只对可能是加群退群的推送去核对；
+  - 控制台：主机校验、两把令牌、实时流、清空存储；
+  - 私密群：邀请预览、查链接的配额、申请复查的节奏、加入后的状态、入群验证提示、被移出、写操作拦截、通知参数防注入；
   - 报告台：私聊 `/watch`，摘要、投票和回复都回到被监控的群。
+
+  其中两个控制台测试要监听本地端口，在不允许监听的沙箱里会跳过。
 
   用的是假 Telegram、假 MTProto 客户端和一个确定性的替身模型。另有两个测试用模拟的 HTTP 层驱动真实的 Claude SDK，检查发出的请求，以及对拒答、截断、格式错误的处理。
 - `npm run replay -- --fake`：在 `fixtures/alpha-builders.zh.json` 上离线回放。这是一个合成的两天群聊，218 条消息，带人工标注的「埋点」（痛点、想法、机会……）。回放先发两天摘要，再跑几代 RSI，并用埋点做外部核对（RSI 循环本身看不到埋点）。
@@ -173,16 +183,31 @@ src/
   render.ts        Telegram HTML、分段、投票按钮
   store.ts         SQLite（node:sqlite）
   fake-llm.ts      测试和 --fake 用的替身模型
+  activity.ts      活动日志；把每个请求分成读 / 写 / 系统
+  probe.ts         加入之前只读查看一个群
+  denoise.ts       去噪：贴纸、闲聊、刷屏、诈骗；合并碎句；按对话分组
+  recording.ts     没有 bot 时把要发的消息留在控制台；记录 Claude 调用
+  mcp.ts           MCP 服务：Claude 桌面端读数据、写摘要
+  console/         本地控制台（127.0.0.1:4830）
+  invites.ts       私密群：邀请预览、确认加入、加入后的状态跟踪
+  invite-rules.ts  私密群的规则：提醒、配额、复查节奏、状态判断、验证消息识别
+  notify.ts        macOS 通知
 scripts/login.ts   读者账号登录（默认扫码；`--phone` 用手机号 + 登录码；两步验证密码由你本人输入；从不注册新账号）
+scripts/probe.ts   命令行版的只读查看（服务开着时请用控制台）
+scripts/autostart.ts  macOS 开机自启（launchd）
 scripts/replay.ts  离线回放
+docs/private-groups.md  私密群的设计、证据和第二阶段
 fixtures/          合成群聊 + 标注
 ```
 
 ## 诚实说明
 
-- **没接过真 Telegram**：这里既没有 bot token，也没有可登录的读者账号。Bot 客户端按 Bot API 文档写，读者账号按 GramJS 2.26 的接口写，测试分别用假 Telegram 和假 MTProto 客户端。第一次跑请先监控一个小的公开群。
-- **读者账号有被 Telegram 限制或封号的风险**：程序只读、低频（默认 2 分钟一轮），也不自动进群，但无法保证。所以要用专用账号，见 [COOKBOOK.md](COOKBOOK.md) 第 4、13 步。
-- **没调过真 Claude API**：这里也没有 API key。代码按 SDK 0.131 的类型写，类型检查通过。用到了结构化输出、流式、自适应思考、`fallbacks: "default"`（beta `server-side-fallback-2026-07-01`），这几项都没有实际调用过。提示词另外做过一次干跑：用 Claude 子代理代替 API，逐个回答真实请求文件。
+- **读者账号接过真 Telegram，bot 还没有**：
+  - 读者账号从 2026-10-05 起在一个真实账号上实跑。离线补齐经过几次真实断线、睡眠和重启，对账结果都是缺失 0；去噪、跟随群列表都实跑过。
+  - 私密群这条线只实测了预览邀请链接（一个失效链接），完整的加入流程还在等一个真实的邀请链接。
+  - Bot 一侧没有 bot token，只按 Bot API 文档写，测试用假 Telegram。
+- **读者账号有被 Telegram 限制或封号的风险**：程序只读（写操作在代码里直接拒绝）、低频（默认 2 分钟一轮），也不自动进群，但无法保证。用专用号还是自己的号，取舍见 [COOKBOOK.md](COOKBOOK.md) 第 0、13 步。
+- **没调过真 Claude API**：这里没有 API key（Claude 桌面端这条路，用 MCP 的 SDK 客户端实测过）。代码按 SDK 0.131 的类型写，类型检查通过。用到了结构化输出、流式、自适应思考、`fallbacks: "default"`（beta `server-side-fallback-2026-07-01`），这几项都没有实际调用过。提示词另外做过一次干跑：用 Claude 子代理代替 API，逐个回答真实请求文件。
 - **覆盖率靠回复链和对话爆发来识别「热门讨论」**：群里很少用「回复」的话，这个信号会弱一些。
 - **评审和写摘要的是同一类模型**，会有共同盲区。代码检查和读者投票能缓解，不能根除。
 - **评估窗口是最近几天，批评也来自这几天**，所以样本内外有重叠。数据攒多了以后，可以调大 `PULSE_RSI_EVAL_WINDOWS`。

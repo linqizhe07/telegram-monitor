@@ -105,6 +105,9 @@ const VERDICT_TO_PROBE: Record<string, Verdict> = {
 
 const FOLLOWING: InviteState[] = ['requested', 'joined', 'verifying', 'watching', 'removed'];
 
+/** The invite has done its job (or never will): its hash is forgotten 30 days later (store.pruneInvites). */
+const finished = (state: InviteState): boolean => DONE.includes(state) || state === 'watching' || state === 'removed';
+
 export class InviteTracker {
   private readonly d: TrackerDeps;
   private readonly budget: InviteBudget;
@@ -238,7 +241,7 @@ export class InviteTracker {
       lastCheckAt: now,
       lastResult: facts.verdict,
       note: '',
-      doneAt: DONE.includes(state) ? now : null,
+      doneAt: finished(state) ? (known?.doneAt ?? now) : null,
     };
     let row: InviteRow;
     if (known) {
@@ -531,7 +534,8 @@ export class InviteTracker {
     });
     this.track(m);
     if (inviteId !== null) {
-      store.updateInvite(inviteId, { state: gone ? 'removed' : verifying ? 'verifying' : 'watching', joinedAt, chatId: chat.chatId, doneAt: null, nextCheckAt: null });
+      const state: InviteState = gone ? 'removed' : verifying ? 'verifying' : 'watching';
+      store.updateInvite(inviteId, { state, joinedAt, chatId: chat.chatId, doneAt: finished(state) ? now : null, nextCheckAt: null });
     }
     if (gone) {
       this.removed(chat.chatId, self, title);
@@ -631,7 +635,7 @@ export class InviteTracker {
       store.setKv(`reader_off_reason:${chatId}`, 'left');
     }
     store.setMembership(chatId, { state: self.state, untilDate: self.until, detail, checkedAt: this.d.now(), nextCheckAt: null });
-    if (m?.inviteId) store.updateInvite(m.inviteId, { state: 'removed', nextCheckAt: null });
+    if (m?.inviteId) store.updateInvite(m.inviteId, { state: 'removed', nextCheckAt: null, doneAt: this.d.now() });
     this.watched.delete(chatId);
     this.hints.delete(chatId);
     this.event('reader', 'removed', title, detail, false);
@@ -664,7 +668,7 @@ export class InviteTracker {
       const next = verifySchedule(m.joinedAt ?? now, n);
       if (next === null) {
         store.setMembership(chatId, { state: 'muted', checkedAt: now, recheckCount: n, nextCheckAt: null, untilDate: self.until, detail: 'still cannot send there after 7 days; reading works' });
-        if (m.inviteId !== null) store.updateInvite(m.inviteId, { state: 'watching' });
+        if (m.inviteId !== null) store.updateInvite(m.inviteId, { state: 'watching', doneAt: now });
         this.track(store.membership(chatId)!);
         this.event('reader', 'muted', title, 'the account still cannot send there after 7 days; reading works, nothing else is checked');
         return { ok: true, message: `«${title}»: still restricted after 7 days; reading works.`, state: 'muted' };
@@ -681,7 +685,7 @@ export class InviteTracker {
       return { ok: true, message: `«${title}»: still a member. A bot addressed you there: if it asked for something, answer it in your Telegram app.`, state: 'verifying' };
     }
     store.setMembership(chatId, { state: 'member', cause: '', checkedAt: now, recheckCount: n, nextCheckAt: null, untilDate: null, detail: self.detail });
-    if (m.inviteId !== null && ['verifying', 'joined', 'removed'].includes(store.getInvite(m.inviteId)?.state ?? '')) store.updateInvite(m.inviteId, { state: 'watching' });
+    if (m.inviteId !== null && ['verifying', 'joined', 'removed'].includes(store.getInvite(m.inviteId)?.state ?? '')) store.updateInvite(m.inviteId, { state: 'watching', doneAt: now });
     this.track(store.membership(chatId)!);
     if (m.state === 'verifying') this.event('reader', 'verification over', title, 'the account is a member and can send: nothing left to answer');
     return { ok: true, message: `«${title}»: a member${self.detail ? ` (${self.detail})` : ''}. Nothing left to answer.`, state: 'member' };
