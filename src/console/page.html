@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="console-token" content="__CONSOLE_TOKEN__">
+<title>Group Pulse</title>
+<link rel="stylesheet" href="/console.css">
+<script src="/crawler.js" defer></script>
+<script src="/console.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="top-inner">
+    <a class="brand" href="#crawler" title="Group Pulse · runs on this computer only (127.0.0.1)">
+      <svg class="mark" viewBox="0 0 28 28" aria-hidden="true"><rect class="mark-bg" width="28" height="28" rx="6"/><path class="mark-line" d="M6.5 14.5h3.4l2.2-5.1 3.6 9.6 2-4.5h3.8"/></svg>
+      <span class="brand-name">group-pulse</span>
+    </a>
+    <nav class="nav" id="nav" aria-label="Sections">
+      <a href="#crawler">Live</a>
+      <a href="#news-panel">Radar</a>
+      <a href="#sources-panel">Sources</a>
+      <a href="#activity-panel">Activity</a>
+      <a href="#messages-panel">Messages</a>
+      <a href="#digests-panel">Digests</a>
+    </nav>
+    <div class="top-right">
+      <button class="icon-btn" id="notify-test" title="Send a test notification to this Mac (nothing is sent to Telegram)" aria-label="Send a test notification" hidden>
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.4a4.2 4.2 0 0 0-4.2 4.2v2.5c0 .8-.3 1.5-.9 2.1l-.6.6h11.4l-.6-.6c-.6-.6-.9-1.3-.9-2.1V7.6A4.2 4.2 0 0 0 10 3.4Z"/><path d="M8.3 15.4a1.8 1.8 0 0 0 3.4 0"/></svg>
+      </button>
+      <div class="live" id="live" role="status"><span class="dot" aria-hidden="true"></span><span id="live-text">Connecting</span></div>
+    </div>
+  </div>
+</header>
+
+<div class="banner-wrap"><div id="verify-banner" role="alert" hidden></div></div>
+
+<section class="crawler" id="crawler" aria-label="Live view">
+  <div class="hud-top">
+    <div class="hud-stats" id="hud-stats"></div>
+    <div class="hud-brand" id="hud-brand">read-only</div>
+  </div>
+  <div class="hud-tabs" id="hud-tabs" role="tablist" aria-label="Groups"></div>
+  <div class="stage" id="stage">
+    <canvas id="stage-canvas" aria-hidden="true"></canvas>
+    <div class="stage-title">
+      <div class="stage-name"><span class="stage-index" id="stage-index">00</span><span id="stage-group">Waiting for the reader</span></div>
+      <div class="stage-sub" id="stage-sub"></div>
+    </div>
+    <div class="stage-legend" aria-label="Tags">
+      <span class="news">⚑ news</span><span class="ticker">ticker</span><span class="number">number</span><span class="link">link</span><span class="ask">ask</span><span class="noise">noise</span>
+    </div>
+  </div>
+  <div class="instruments">
+    <section class="inst" aria-label="Crawl log">
+      <header><span>Crawl log</span><b class="teal" id="i-log-rate">0 msg/m</b></header>
+      <ol class="inst-log" id="i-log-list"></ol>
+    </section>
+    <section class="inst" aria-label="Groups">
+      <header><span>Nebulae</span><b id="i-groups-n">—</b></header>
+      <ol class="inst-groups" id="i-groups-list"></ol>
+      <footer>messages · <span class="grey-key">removed as noise</span></footer>
+    </section>
+    <section class="inst" aria-label="Keyword detector" title="The crawler's first hand: the day's first-tier news keywords (dashed: how many outlets carry each story; filled: how much your groups talked about it).">
+      <header><span>Keyword detector</span><b class="teal" id="i-radar-n">—</b></header>
+      <svg class="inst-radar" id="i-radar-svg" aria-hidden="true"></svg>
+      <ul class="inst-bars" id="i-radar-bars"></ul>
+    </section>
+    <section class="inst" aria-label="Denoiser" title="The crawler's second hand: the same rules the digest uses drop stickers, one-word chatter, bot commands, repeats and scams before anything is read. Last 24 hours, all groups.">
+      <header><span>Denoiser</span><b id="i-noise-pct">—</b></header>
+      <div class="inst-big"><b id="i-noise-num">—</b><small id="i-noise-of"></small></div>
+      <ul class="inst-bars grey" id="i-noise-bars"></ul>
+      <footer id="i-noise-note">same rules as the digest</footer>
+    </section>
+    <section class="inst" aria-label="Message heat">
+      <header><span>Message heat</span><b id="i-heat-total">—</b></header>
+      <div class="inst-heat" id="i-heat-grid"></div>
+      <div class="inst-rate"><small>messages per minute</small><b id="i-rate">0/m</b></div>
+      <dl class="inst-stats" id="i-heat-stats"></dl>
+    </section>
+    <section class="inst" aria-label="Capture speed">
+      <header><span>Capture speed</span><b class="teal" id="i-speed-n">—</b></header>
+      <svg class="inst-spark" id="i-spark" aria-hidden="true"></svg>
+      <div class="inst-gauge"><svg id="i-gauge" aria-hidden="true"></svg><div class="gauge-read"><b id="i-gauge-num">—</b><small>posted → stored</small></div></div>
+      <footer id="i-speed-note">waiting for the first new message</footer>
+    </section>
+    <section class="inst" aria-label="What the reader is doing">
+      <header><span>reader.py</span><b class="pink" id="i-code-rate">0 l/m</b></header>
+      <pre class="inst-code" id="i-code-pre"></pre>
+    </section>
+  </div>
+  <div class="hud-status" id="hud-status"></div>
+</section>
+
+<main>
+  <section class="panel radar" id="news-panel" aria-labelledby="news-h" hidden>
+    <div class="panel-head">
+      <div class="titles">
+        <h2 id="news-h"><span class="idx">02</span>News radar</h2>
+        <p class="sub" title="Keywords of the day from first-tier sources (Bloomberg, The New York Times, a16z, Y Combinator, the crypto wires, and the news channels among your sources), matched against every group message as it arrives. A group reacting to a story, or talking about it before the first report, is flagged here and in a notification.">first-tier news × your groups, as messages arrive</p>
+      </div>
+      <div class="controls">
+        <span class="meta" id="news-status"></span>
+        <button class="btn" id="news-refresh" title="Read every feed now (each is also read on its own schedule)">Check feeds</button>
+      </div>
+    </div>
+    <ol class="news-alerts" id="news-alerts" aria-live="polite"></ol>
+    <div class="news-split">
+      <div class="news-col">
+        <h3 class="col-head">Keywords today</h3>
+        <ol class="topics" id="news-topics"></ol>
+        <details class="disclosure" id="news-more" hidden>
+          <summary id="news-more-label">Single-source headlines</summary>
+          <ol class="topics single" id="news-single"></ol>
+        </details>
+      </div>
+      <div class="news-col">
+        <h3 class="col-head" title="Messages that named the day's news, newest first, with how long after the first report (or before it) they came.">In your groups</h3>
+        <ol class="hits scroll" id="news-hits"></ol>
+      </div>
+    </div>
+    <details class="disclosure sources-box" id="news-sources-box">
+      <summary id="news-sources-label">News sources</summary>
+      <div class="table-wrap"><table class="grid news-src" id="news-sources"></table></div>
+      <form class="add" id="feed-form" autocomplete="off">
+        <input id="feed-url" placeholder="RSS or Atom feed link, e.g. https://example.com/feed" aria-label="Feed link">
+        <input id="feed-name" class="short" placeholder="Name (optional)" aria-label="Feed name">
+        <button type="submit" class="btn primary" id="feed-btn">Add feed</button>
+      </form>
+      <p class="fine">Telegram channels among your sources count as news sources by themselves (add one under Sources: Check, then Watch). Feeds are read from this computer with plain web requests; nothing from your groups is ever sent anywhere.</p>
+    </details>
+  </section>
+
+  <section class="panel" id="sources-panel" aria-labelledby="sources-h">
+    <div class="panel-head">
+      <div class="titles">
+        <h2 id="sources-h"><span class="idx">03</span>Sources</h2>
+        <p class="sub" title="Everything the account is in shows up here on its own, and new groups appear within about a minute of joining. Reading from outside means the account never joined.">groups and channels this account reads</p>
+      </div>
+      <div class="controls">
+        <label class="switch-label" title="Groups and channels you join in Telegram show up here by themselves">
+          <input type="checkbox" role="switch" id="auto-watch"> Read new groups automatically
+        </label>
+        <button class="btn" id="refresh-list" title="Check the account's chat list now (it also runs every hour, and soon after you join a group)">Refresh from Telegram</button>
+      </div>
+    </div>
+    <div class="table-wrap"><table class="grid sources" id="sources"></table></div>
+    <form class="add" id="add-form" autocomplete="off">
+      <input id="add-input" placeholder="Add a group: @username, t.me link, or invite link" aria-label="Group or channel to check">
+      <button type="submit" class="btn primary" id="probe-btn">Check</button>
+    </form>
+    <p class="fine">Checking is read-only. For a private group, paste its invite link: you join in your Telegram app, this page only looks.</p>
+    <div id="probe-result" hidden></div>
+    <div class="invites" id="invites" hidden>
+      <h3 class="col-head">Private groups · invite links</h3>
+      <ol id="invite-list"></ol>
+      <p class="fine" id="invite-budget"></p>
+    </div>
+  </section>
+
+  <div class="split">
+    <section class="panel" id="activity-panel" aria-labelledby="activity-h">
+      <div class="panel-head">
+        <div class="titles">
+          <h2 id="activity-h"><span class="idx">04</span>Activity</h2>
+          <p class="sub" title="Every request the reader account sends to Telegram, as it happens. A write is anything other people could notice or that changes the account (join, send, mark as read, press a button).">every request to Telegram, live</p>
+        </div>
+        <div class="seg" id="filters" role="tablist" aria-label="Filter activity">
+          <button data-f="all" class="on">All</button>
+          <button data-f="read">Reads</button>
+          <button data-f="write">Writes</button>
+          <button data-f="event">Events</button>
+          <button data-f="llm">Claude</button>
+          <button data-f="error">Errors</button>
+        </div>
+      </div>
+      <ol class="feed scroll" id="feed"></ol>
+    </section>
+
+    <section class="panel" id="messages-panel" aria-labelledby="side-h">
+      <div class="panel-head">
+        <div class="titles">
+          <h2 id="side-h"><span class="idx">05</span>Messages</h2>
+          <p class="sub" id="msg-hint">what Claude reads for the digest</p>
+        </div>
+        <div class="seg" id="msg-view" role="tablist" aria-label="Messages view">
+          <button data-v="signal" class="on">Signal</button>
+          <button data-v="all">All</button>
+        </div>
+      </div>
+      <div class="msg-bar">
+        <label class="select"><select id="msg-source" aria-label="Source"></select></label>
+        <span class="msg-stat" id="msg-stat"></span>
+      </div>
+      <ol class="msgs scroll" id="msgs"></ol>
+    </section>
+  </div>
+
+  <section class="panel" id="digests-panel" aria-labelledby="out-h">
+    <div class="panel-head">
+      <div class="titles">
+        <h2 id="out-h"><span class="idx">06</span>Digests &amp; outgoing messages</h2>
+        <p class="sub" id="out-hint"></p>
+      </div>
+    </div>
+    <ol class="outbox" id="outbox"></ol>
+  </section>
+
+  <section class="panel quiet" id="storage-panel" aria-labelledby="storage-h">
+    <div class="panel-head">
+      <div class="titles">
+        <h2 id="storage-h"><span class="idx">07</span>Storage</h2>
+        <p class="sub" id="storage-now">…</p>
+      </div>
+    </div>
+    <details class="disclosure">
+      <summary>Clear stored data…</summary>
+      <div class="clear-box">
+        <label class="check"><input type="checkbox" id="clear-messages" checked> Messages, and the names of the people in them</label>
+        <label class="check"><input type="checkbox" id="clear-activity" checked> Activity log</label>
+        <label class="check"><input type="checkbox" id="clear-digests" checked> Digests and outgoing messages</label>
+        <button class="btn danger" id="clear-btn">Clear now…</button>
+      </div>
+      <p class="fine">Deleted for good and the database file is compacted, so nothing lingers on disk. Kept: the sources, their switches and where each was read up to (nothing is downloaded again), settings, and the Telegram login.</p>
+    </details>
+  </section>
+</main>
+<footer class="foot"><span>group-pulse · this computer only (127.0.0.1)</span><span id="foot-up"></span></footer>
+<div class="menu-pop" id="row-menu" role="menu" hidden></div>
+<div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

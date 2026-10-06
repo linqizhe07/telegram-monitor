@@ -10,8 +10,8 @@ import type { TgUpdate } from '../src/telegram.ts';
 import { Clock, FakeTelegram, groupMessage, memoryStore, seedUsers, syntheticDay, T0, testConfig } from './helpers.ts';
 
 const OWNER = 1001;
-const BINANCE: SourceInfo = { chatId: -1001111111111, title: 'Binance 中文', username: 'binance_cn_test', type: 'supergroup', ref: '@binance_cn_test', members: 120_000 };
-const OKX: SourceInfo = { chatId: -1002222222222, title: 'OKX 中文', username: 'okx_cn_test', type: 'supergroup', ref: '@okx_cn_test', members: 80_000 };
+const BINANCE: SourceInfo = { chatId: -1001111111111, title: 'Binance 中文', username: 'binance_cn_test', type: 'supergroup', ref: '@binance_cn_test', members: 120_000, peer: null };
+const OKX: SourceInfo = { chatId: -1002222222222, title: 'OKX 中文', username: 'okx_cn_test', type: 'supergroup', ref: '@okx_cn_test', members: 80_000, peer: null };
 
 /** Stands in for the reader account: resolves known usernames, and "pulls" a day of chat into the store. */
 class FakeReader implements ReaderLike {
