@@ -37,7 +37,7 @@ Verified live so far:
   - A made-up hash got one `CheckChatInvite`. Telegram answered `INVITE_HASH_EXPIRED` (not `INVALID`) for an unknown hash, and the row became `link-dead`.
   - Looking again within 10 minutes, through MCP `check_group`, sent nothing to Telegram.
   - With the tool token, the owner-only routes answered 403.
-- **L3: notifications (partial).** `osascript` exited cleanly. Whether macOS showed the notification is the owner's to confirm.
+- **L3: notifications.** `osascript` exited cleanly, and the owner confirmed the test notification appeared (2026-10-06).
 - **Still to run.** L2 with real links, and L4–L9. They need the owner, and a test group run from a second account.
 
 ## How to read this
