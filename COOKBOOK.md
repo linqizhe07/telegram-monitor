@@ -27,7 +27,7 @@
 | 东西 | 什么时候需要 | 从哪来 | 第几步 |
 |---|---|---|---|
 | Node ≥ 22.18 | 总是 | nodejs.org 或 `brew install node` | 1 |
-| 你的 Telegram user id（`PULSE_OWNER_IDS`） | **总是**：没有它，服务不会添加任何群 | 控制台 Reader account 卡片上的 Telegram id；有 bot 时私聊它发 `/start` 也能看到 | 6 |
+| 你的 Telegram user id（`PULSE_OWNER_IDS`） | **总是**：没有它，服务不会添加任何群 | 控制台实时视图下方状态行里的 `ID …`；有 bot 时私聊它发 `/start` 也能看到 | 6 |
 | 读者账号（一个 Telegram 账号） | 监控别人的群时 | 专用号，或你自己的号（见下） | 4.1 |
 | `api_id` + `api_hash` | 监控别人的群时 | my.telegram.org，用读者账号登录 | 4.2 |
 | Bot token | 可选：要把摘要发到 Telegram，或用在你自己管的群里 | Telegram 里的 @BotFather | 2 |
@@ -187,7 +187,7 @@ TELEGRAM_BOT_TOKEN=…
 ANTHROPIC_API_KEY=…
 ```
 
-不知道自己的 Telegram id：先启动一次，控制台的 Reader account 卡片上写着读者账号的 id（用自己的号时就是你的 id；只用控制台时，填这个就行）。有 bot 时也可以私聊 bot 发 `/start`，它会告诉你。填进去再重启。
+不知道自己的 Telegram id：先启动一次，控制台实时视图下方的状态行写着读者账号的 id（用自己的号时就是你的 id；只用控制台时，填这个就行）。有 bot 时也可以私聊 bot 发 `/start`，它会告诉你。填进去再重启。
 
 ```bash
 npm start
@@ -218,17 +218,17 @@ console: http://127.0.0.1:4830
 
 | 区块 | 看什么 |
 |---|---|
+| Live（最上面的实时视图） | 每个群是一团星云（点数按它最近 24 小时的消息量），中间青色的一团是一线新闻。爬虫走到刚有新消息的群，伸出两种手：**关键词检测器**（青色）给有用的词打标签，包括币种、数字、链接和提问；新闻雷达判定命中当天新闻时，插一面粉色旗，并连一条线到新闻星云。**去噪器**（灰色）把摘要会丢掉的消息拽出来粉碎，也就是表情包、单字闲聊、机器人命令、刷屏和广告，用的是摘要的同一套规则。动画全部由真实事件驱动，页面不可见或滚出屏幕时自动停下 |
+| Live 顶栏和下方仪表 | 顶栏：群数、24 小时消息数、新闻条数、命中数（LINKS）、警报数（FLAGS）、去掉的噪音数（NOISE）、**写操作数（WRITES，正常是 0）**、服务运行时长、已画帧数。仪表：抓取日志、各群消息量（灰色部分是去掉的噪音）、关键词检测器雷达（虚线：几家媒体在报；实心：你的群聊了多少）、去噪器（按原因分）、24 小时消息热图、入库速度（消息发出到存下的秒数）、reader.py（读者正在做的事）。状态行写着登录的是哪个号和它的 id；随时可以在 Telegram → 设置 → 设备里终止 |
 | News radar | 一线新闻（Bloomberg、纽约时报、a16z、YC、加密媒体、你订阅的新闻频道）今天的关键词，和它们在你的群里什么时候、被谁提到（见下文「新闻雷达」） |
-| Reader account | 登录的是哪个号；随时可以在 Telegram → 设置 → 设备里终止 |
-| Account actions | 24 小时内账号发给 Telegram 的请求：读几次、**写几次**（加群、发言、按按钮、标已读都算写）。正常是 0 次写：所有请求都过同一个入口，入口在代码里直接拒绝任何写操作（记为 ERROR「blocked write」，什么都没发出去） |
 | Sources | 每个群：从外面读，还是已是成员；过去 24 小时存了多少条；群的日均量；门口的守卫（入群审批、群里的机器人）；是否已追平。「隐藏历史」和「反垃圾」只有管理员能看到，从外面看显示为未知，不代表没有 |
-| Activity | 账号发出的**每一个**请求，实时滚动。GramJS 所有请求都经过同一个被记录的入口，只有建连接的握手和心跳不记（它们不涉及任何群） |
-| Captured messages | `Signal` = 去噪后 Claude 实际读到的内容；`All` = 原始消息 |
+| Activity | 账号发出的**每一个**请求，实时滚动。GramJS 所有请求都经过同一个被记录的入口，只有建连接的握手和心跳不记（它们不涉及任何群）。写操作（加群、发言、按按钮、标已读）正常是 0 次：入口在代码里直接拒绝任何写操作（记为 ERROR「blocked write」，什么都没发出去） |
+| Messages | `Signal` = 去噪后 Claude 实际读到的内容；`All` = 原始消息 |
 | Digests | Claude 写好的摘要：每个群一个文件夹，最新的在上面，点开文件夹就能读最新一份 |
 | 顶部黄色横幅 | 某个刚加入的私密群里有入群验证在等你，去 App 里回答（见下文「私密群」） |
 | Private groups | 你贴过的邀请链接和各自的状态：已预览、申请中、已加入、被移出…… |
 
-每个群有两个按钮：**Catch up**（立刻追平）和 **Audit 1h**（拿 Telegram 那边最近一小时的消息逐条对账：要么已存，要么写明为什么跳过，比如机器人或系统消息；其余都会报「缺失」）。
+每个群一行，右边的 **Messages** 在下方显示它的消息；**⋯** 菜单里有 **Catch up now**（立刻追平）和 **Audit the last hour**（拿 Telegram 那边最近一小时的消息逐条对账：要么已存，要么写明为什么跳过，比如机器人或系统消息；其余都会报「缺失」）。
 
 ### 自动跟随你的群列表，每个群一个开关
 
@@ -283,7 +283,7 @@ console: http://127.0.0.1:4830
 
 ### 新闻雷达：一线新闻关键词 × 群聊
 
-控制台最上面的 **News radar**。它做三件事：
+控制台实时视图下面的 **News radar**。它做三件事：
 
 1. **从一线来源挖当天的关键词**。默认读 15 个 RSS 源（2026-10-06 逐个核对过能用）：
    - Bloomberg：Markets、Crypto、Technology、Economics、Politics；
@@ -358,7 +358,7 @@ Claude 拿到的令牌（`data/console.json`）只能调用它的工具本来就
 
 ## 7. 开始监控
 
-**控制台**：在 Sources 下面的输入框贴 `@用户名` 或 `t.me/…` 链接，点 **Check (read-only)**，再点 **Watch it**，就开始读，从最近 24 小时读起。Claude 里用 `watch_source`。你在 Telegram 里已经加入的群不用加，它们会自动出现（6A）。
+**控制台**：在 Sources 下面的输入框贴 `@用户名` 或 `t.me/…` 链接，点 **Check**（只读），再点 **Watch it**，就开始读，从最近 24 小时读起。Claude 里用 `watch_source`。你在 Telegram 里已经加入的群不用加，它们会自动出现（6A）。
 
 **bot 模式**：在报告台（私聊 bot，或团队私密群）里发：
 
@@ -378,7 +378,7 @@ Claude 拿到的令牌（`data/console.json`）只能调用它的工具本来就
 
   所有请求共用每秒约 1 次的节奏。群太多（几十个）就把这几个值调大，别让读者账号显得像在刷接口。
 
-检查点：控制台 Sources 表的「Captured · 24h」一列有数字；bot 模式下 `/sources` 列出每个群「近 24 小时 N 条」，⚠️ 后面跟着的是读取出的问题，以及该怎么处理。
+检查点：控制台 Sources 表的「Last 24h」一列有数字；bot 模式下 `/sources` 列出每个群「近 24 小时 N 条」，⚠️ 后面跟着的是读取出的问题，以及该怎么处理。
 
 ---
 
@@ -556,7 +556,7 @@ journalctl -u telegram-monitor -f
 | 在自己的群里 bot 只回命令，摘要说「消息太少」 | 隐私模式开着 | 第 2 步关掉后重新拉 bot，或给 bot 管理员权限 |
 | 日志 `409 Conflict` | 同一个 token 开了两个实例 | 关掉另一个 |
 | `/watch` 回复「需要读者账号」 | 没填 `TELEGRAM_API_ID/HASH`，或没登录 | 第 4 步，然后重启 |
-| 控制台 Sources 一直是空的，或提示「Set PULSE_OWNER_IDS」 | `.env` 没填 `PULSE_OWNER_IDS`（或 `PULSE_REPORT_TO`） | 填上你的 Telegram id（控制台 Reader account 卡片上有），重启 |
+| 控制台 Sources 一直是空的，或提示「Set PULSE_OWNER_IDS」 | `.env` 没填 `PULSE_OWNER_IDS`（或 `PULSE_REPORT_TO`） | 填上你的 Telegram id（控制台实时视图下方的状态行里有），重启 |
 | 「no public group or channel has that username」 | 用户名写错，或者那是私密群 | 核对 `t.me/` 链接；私密群贴邀请链接（6A「私密群」） |
 | 「the account cannot see this chat」 | 私密群：要先加入。**公开群**出现这个提示，通常意味着账号被这个群封了（公开群没有「关闭预览」这种设置），重新加入也没用 | 私密群：贴邀请链接，在 App 里加入；公开群：别再尝试 |
 | 「has joined no group or channel with that name」 | 读者账号还没加入，或名字写得不对 | 先加入；名字写一部分即可，按读者账号聊天列表里显示的名字 |

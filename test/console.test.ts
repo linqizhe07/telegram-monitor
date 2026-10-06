@@ -260,3 +260,55 @@ test('clearing digests removes the files in every group folder, and the empty fo
     await server.stop();
   }
 });
+
+test('the pulse: each group\'s messages per hour, what the denoiser removed, and how long new messages took to be stored', async (t) => {
+  const clock = new Clock();
+  const store = memoryStore(clock);
+  const activity = new Activity(store);
+  const config = testConfig({ reportTo: 700000001 });
+  const GROUP = -1001111111111;
+  store.watchChat({ chatId: GROUP, title: 'A group', username: 'a_group', type: 'supergroup', ref: '@a_group' }, 42, null, { language: 'auto', digestHour: 9, timezone: 'UTC', rsiMode: 'auto' });
+  const now = clock.now();
+  const dates = [now - 30 * 3600, now - 2 * 3600 - 10, now - 30, now - 8];
+  const texts = ['an old one', '大饼要涨到10万了', 'hi', '/start'];
+  dates.forEach((date, i) => store.saveMessage({ chatId: GROUP, messageId: i + 1, threadId: null, userId: 5, date, text: texts[i], replyTo: null, reactions: 0, edited: false }));
+  activity.event('reader', 'stored', 'A group', '2 new messages · noticed by the chat-list check');
+  activity.event('reader', 'stored', 'Not a source', '1 new message');
+  const server = new ConsoleServer({
+    store,
+    activity,
+    config,
+    port: 0,
+    now: clock.now,
+    log: () => undefined,
+    startedAt: now,
+    account: null,
+    reader: null,
+    bot: null,
+    claude: { ready: false, model: config.model },
+  });
+  try {
+    await server.start();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EPERM') return t.skip('this sandbox does not allow listening on a local port');
+    throw err;
+  }
+  try {
+    const pulse = JSON.parse((await call(Number(new URL(server.url).port), '/api/pulse')).body);
+    const row = pulse.hours.find((h: { chatId: number }) => h.chatId === GROUP);
+    const first = Math.floor(now / 3600) - 23;
+    const expected = Array.from({ length: 24 }, (_, i) => dates.filter((d) => Math.floor(d / 3600) === first + i).length);
+    assert.deepEqual(row.counts, expected, 'the message 30 hours old is outside the day');
+    assert.equal(row.counts.reduce((a: number, b: number) => a + b, 0), 3);
+    assert.deepEqual(pulse.lags, [{ at: now, chatId: GROUP, lag: 8 }], 'stored 8 seconds after it was posted; an unknown chat is left out');
+    assert.deepEqual(pulse.noise, [{ chatId: GROUP, total: 3, removed: { sticker: 0, chatter: 1, command: 1, spam: 0, repeat: 0 } }]);
+    // The denoiser's verdict on each of the latest messages, for the crawler's second hand.
+    const latest = JSON.parse((await call(Number(new URL(server.url).port), `/api/messages?chat=${GROUP}&limit=3&noise=1`)).body);
+    assert.deepEqual(latest.map((m: { text: string; noise: string | null }) => [m.text, m.noise]), [['大饼要涨到10万了', null], ['hi', 'chatter'], ['/start', 'command']]);
+    const plain = JSON.parse((await call(Number(new URL(server.url).port), `/api/messages?chat=${GROUP}&limit=10`)).body);
+    assert.equal(plain.length, 4, 'without the last day filling the limit, the whole history is read');
+    assert.equal('noise' in plain[0], false);
+  } finally {
+    await server.stop();
+  }
+});

@@ -40,6 +40,8 @@ export interface Denoised {
   removed: Record<NoiseKind, number>;
   /** A few removed examples per kind, for checking that nothing useful was dropped. */
   samples: Record<NoiseKind, string[]>;
+  /** Every removed message: its id and why. */
+  noise: Map<number, NoiseKind>;
 }
 
 // Fillers: a message made only of these says nothing on its own.
@@ -138,8 +140,10 @@ export function denoise(messages: StoredMessage[]): Denoised {
 
   const removed: Record<NoiseKind, number> = { sticker: 0, chatter: 0, command: 0, spam: 0, repeat: 0 };
   const samples: Record<NoiseKind, string[]> = { sticker: [], chatter: [], command: [], spam: [], repeat: [] };
+  const noise = new Map<number, NoiseKind>();
   const drop = (kind: NoiseKind, m: StoredMessage) => {
     removed[kind]++;
+    noise.set(m.messageId, kind);
     if (samples[kind].length < 12) samples[kind].push(m.text.slice(0, 80));
   };
 
@@ -189,7 +193,7 @@ export function denoise(messages: StoredMessage[]): Denoised {
   }
 
   const scored = lines.map((l) => ({ ...l, score: signalScore(l) }));
-  return { total: messages.length, kept, removed, samples, lines: scored, conversations: group(scored) };
+  return { total: messages.length, kept, removed, samples, noise, lines: scored, conversations: group(scored) };
 }
 
 /** Groups lines into conversations: a line replying to another joins its conversation. */

@@ -57,6 +57,7 @@ test('a copy-paste wave is folded into its first copy with how many times and pe
   assert.equal(d.lines.length, 1);
   assert.deepEqual(d.lines[0].echoes, { times: 4, people: 3 });
   assert.equal(d.removed.repeat, 3);
+  assert.deepEqual([...d.noise], [[201, 'repeat'], [202, 'repeat'], [203, 'repeat']], 'each removed message, with why');
   assert.ok(d.lines[0].score > 3, 'a wave is a signal of how many people have the problem');
 });
 

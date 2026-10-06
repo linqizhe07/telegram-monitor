@@ -58,6 +58,7 @@ const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(
 const ASSETS: Record<string, { file: URL; type: string }> = {
   '/console.js': { file: new URL('./console.js', import.meta.url), type: 'text/javascript; charset=utf-8' },
   '/console.css': { file: new URL('./console.css', import.meta.url), type: 'text/css; charset=utf-8' },
+  '/crawler.js': { file: new URL('./crawler.js', import.meta.url), type: 'text/javascript; charset=utf-8' },
 };
 const PAGE = new URL('./page.html', import.meta.url);
 const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
@@ -179,7 +180,7 @@ export class ConsoleServer {
           );
         }
         case '/api/messages':
-          return this.json(res, 200, this.messages(Number(url.searchParams.get('chat')), Number(url.searchParams.get('limit') ?? 100)));
+          return this.json(res, 200, this.messages(Number(url.searchParams.get('chat')), Number(url.searchParams.get('limit') ?? 100), url.searchParams.get('noise') === '1'));
         case '/api/joined':
           return this.json(res, 200, await this.joined());
         case '/api/storage':
@@ -188,6 +189,8 @@ export class ConsoleServer {
           return this.json(res, 200, this.signal(Number(url.searchParams.get('chat')), Number(url.searchParams.get('hours') ?? 24)));
         case '/api/news':
           return this.json(res, 200, this.deps.news && this.deps.config.news ? this.deps.news.view() : { enabled: false, sources: [], keywords: [], hits: [], alerts: [], items24h: 0 });
+        case '/api/pulse':
+          return this.json(res, 200, this.pulse());
         case '/api/events':
           res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
           res.write(': connected\n\n');
@@ -368,10 +371,52 @@ export class ConsoleServer {
     return { ok: true, message: `Feeds checked: ${Math.max(0, added)} new item${added === 1 ? '' : 's'}${failing.length ? `; not answering: ${failing.map((x) => x.name).join(', ')}` : ''}.` };
   }
 
-  private messages(chatId: number, limit: number) {
+  /**
+   * For the live view: each group's messages per hour over the last day, what the denoiser removed
+   * from each (the last day, as the digest reads it; worked out at most once a minute), and how long
+   * recent messages took to be stored.
+   */
+  private pulse() {
+    const { store, now: clock } = this.deps;
+    const now = clock();
+    const HOUR = 3600;
+    const first = Math.floor(now / HOUR) - 23; // 24 buckets; the last one is the current hour
+    const buckets = store.messageBuckets(first * HOUR, HOUR);
+    if (!this.noiseCache || now - this.noiseCache.at >= 60) {
+      const noise = store
+        .listChats(false)
+        .filter((c) => c.kind === 'watched' && c.enabled)
+        .map((c) => {
+          const d = denoise(store.messages(c.chatId, now - 86_400, now + 1));
+          return { chatId: c.chatId, total: d.total, removed: d.removed };
+        })
+        .filter((x) => x.total > 0);
+      this.noiseCache = { at: now, noise };
+    }
+    return {
+      now,
+      from: first * HOUR,
+      bucketS: HOUR,
+      hours: [...buckets].map(([chatId, m]) => ({ chatId, counts: Array.from({ length: 24 }, (_, i) => m.get(first + i) ?? 0) })),
+      noise: this.noiseCache.noise,
+      lags: store.captureLags(now - 6 * HOUR, 60),
+    };
+  }
+  private noiseCache: { at: number; noise: { chatId: number; total: number; removed: Record<string, number> }[] } | null = null;
+
+  /**
+   * The last `limit` messages of a chat. With `withNoise`, each also says whether the denoiser drops
+   * it and why (judged over the last day, as the digest is), or null when it is kept.
+   */
+  private messages(chatId: number, limit: number, withNoise = false) {
     const { store, now } = this.deps;
     const users = store.users(chatId);
-    const rows = store.messages(chatId, 0, now() + 1).slice(-Math.min(Math.max(limit, 1), 500));
+    const end = now() + 1;
+    const want = Math.min(Math.max(limit, 1), 500);
+    // The last day usually holds them; only a quiet chat needs the whole history.
+    const day = store.messages(chatId, end - 86_400, end);
+    const rows = (day.length >= want ? day : store.messages(chatId, 0, end)).slice(-want);
+    const noise = withNoise ? denoise(day).noise : null;
     return rows.map((m) => ({
       id: m.messageId,
       date: m.date,
@@ -379,6 +424,7 @@ export class ConsoleServer {
       text: m.text,
       replyTo: m.replyTo,
       reactions: m.reactions,
+      ...(noise ? { noise: noise.get(m.messageId) ?? null } : {}),
     }));
   }
 
