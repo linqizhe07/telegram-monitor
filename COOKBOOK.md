@@ -77,7 +77,7 @@ npm install
 cp .env.example .env
 ```
 
-检查点：`npm test` 全部通过（目前 111 个）。
+检查点：`npm test` 全部通过（目前 132 个）。
 
 ---
 
@@ -199,6 +199,7 @@ npm start
 no TELEGRAM_BOT_TOKEN: console-only mode …   ← 没配 bot 时
 bot @your_bot · model claude-opus-5-5 · …    ← 配了 bot 时
 reader account: @your_reader_account
+news radar: 21 sources (console → News radar)
 console: http://127.0.0.1:4830
 ```
 
@@ -228,7 +229,7 @@ console: http://127.0.0.1:4830
 | 顶部黄色横幅 | 某个刚加入的私密群里有入群验证在等你，去 App 里回答（见下文「私密群」） |
 | Private groups | 你贴过的邀请链接和各自的状态：已预览、申请中、已加入、被移出…… |
 
-每个群一行，右边的 **Messages** 在下方显示它的消息；**⋯** 菜单里有 **Catch up now**（立刻追平）和 **Audit the last hour**（拿 Telegram 那边最近一小时的消息逐条对账：要么已存，要么写明为什么跳过，比如机器人或系统消息；其余都会报「缺失」）。
+实时视图上方的标签页一个群一个，点一下爬虫就过去，下方 Messages 也换成这个群。Sources 里每个群一行，右边的 **Messages** 在下方显示它的消息；**⋯** 菜单里有 **Catch up now**（立刻追平）和 **Audit the last hour**（拿 Telegram 那边最近一小时的消息逐条对账：要么已存，要么写明为什么跳过，比如机器人或系统消息；其余都会报「缺失」）。
 
 ### 自动跟随你的群列表，每个群一个开关
 
@@ -238,7 +239,7 @@ console: http://127.0.0.1:4830
 - 只有可能是加群、退群、被移出的推送才会触发核对；群改了头像、标题这类日常推送不会。同一个群一小时最多触发一次。原因：反复拉群列表是 Telegram 最常用长时间限流来惩罚的行为。
 - **你退出或被移出的群**：自动停止读取，状态里写明情况；能分清时（比如读取时发现进不去了），还会写明是被踢（到几点）还是被封。之后再加入，会自动恢复读取。
 - **每个群前面都有一个开关**：关掉就不再读，已经存下的消息保留到保留期结束；重新打开时，从断点继续补，但最多补最近 24 小时。**你手动关掉的群，核对群列表时不会被重新打开。**
-- 页面顶部有「Read new groups I join automatically」总开关：关掉后，新加入的群只会出现在列表里，默认不读。对应 `.env` 里的 `PULSE_AUTO_WATCH_NEW`。
+- Sources 右上角有「Read new groups automatically」总开关：关掉后，新加入的群只会出现在列表里，默认不读。对应 `.env` 里的 `PULSE_AUTO_WATCH_NEW`。
 - 「Refresh from Telegram」按钮会立刻核对一次。
 - 从外面按 @用户名读的公开群（比如币安英文群）不受群列表影响，即使你不在群里也照常读。
 - Claude 那边对应的工具是 `set_monitoring`（开关某个群）和 `refresh_sources`（立刻核对）。
@@ -266,7 +267,7 @@ console: http://127.0.0.1:4830
 
 文件夹链接（`t.me/addlist/…`）不会去查：请在 App 里打开，只添加你要的那个群，它会自动出现在 Sources 里。
 
-所有动作都在 Activity 里：每个请求、你点的每个按钮、每次状态变化、每条通知。macOS 通知可以用右上角的 **Send test notification** 先试一下；如果没弹出来，在「系统设置 → 通知」里允许「脚本编辑器」，并检查专注模式。`.env` 里 `PULSE_NOTIFY=off` 关闭通知，`PULSE_NOTIFY_TITLES=0` 让锁屏上不显示群名。
+所有动作都在 Activity 里：每个请求、你点的每个按钮、每次状态变化、每条通知。macOS 通知可以用右上角的铃铛按钮（Send a test notification）先试一下；如果没弹出来，在「系统设置 → 通知」里允许「脚本编辑器」，并检查专注模式。`.env` 里 `PULSE_NOTIFY=off` 关闭通知，`PULSE_NOTIFY_TITLES=0` 让锁屏上不显示群名。
 
 完整设计、证据和以后的第二阶段（软件代为加群，暂不做）见 `docs/private-groups.md`。
 
@@ -304,7 +305,7 @@ console: http://127.0.0.1:4830
 - **从外面读的群**（不在你的群列表里，比如币安英文群）活跃时每 30 秒读一次，6 小时没动静就降到 2 分钟。
 - 为什么不靠 Telegram 推送：2026-10-06 实测，这个会话能收到私聊、已读回执、输入状态的推送，但收不到大群的新消息。所以推送只当加速：真推过来就立刻读，不推也不耽误。
 
-Sources 表的状态一栏写明每个群是哪种：`new messages noticed within ~10s`、`every ~30s`，或 `instant`（真的收到了推送）。
+Sources 表的 Reading 一栏写明每个群是哪种：`new messages within ~10s`、`read every ~30s`，或 `instant · pushed by Telegram`（真的收到了推送）。实时视图的 Capture speed 仪表显示最近几次「消息发出 → 入库」用了几秒。
 
 新闻源可以在 News radar 底部的 **News sources** 里管理：
 - 每个源一个开关；
@@ -335,6 +336,8 @@ Claude 那边：
 3. **按对话分组**：用回复关系把消息串成一段段对话。整段都和加密、交易、交易所、钱无关的（学历、相亲、闲聊）**折叠**成一段说明，需要时可以展开。
 
 币安官方中文群 2026-10-05 的实测：5,174 条 → 去掉 1,100 多条噪音 → 合并后 3,187 行 → 相关对话 505 段、872 行，约 4 万字；折叠掉的无关闲聊约 10 万字。Claude 读 3 页，而不是 12 页。
+
+控制台上看得到它在干活：实时视图里爬虫的灰色触手就是去噪器，每条被去掉的新消息会被划掉、拽走、粉碎；下面的 Denoiser 仪表按原因统计最近 24 小时去掉了多少（2026-10-06 实测：7,476 条里去掉 18%，其中贴纸 691、闲聊 467、刷屏 100、机器人命令 93、诈骗 6），Nebulae 仪表里每个群的灰色部分就是它被去掉的噪音。这些都用上面同一套规则算。
 
 ### 接入 Claude 桌面端
 
@@ -566,7 +569,7 @@ journalctl -u telegram-monitor -f
 | 「invite checks PAUSED」 | 查邀请链接时 Telegram 要求账号等待 | 至少 6 小时后自动恢复，读群不受影响。别反复点 |
 | 「This invite link no longer works」 | 链接过期、被撤销，或者是一次性链接、已经用掉了 | 找群里的人要新链接。你要是已经用它加入了，群会自动出现在 Sources |
 | 横幅「Verification in progress」不消失 | 你在群里还不能发言，或者机器人点名你之后的 15 分钟还没过 | 在 App 里回答，然后点「I've answered it — check now」。7 天后仍被禁言，会转为「muted（能读）」 |
-| 没弹 macOS 通知 | 系统没允许，或开着专注模式 | 系统设置 → 通知 → 脚本编辑器 → 允许；再用右上角的 Send test notification 试一次 |
+| 没弹 macOS 通知 | 系统没允许，或开着专注模式 | 系统设置 → 通知 → 脚本编辑器 → 允许；再用右上角的铃铛按钮试一次 |
 | Errors 里出现「blocked write」 | 有代码想发写请求（加群、发言等），在发出前被拦下了，什么都没发出去 | 这是程序的 bug，把那一行发给开发者 |
 | 「session is no longer valid」 | 会话在 Devices 里被终止，或账号退出 | 重新 `npm run login` |
 | 「used by two processes at once」 | 同一个会话被两个进程同时使用（AUTH_KEY_DUPLICATED） | 先停掉另一个进程，再重新登录 |
@@ -596,7 +599,7 @@ journalctl -u telegram-monitor -f
 
 机器人发来的验证消息只在内存里显示（每个群最多 10 条），从不存盘，也不交给 Claude。
 
-- **清空存储（控制台最下方的 Storage）**：可以勾选清除三类数据：消息和其中的人名、活动日志、摘要和对外消息（含 `data/digests/` 下各个群文件夹里的文件）。点「Clear now…」确认后**永久删除**，并压缩数据库文件，被删的内容不会留在磁盘的空闲页里。**不会删除**的是：群列表和开关、每个群读到哪里的进度（所以不会重新下载旧消息）、邀请链接和私密群状态的跟踪、设置和 Telegram 登录。这个按钮只在控制台里，Claude 的工具不能触发。删除后活动日志里只留一条「清空过存储」的记录，不含被删的内容。
+- **清空存储（控制台最下方的 Storage，展开「Clear stored data…」）**：可以勾选清除三类数据：消息和其中的人名、活动日志、摘要和对外消息（含 `data/digests/` 下各个群文件夹里的文件）。点「Clear now…」确认后**永久删除**，并压缩数据库文件，被删的内容不会留在磁盘的空闲页里。**不会删除**的是：群列表和开关、每个群读到哪里的进度（所以不会重新下载旧消息）、邀请链接和私密群状态的跟踪、设置和 Telegram 登录。这个按钮只在控制台里，Claude 的工具不能触发。删除后活动日志里只留一条「清空过存储」的记录，不含被删的内容。
 - 停止监控某个群：在控制台关掉它的开关。它的消息到期后自然删除；想立刻删，用上面的清空存储。
 - 全部删除（包括群列表和设置）：停掉程序，删除 `data/` 目录。
 - 读者账号的会话：除了删 `data/reader.session`，还要在 Telegram 的 Devices 里 Terminate。

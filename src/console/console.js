@@ -134,7 +134,6 @@ function until(t) {
   return `in ${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 }
 const n = (x) => (x === null || x === undefined ? '—' : NUM.format(x));
-const usd = (x) => `$${(x || 0).toFixed(x >= 1 ? 2 : 3)}`;
 
 /** A relative time ("12s ago") that keeps itself current without redrawing its row. */
 function setAgo(node, t, pre = '') {
@@ -156,8 +155,13 @@ function agoEl(t, pre = '') {
   setAgo(e, t, pre);
   return e;
 }
+/** A countdown ("in 3h 12m") that keeps itself current the same way. */
+function untilEl(t, pre = '') {
+  return el('time', { 'data-until': t, 'data-pre': pre, datetime: new Date(t * 1000).toISOString(), title: fmtFull(t) }, `${pre}${until(t)}`);
+}
 function tickTimes() {
   for (const e of document.querySelectorAll('time[data-ago]')) setText(e, `${e.dataset.pre || ''}${ago(Number(e.dataset.ago))}`);
+  for (const e of document.querySelectorAll('time[data-until]')) setText(e, `${e.dataset.pre || ''}${until(Number(e.dataset.until))}`);
 }
 
 function toast(text) {
@@ -328,25 +332,46 @@ function guardsCell(src) {
   return el('div', { class: 'chips-inline' }, g.length ? g : el('span', { class: 'cell-sub', text: src.access ? 'none seen' : '—' }));
 }
 
-function moreButton(src, s) {
-  const b = el('button', { class: 'btn icon', title: 'More', 'aria-label': `More for ${src.title}`, 'aria-haspopup': 'menu', 'aria-expanded': 'false' }, svgIcon(DOTS));
+/** Row actions in flight, by chat and action: a running catch-up does not hold up an audit. */
+const busy = new Set();
+
+function moreButton(chatId, title) {
+  const b = el('button', { class: 'btn icon', title: 'More', 'aria-label': `More for ${title}`, 'aria-haspopup': 'menu', 'aria-expanded': 'false' }, svgIcon(DOTS));
   b.addEventListener('click', () => {
+    // Read when the menu opens, not when the row was drawn: a digest may have run since.
+    const src = state && state.sources.find((x) => x.chatId === chatId);
+    if (!src) return;
     const watched = src.kind === 'watched' && src.enabled;
+    const item = (what, label, note, path, body, pending, off = false) => {
+      const key = `${chatId}:${what}`;
+      const running = busy.has(key);
+      return { label, note: running ? 'Running…' : note, disabled: off || running, run: () => runAction(key, path, body, pending) };
+    };
     openMenu(b, [
-      watched && { label: 'Catch up now', note: 'Read anything missed, right away', run: () => action(b, '/api/pull', { chatId: src.chatId }, `Catching up on ${src.title}…`) },
-      watched && { label: 'Audit the last hour', note: 'Compare with Telegram: is anything missing?', run: () => action(b, '/api/audit', { chatId: src.chatId, hours: 1 }, `Auditing ${src.title}…`) },
-      {
-        label: 'Digest now',
-        note: s.claude.ready ? `Next one ${until(src.nextDigestAt)}${src.lastDigestAt ? ` · last ${fmtDateTime(src.lastDigestAt)}` : ''}` : 'Needs ANTHROPIC_API_KEY (Claude Desktop writes the daily one)',
-        disabled: !s.claude.ready,
-        run: () => action(b, '/api/digest', { chatId: src.chatId }, `Writing a digest of ${src.title}…`),
-      },
+      watched && item('pull', 'Catch up now', 'Read anything missed, right away', '/api/pull', { chatId }, `Catching up on ${src.title}…`),
+      watched && item('audit', 'Audit the last hour', 'Compare with Telegram: is anything missing?', '/api/audit', { chatId, hours: 1 }, `Auditing ${src.title}…`),
+      item('digest', 'Digest now', state.claude.ready ? `Next one ${until(src.nextDigestAt)}${src.lastDigestAt ? ` · last ${fmtDateTime(src.lastDigestAt)}` : ''}` : 'Needs ANTHROPIC_API_KEY (Claude Desktop writes the daily one)', '/api/digest', { chatId }, `Writing a digest of ${src.title}…`, !state.claude.ready),
     ].filter(Boolean));
   });
   return b;
 }
 
-function sourceRow(src, s, standing) {
+async function runAction(key, path, body, pending) {
+  if (busy.has(key)) return;
+  busy.add(key);
+  if (pending) toast(pending);
+  try {
+    const r = await api(path, body);
+    toast(r.message || (r.ok ? 'Done.' : 'Failed.'));
+    refresh();
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    busy.delete(key);
+  }
+}
+
+function sourceRow(src, standing) {
   const sw = el('input', { type: 'checkbox', role: 'switch', 'aria-label': `Read ${src.title}`, title: src.enabled ? 'On: being read. Click to stop.' : 'Off: not read. Click to read it (catches up at most 24 hours).' });
   sw.checked = src.enabled;
   sw.addEventListener('change', async () => {
@@ -374,7 +399,7 @@ function sourceRow(src, s, standing) {
     el('td', {}, el('div', { text: src.perDay !== null ? `~${n(src.perDay)} / day` : '—' }), el('div', { class: 'cell-sub', text: src.members ? `${n(src.members)} members` : '' })),
     el('td', {}, guardsCell(src)),
     el('td', {}, reading),
-    el('td', {}, el('div', { class: 'row-actions' }, el('button', { class: 'btn', text: 'Messages', onclick: () => selectSource(src.chatId) }), moreButton(src, s))));
+    el('td', {}, el('div', { class: 'row-actions' }, el('button', { class: 'btn', text: 'Messages', onclick: () => selectSource(src.chatId) }), moreButton(src.chatId, src.title))));
   tr.__update = (x) => {
     setText(count, n(x.messages24h));
     setText(people, n(x.people24h));
@@ -393,10 +418,11 @@ function renderSources(s) {
     key: (src) => src.chatId,
     // What the row is drawn from; counts and times change often and are written in place (update).
     sig: (src) => JSON.stringify([src.title, src.ref, src.kind, src.enabled, src.offReason, src.error, src.access, src.origin, src.members, src.perDay, src.bots, src.door, src.behind, src.pushed, src.peeked, src.member, src.everyS, standing.get(src.chatId) || '', s.claude.ready, s.peekSeconds]),
-    render: (src) => sourceRow(src, s, standing.get(src.chatId)),
+    render: (src) => sourceRow(src, standing.get(src.chatId)),
     update: (row, src) => row.__update(src),
     empty: { text: 'none', render: () => el('tr', {}, el('td', { colspan: SOURCE_HEAD.length, class: 'empty', text: 'Nothing here yet. Join a group in Telegram, or check one by name below.' })) },
   });
+  if (menuFor && !menuFor.isConnected) closeMenu(); // its row was drawn again, or is gone
   // The source picker of the messages panel: redrawn only when the list of sources changed.
   const sel = $('msg-source');
   sel.parentElement.hidden = s.sources.length === 0;
@@ -478,7 +504,11 @@ $('row-menu').addEventListener('keydown', (e) => {
   const i = items.indexOf(document.activeElement);
   items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus();
 });
-addEventListener('scroll', closeMenu, { passive: true, capture: true });
+// A scroll that moves the menu's button closes the menu; the page's own scrolling elsewhere (the
+// group tabs following the crawler, a list taking a new row) does not.
+addEventListener('scroll', (e) => {
+  if (menuFor && (e.target === document || e.target === document.documentElement || e.target.contains?.(menuFor))) closeMenu();
+}, { passive: true, capture: true });
 addEventListener('resize', closeMenu, { passive: true });
 
 // ── probe ──────────────────────────────────────────────────────────────────
@@ -611,9 +641,9 @@ function renderInvites(s) {
   paint($('invite-list'), [list, focus && focus[1]], () => list.map((inv) => {
     const [label, cls] = INVITE_STATE[inv.state] || [inv.state, ''];
     const age = inv.state === 'requested' && inv.saidAt ? agoEl(inv.saidAt, 'request sent ') : inv.joinedAt ? `in since ${fmtDateTime(inv.joinedAt)}` : agoEl(inv.createdAt, 'added ');
-    const next = inv.nextCheckAt && ['requested', 'owner-opened', 'previewed', 'link-dead'].includes(inv.state) ? ` · next check ${until(inv.nextCheckAt)}` : '';
+    const next = inv.nextCheckAt && ['requested', 'owner-opened', 'previewed', 'link-dead'].includes(inv.state) ? [' · ', untilEl(inv.nextCheckAt, 'next check ')] : null;
     return el('li', { id: `invite-${inv.id}`, class: focus && Number(focus[1]) === inv.id ? 'focus' : '' },
-      el('div', { class: 'inv-row' }, el('span', { class: `pill ${cls}`, text: inv.checking ? 'checking…' : label }), el('span', { class: 'title', text: inv.title || 'Invite' }), el('span', { class: 'ref' }, age, `${next} · invite ${inv.hashTail}`)),
+      el('div', { class: 'inv-row' }, el('span', { class: `pill ${cls}`, text: inv.checking ? 'checking…' : label }), el('span', { class: 'title', text: inv.title || 'Invite' }), el('span', { class: 'ref' }, age, next, ` · invite ${inv.hashTail}`)),
       el('div', { class: 'inv-note', text: inv.note }),
       inv.state === 'requested' ? el('div', { class: 'footnote', text: 'Telegram has no way to withdraw a request. If the group\'s bot wants something first, it messages you in Telegram within a few minutes of the request.' }) : null,
       el('div', { class: 'links' }, inviteButtons(inv)),
@@ -867,14 +897,14 @@ async function loadMessages() {
     if ($('msg-source').value !== chat || msgView !== view) return; // switched meanwhile
     setText($('msg-hint'), 'Noise removed, on-topic only: what Claude reads');
     signalStat(sig && sig.header);
-    items = (sig ? sig.lines.slice().reverse() : []).map((l) => ({ k: `s${l.ids[0]}`, s: `${l.ids.length}|${l.text.length}|${l.replies}|${l.echoes ? l.echoes.times : 0}|${l.author}`, make: () => signalLine(l) }));
+    items = (sig ? sig.lines.slice().reverse() : []).map((l) => ({ k: `s${l.ids[0]}`, s: `${l.ids.length}|${l.replies}|${l.echoes ? l.echoes.times : 0}|${l.author}|${l.text}`, make: () => signalLine(l) }));
     empty = 'No on-topic messages in the last 24 hours.';
   } else {
     const rows = await api(`/api/messages?chat=${encodeURIComponent(chat)}&limit=150`).catch(() => []);
     if ($('msg-source').value !== chat || msgView !== view) return;
     setText($('msg-hint'), 'Every stored message, newest first');
     signalStat('');
-    items = rows.slice().reverse().map((m) => ({ k: `m${m.id}`, s: `${m.text.length}|${m.reactions}|${m.author}`, make: () => plainLine(m) }));
+    items = rows.slice().reverse().map((m) => ({ k: `m${m.id}`, s: `${m.reactions}|${m.author}|${m.text}`, make: () => plainLine(m) }));
     empty = 'No messages stored yet.';
   }
   if (fresh) {
@@ -1044,7 +1074,7 @@ const LEVEL = { hot: ['HOT', 'hot'], first: ['Had it first', 'first'], echo: ['c
 const plural = (k, one, many) => `${k} ${k === 1 ? one : many}`;
 
 function topicSig(k) {
-  return JSON.stringify([k.label, k.headline, k.terms, k.sources.map((x) => [x.name, x.at, x.tier, x.link, x.title]), k.groups.map((g) => [g.chatId, g.title, g.count, g.people, g.level, g.firstLag, g.messages.map((m) => [m.messageId, m.text.length])])]);
+  return JSON.stringify([k.label, k.headline, k.terms, k.sources.map((x) => [x.name, x.at, x.tier, x.link, x.title]), k.groups.map((g) => [g.chatId, g.title, g.count, g.people, g.level, g.firstLag, g.messages.map((m) => [m.messageId, m.text])])]);
 }
 
 /** What a topic shows when opened. Built on the first open, not for every topic on every refresh. */
@@ -1244,7 +1274,8 @@ async function loadStorage() {
     `messages older than ${s.retentionDays} days are deleted automatically`);
 }
 
-$('clear-btn').addEventListener('click', async (e) => {
+$('clear-btn').addEventListener('click', async () => {
+  const b = $('clear-btn');
   const what = { messages: $('clear-messages').checked, activity: $('clear-activity').checked, digests: $('clear-digests').checked };
   if (!what.messages && !what.activity && !what.digests) return toast('Choose what to clear first.');
   await loadStorage();
@@ -1255,7 +1286,6 @@ $('clear-btn').addEventListener('click', async (e) => {
     what.digests ? `${n(s.digests)} digests and their files` : null,
   ].filter(Boolean);
   if (!confirm(`Delete permanently: ${list.join(', ')}?\n\nThis cannot be undone. Sources, switches and reading positions are kept, so nothing is downloaded again.`)) return;
-  const b = e.currentTarget;
   b.disabled = true;
   try {
     const r = await api('/api/clear', what);
@@ -1304,16 +1334,23 @@ function scheduleRefresh() {
 }
 
 let inflight = null;
-let again = false;
-/** `first`: the page's first draw, which happens even in a background tab. */
+let queued = null;
+/**
+ * One refresh at a time. A call while one runs gets the next one, which starts when it ends: so
+ * `await refresh()` after an action always sees the state after that action.
+ * `first`: the page's first draw, which happens even in a background tab.
+ */
 function refresh(first) {
   if (document.hidden && !first) {
     stale = true;
     return Promise.resolve();
   }
   if (inflight) {
-    again = true;
-    return inflight;
+    queued ??= inflight.then(() => {
+      queued = null;
+      return refresh();
+    });
+    return queued;
   }
   inflight = (async () => {
     try {
@@ -1331,10 +1368,6 @@ function refresh(first) {
       setLive(false, 'Console not reachable');
     } finally {
       inflight = null;
-      if (again) {
-        again = false;
-        refresh();
-      }
     }
   })();
   return inflight;

@@ -1,15 +1,16 @@
 // The live view. Each group is a nebula of points sized by its messages of the last day, the
 // first-tier news is one more, and the reader is a crawler that walks to whichever group just had
-// something new. It has two kinds of hands: the keyword detector (cyan) tags the words that matter
-// (tickers, numbers, links, questions, and, when the news radar matched it, the day's news, drawn as
-// a flag and a link to the news nebula), and the denoiser (grey) pulls out what the digest drops
-// (stickers, one-word chatter, bot commands, repeats, scams) and shreds it. The verdicts are the
-// service's own (the radar's matches, the denoiser's rules); everything moves only on real events.
+// something new. It has two kinds of hands: the keyword detector (cyan) tags the words that matter,
+// and the denoiser (grey) pulls out what the digest drops (stickers, one-word chatter, bot commands,
+// repeats, scams) and shreds it. The noise verdicts and the news flags are the service's own (the
+// denoiser's rules, the radar's matches); tickers, numbers, links and questions are simple patterns
+// on the message text. Everything moves only on real events: the activity stream, the radar, the
+// counts.
 //
-// Drawing: a cloud is rendered once into its own canvas (a sprite) and drawn from there; a frame
+// Drawing: a nebula is rendered once into its own canvas (a sprite) and drawn from there; a frame
 // only draws the sprites, a few hundred twinkles, the crawler, its legs, the links and the tags. The
-// loop stops when the view is off screen or the page is hidden, and slows to a still picture when
-// the system asks for reduced motion. Words are drawn on the canvas, never parsed as HTML.
+// loop stops when the view is off screen or the page is hidden, and shows still pictures when the
+// system asks for reduced motion. Words are drawn on the canvas, never parsed as HTML.
 'use strict';
 
 (() => {
@@ -19,8 +20,14 @@
   const MONO = 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "PingFang SC", monospace';
   const NUM = new Intl.NumberFormat('en-US');
   const n = (x) => (x === null || x === undefined ? '—' : NUM.format(x));
+  const usd = (x) => `$${(x || 0).toFixed(x >= 1 ? 2 : 3)}`;
   const HM = new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
   const now = () => Date.now() / 1000;
+  /** At most `max` characters, counted as characters (an emoji is not cut in half), with an ellipsis. */
+  const cut = (s, max) => {
+    const a = Array.from(String(s ?? ''));
+    return a.length > max ? `${a.slice(0, max - 1).join('')}…` : a.join('');
+  };
 
   function el(tag, attrs = {}, ...children) {
     const e = document.createElement(tag);
@@ -38,7 +45,7 @@
     if (node && node.textContent !== String(t)) node.textContent = String(t);
   };
 
-  // ── seeded randomness: a group's cloud has the same shape on every load ──
+  // ── seeded randomness: a group's nebula has the same shape on every load ──
 
   function rng(seed) {
     let a = seed >>> 0 || 1;
@@ -67,7 +74,7 @@
   const view = { w: 0, h: 0, dpr: 1, s: 1 };
   const cam = { x: 0, y: 0, z: 1, tx: 0, ty: 0, tz: 1 };
 
-  /** A cloud: one group, or the news. */
+  /** A nebula: one group, or the news. */
   const clouds = new Map();
   let order = [];
   let activeKey = null;
@@ -124,7 +131,7 @@
     c.twinkle = Array.from({ length: Math.min(70, Math.round(c.n * 0.05)) }, () => ({ i: Math.floor(R() * c.n), ph: R() * 6.283, sp: 0.6 + R() * 1.8 }));
   }
 
-  /** The cloud drawn once: a faint mesh to its nearest neighbours, then the points. */
+  /** The nebula drawn once: a faint mesh to its nearest neighbours, then the points. */
   function renderSprite(c) {
     const size = Math.ceil((c.r * 1.3 + 16) * 2);
     const dpr = view.dpr;
@@ -209,6 +216,11 @@
     return c.tint;
   }
 
+  const titleBox = () => ({ x: -view.w / 2, y: -view.h / 2, w: Math.min(520, view.w * 0.45), h: view.w < 700 ? 64 : 84 });
+  /** On a narrow stage only the group being read and the news are labelled. */
+  const compact = () => view.w < 700;
+  const labelled = (c) => !compact() || c.key === activeKey || c.kind === 'news';
+
   /** Groups on an ellipse around the news, pushed apart where they overlap. */
   function layout() {
     const groups = order.map((k) => clouds.get(k)).filter(Boolean);
@@ -261,11 +273,6 @@
     placeLabels();
   }
 
-  const titleBox = () => ({ x: -view.w / 2, y: -view.h / 2, w: Math.min(520, view.w * 0.45), h: view.w < 700 ? 64 : 84 });
-  /** On a narrow stage only the group being read and the news are labelled. */
-  const compact = () => view.w < 700;
-  const labelled = (c) => !compact() || c.key === activeKey || c.kind === 'news';
-
   /** Each label above-right of its nebula, or in the first other spot that is free and on the stage. */
   function placeLabels() {
     const all = [...clouds.values()].filter(labelled);
@@ -273,7 +280,7 @@
     const hit = (b) => boxes.some((o) => b.x < o.x + o.w && o.x < b.x + b.w && b.y < o.y + o.h && o.y < b.y + b.h);
     const inside = (b) => b.x >= -view.w / 2 + 6 && b.x + b.w <= view.w / 2 - 6 && b.y >= -view.h / 2 + 4 && b.y + b.h <= view.h / 2 - 4;
     for (const c of all.slice().sort((a, b) => (a.kind === 'news' ? -1 : b.kind === 'news' ? 1 : a.ty - b.ty))) {
-      const w = Math.min(230, 9 * Math.max(c.title.length, 14));
+      const w = Math.min(230, 9 * Math.max(Array.from(c.title).length, 14));
       const h = c.kind === 'news' && !compact() ? 72 : 30;
       const spots = [[c.r * 0.28, -c.r * 0.92 - 22], [c.r * 0.28, c.r * 0.7], [-w - c.r * 0.2, -c.r * 0.6], [c.r * 0.6, -c.r * 0.2], [-w - c.r * 0.2, c.r * 0.5], [-w / 2, c.r * 0.85]];
       let pick = null;
@@ -292,7 +299,7 @@
     }
   }
 
-  /** Sizes, points and sprites, again only for clouds whose size changed. */
+  /** Sizes, points and sprites, again only for nebulae whose size changed. */
   function rebuildClouds(force) {
     for (const c of clouds.values()) {
       const r = radiusOf(c);
@@ -322,22 +329,32 @@
     const scaleChanged = Math.abs(s - view.s) > 0.04;
     view.s = s;
     rebuildClouds(dprChanged || scaleChanged);
-    if (calm.matches) draw(performance.now());
+    if (calm.matches && shouldRun()) draw(performance.now());
     wake();
   }
   new ResizeObserver(() => {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(resize, 120);
   }).observe(stage);
+  // A window moved to a screen of another pixel density keeps its size: the observer above does not
+  // fire, so watch the density itself.
+  function watchDensity() {
+    matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`).addEventListener('change', () => {
+      resize();
+      watchDensity();
+    }, { once: true });
+  }
+  watchDensity();
 
   // ── the crawler ────────────────────────────────────────────────────────
 
   const crawler = { x: 0, y: 0, vx: 0, vy: 0, heading: 0, legs: [], placed: false };
-  for (let i = 0; i < 16; i++) crawler.legs.push({ ax: 0, ay: 0, fx: 0, fy: 0, next: 0, from: 0 });
+  for (let i = 0; i < 16; i++) crawler.legs.push({ ax: 0, ay: 0, fx: 0, fy: 0, next: 0, from: 0, key: null });
 
-  /** Tags: the words of the messages just read. */
+  /** What the detector's hand holds: the words of the messages just read. */
   const tags = [];
   const pings = [];
+  /** One per group and story in today's radar view; drawn bright for a while after a new match. */
   const links = [];
   const KIND = {
     news: { color: C.pink, filled: true, label: 'news' },
@@ -363,13 +380,12 @@
     wake();
   }
 
-  /** What the denoiser took out: pulled from the nebula to the crawler, then shredded. */
+  /** What the denoiser's hand takes out: pulled from the nebula to the crawler, then shredded. */
   const noise = [];
   const dust = [];
   function spawnNoise(text, kind, cloud) {
-    const raw = text.replace(/\s+/g, ' ').trim();
-    const word = raw.length > 14 ? `${raw.slice(0, 13)}…` : raw || '(empty)';
-    const label = `${word} · ${kind}`;
+    const raw = String(text).replace(/\s+/g, ' ').trim();
+    const label = `${cut(raw, 14) || '(empty)'} · ${kind}`;
     ctx.font = `11px ${MONO}`;
     const w = ctx.measureText(label).width + 12;
     const j = Math.floor(Math.random() * Math.max(1, cloud.n));
@@ -388,7 +404,9 @@
     while (dust.length > 160) dust.shift();
   }
 
+  /** A ring going out: one check of every chat the account is in, or news arriving. Not in still mode. */
   function ping(x, y, color = C.cyan) {
+    if (calm.matches) return;
     pings.push({ x, y, color, born: performance.now() });
     while (pings.length > 6) pings.shift();
     wake();
@@ -417,10 +435,10 @@
   function wake() {
     if (!shouldRun()) return;
     if (calm.matches) {
-      // Reduced motion: a still picture, redrawn twice a second at most.
+      // Reduced motion: still pictures, at most two a second, only when something changed.
       if (!stillTimer) stillTimer = setTimeout(() => {
         stillTimer = 0;
-        draw(performance.now());
+        if (shouldRun()) draw(performance.now());
       }, 500);
       return;
     }
@@ -429,6 +447,7 @@
   function loop(t) {
     raf = 0;
     if (!shouldRun()) return;
+    if (calm.matches) return wake(); // the setting changed while running: switch to stills
     draw(t);
     raf = requestAnimationFrame(loop);
   }
@@ -437,6 +456,10 @@
     wake();
   }).observe(stage);
   document.addEventListener('visibilitychange', wake);
+  calm.addEventListener('change', () => {
+    last = performance.now();
+    wake();
+  });
 
   const ease = (a, b, k) => a + (b - a) * k;
 
@@ -449,7 +472,7 @@
     const active = clouds.get(activeKey);
     const newsCloud = clouds.get('news');
 
-    // Clouds glide to their places; the camera leans toward the group being read.
+    // Nebulae glide to their places; the camera leans toward the group being read.
     const k = still ? 1 : 1 - Math.exp(-dt * 2.2);
     for (const c of clouds.values()) {
       c.x = ease(c.x, c.tx, k);
@@ -472,6 +495,8 @@
       if (!crawler.placed || still) {
         crawler.x = gx;
         crawler.y = gy;
+        crawler.vx = 0;
+        crawler.vy = 0;
         crawler.placed = true;
       } else {
         const kk = 9;
@@ -500,7 +525,7 @@
     const z = cam.z;
     ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * (W / 2 - cam.x * z), dpr * (H / 2 - cam.y * z));
 
-    // Clouds: the sprite, its colour when it is the news or the group being read, and twinkles.
+    // Nebulae: the sprite, its colour when it is the news or the group being read, and twinkles.
     for (const c of clouds.values()) {
       if (!c.sprite) continue;
       const s = c.sprite.size * (1 + (still ? 0 : c.glow * 0.012 * Math.sin(time * 1.3)));
@@ -524,14 +549,14 @@
     }
     ctx.globalAlpha = 1;
 
-    // Links: a message that named the day's news, from its group to the news cloud.
+    // Links: a group that talked about one of today's stories, to the news nebula.
     if (newsCloud) {
       for (const l of links) {
         const g = clouds.get(`g:${l.chatId}`);
         if (!g) continue;
         const mx = (g.x + newsCloud.x) / 2 + l.bend * 0.25 * (newsCloud.y - g.y);
         const my = (g.y + newsCloud.y) / 2 - l.bend * 0.25 * (newsCloud.x - g.x);
-        const age = (t - l.born) / 1000;
+        const age = Math.max(0, t - l.born) / 1000;
         ctx.strokeStyle = l.level === 'hot' || l.level === 'first' ? C.pink : C.cyan;
         ctx.globalAlpha = age < 8 ? 0.55 : 0.2;
         ctx.lineWidth = 0.8;
@@ -559,11 +584,10 @@
       if (!labelled(c)) continue;
       const lx = c.x + (c.lx ?? c.r * 0.28);
       const ly = c.y + (c.ly ?? -c.r * 0.92 - 8);
-      const name = c.title.length > 26 ? `${c.title.slice(0, 25)}…` : c.title;
       ctx.font = `${c.key === activeKey ? 600 : 500} ${c.key === activeKey || c.kind === 'news' ? 14 : 12.5}px ${MONO}`;
       ctx.fillStyle = c.kind === 'news' ? C.cyan : c.key === activeKey ? C.pink : C.ink;
       ctx.globalAlpha = c.key === activeKey || c.kind === 'news' ? 1 : 0.82;
-      ctx.fillText(name, lx, ly);
+      ctx.fillText(cut(c.title, 26), lx, ly);
       ctx.font = `10.5px ${MONO}`;
       ctx.fillStyle = C.muted;
       ctx.fillText(c.sub, lx, ly + 14);
@@ -575,11 +599,11 @@
     }
     ctx.globalAlpha = 1;
 
-    // Pings: one check of every chat the account is in.
+    // Pings.
     for (let i = pings.length - 1; i >= 0; i--) {
       const p = pings[i];
-      const age = (t - p.born) / 1400;
-      if (age >= 1) {
+      const age = Math.max(0, t - p.born) / 1400;
+      if (age >= 1 || still) {
         pings.splice(i, 1);
         continue;
       }
@@ -598,14 +622,14 @@
     ctx.font = `11px ${MONO}`;
     for (let i = noise.length - 1; i >= 0; i--) {
       const q = noise[i];
-      const age = t - q.born;
+      const age = Math.max(0, t - q.born);
       // Reduced motion: no pull, the tag just stands there for as long and then goes.
       const u = still ? (age >= q.hold + q.pull ? 1 : 0) : Math.max(0, Math.min(1, (age - q.hold) / q.pull));
       const e = u * u * (3 - 2 * u);
       q.x = ease(q.sx, crawler.x - q.w / 2, e);
       q.y = ease(q.sy, crawler.y - q.h / 2, e);
       if (u >= 1) {
-        shred(crawler.x, crawler.y);
+        if (!still) shred(crawler.x, crawler.y);
         noise.splice(i, 1);
         continue;
       }
@@ -635,7 +659,7 @@
     ctx.fillStyle = '#9aa5b0';
     for (let i = dust.length - 1; i >= 0; i--) {
       const d = dust[i];
-      const age = t - d.born;
+      const age = Math.max(0, t - d.born);
       if (age > d.life || still) {
         dust.splice(i, 1);
         continue;
@@ -650,7 +674,7 @@
     // The detector's hand: tags, each with a tentacle back to the crawler.
     for (let i = tags.length - 1; i >= 0; i--) {
       const g = tags[i];
-      const age = t - g.born;
+      const age = Math.max(0, t - g.born);
       if (age > g.ttl) {
         tags.splice(i, 1);
         continue;
@@ -682,17 +706,18 @@
 
     if (frames % 15 === 0) setText(hud.frame, String(frames).padStart(4, '0'));
     // A still picture still has to take tags away when their time is up.
-    if (still && (tags.length || noise.length || pings.length)) wake();
+    if (still && (tags.length || noise.length)) wake();
   }
 
   function drawCrawler(t, time, cloud, still) {
     const cx = crawler.x;
     const cy = crawler.y;
     const s = Math.max(0.8, view.s) * 1.2;
-    // Legs: each holds a point of the cloud and steps to a new one now and then.
+    // Legs: each holds a point of the nebula and steps to a new one now and then (in still mode,
+    // only when the crawler moves to another group).
     ctx.lineWidth = 0.8;
     crawler.legs.forEach((leg, i) => {
-      if (t > leg.next || !leg.placed) {
+      if (!leg.placed || leg.key !== cloud.key || (!still && t > leg.next)) {
         const j = Math.floor(Math.random() * cloud.n);
         let ax = cloud.x + cloud.pts[j * 3];
         let ay = cloud.y + cloud.pts[j * 3 + 1];
@@ -709,8 +734,9 @@
         leg.from = t;
         leg.next = t + 500 + Math.random() * 1400;
         leg.placed = true;
+        leg.key = cloud.key;
       }
-      const u = still ? 1 : Math.min(1, (t - leg.from) / 220);
+      const u = still ? 1 : Math.min(1, Math.max(0, t - leg.from) / 220);
       const ex = ease(leg.fx, leg.ax, u);
       const ey = ease(leg.fy, leg.ay, u);
       const a = (i / crawler.legs.length) * Math.PI * 2 + crawler.heading;
@@ -794,29 +820,34 @@
     return glow;
   }
 
-  // ── words: what a message is tagged with ───────────────────────────────
+  // ── words: what the detector tags a kept message with ──────────────────
 
   const MAJORS = new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'DOGE', 'USDT', 'USDC', 'TON', 'TRX', 'ADA', 'ZEC', 'OKB', 'HYPE', 'SUI', 'PEPE', 'WLD', 'ARB', 'AVAX', 'LINK', 'LTC', 'BCH', 'DOT', 'NEAR', 'APT', 'ENA', 'ONDO', 'USDE', 'FDUSD', 'SHIB', 'BONK', 'WIF', 'TRUMP', 'XAUT', 'PAXG']);
+  // Written in lower case these are still the coin; the rest ("link", "near", "ton", "dot"…) are
+  // ordinary words unless written in capitals or as $CASHTAGS.
+  const LOWER_OK = new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'DOGE', 'USDT', 'USDC', 'TRX', 'ZEC', 'OKB', 'PEPE', 'WLD', 'AVAX', 'LTC', 'BCH', 'USDE', 'FDUSD', 'SHIB', 'XAUT', 'PAXG']);
   const ALIASES = [['大饼', 'BTC'], ['比特币', 'BTC'], ['二饼', 'ETH'], ['姨太', 'ETH'], ['以太坊', 'ETH'], ['以太', 'ETH'], ['狗狗币', 'DOGE'], ['大零币', 'ZEC'], ['币安币', 'BNB'], ['瑞波', 'XRP'], ['索拉纳', 'SOL']];
+
   /** The notable words of a message the denoiser kept, each with what it is. At most `max`. The day's
    * news is not guessed here: the radar's own matches arrive with its view (see setNews). */
   function tagsOf(text, max = 3) {
     const out = [];
     const seen = new Set();
-    const add = (word, kind) => {
-      const w = word.length > 22 ? `${word.slice(0, 21)}…` : word;
-      const key = w.toLowerCase();
+    const add = (word, kind, key = String(word).toLowerCase()) => {
       if (seen.has(key) || out.length >= max) return;
       seen.add(key);
-      out.push([w, kind]);
+      out.push([cut(word, 22), kind]);
     };
-    for (const m of text.matchAll(/\$[A-Za-z][A-Za-z0-9]{1,9}\b/g)) add(m[0].toUpperCase(), 'ticker');
-    for (const m of text.matchAll(/\b[A-Za-z]{2,6}\b/g)) if (MAJORS.has(m[0].toUpperCase())) add(m[0].toUpperCase(), 'ticker');
-    for (const [alias, sym] of ALIASES) if (text.includes(alias)) add(`${alias} ${sym}`, 'ticker');
+    for (const m of text.matchAll(/\$[A-Za-z][A-Za-z0-9]{1,9}\b/g)) add(m[0].toUpperCase(), 'ticker', `t:${m[0].slice(1).toUpperCase()}`);
+    for (const m of text.matchAll(/\b[A-Za-z]{2,6}\b/g)) {
+      const sym = m[0].toUpperCase();
+      if (MAJORS.has(sym) && (m[0] === sym || LOWER_OK.has(sym))) add(sym, 'ticker', `t:${sym}`);
+    }
+    for (const [alias, sym] of ALIASES) if (text.includes(alias)) add(`${alias} ${sym}`, 'ticker', `t:${sym}`);
     for (const m of text.matchAll(/https?:\/\/([^\s/]+)[^\s]*/g)) add(m[1].replace(/^www\./, ''), 'link');
-    for (const m of text.matchAll(/(?:[-+]?\$?\d[\d,]*(?:\.\d+)?\s?(?:%|[kKmMbBwW万亿]|u\b|U\b))|\$\d[\d,]*(?:\.\d+)?/g)) add(m[0].trim(), 'number');
+    for (const m of text.matchAll(/(?:[-+]?\$?\d[\d,]*(?:\.\d+)?\s?(?:%|[kKmMbBwW](?![A-Za-z])|[万亿]|[uU](?![A-Za-z])))|\$\d[\d,]*(?:\.\d+)?/g)) add(m[0].trim(), 'number');
     for (const m of text.matchAll(/@[A-Za-z0-9_]{4,32}/g)) add(m[0], 'mention');
-    if (/[?？]\s*$/.test(text) && out.length < max) add(text.replace(/\s+/g, ' ').trim().slice(-14), 'ask');
+    if (/[?？]\s*$/.test(text) && out.length < max) add(Array.from(text.replace(/\s+/g, ' ').trim()).slice(-14).join(''), 'ask');
     if (out.length === 0) {
       const word = (text.match(/[\p{Script=Han}]{2,6}|[A-Za-z]{4,}/u) || [])[0];
       if (word) add(word, 'read');
@@ -843,6 +874,7 @@
       field('FLAGS', 'flags', 'pink'),
       field('NOISE', 'noise', 'dim'),
       field('WRITES', 'writes', 'teal'),
+      field('ERRORS', 'errors'),
       field('T', 'uptime'),
       field('FRAME', 'frame'),
     );
@@ -852,11 +884,15 @@
   let state = null;
   let news = null;
   let pulse = null;
+  let pulseStale = false;
+  let lagsLoaded = false;
   let startedAt = 0;
   const lags = [];
   let sessionTagged = 0;
-  const seenHits = new Set();
   let sessionDropped = 0;
+  /** The radar matches already seen (message ids of the current view), and pairs with a new one. */
+  let seenHits = new Set();
+  const fresh = new Map();
 
   setInterval(() => {
     if (!startedAt || document.hidden) return;
@@ -873,29 +909,39 @@
     setText($('stage-index'), String(i + 1).padStart(2, '0'));
     setText($('stage-group'), c ? c.title : 'Waiting for the reader');
     const src = c && state ? state.sources.find((x) => x.chatId === c.chatId) : null;
-    setText($('stage-sub'), src ? [src.perDay !== null ? `~${n(src.perDay)} / day` : `${n(src.messages24h)} today`, src.members ? `${n(src.members)} members` : '', src.peeked ? `new messages within ~${state.peekSeconds}s` : src.member ? 'member' : 'read from outside · every ~30s'].filter(Boolean).join(' · ') : '');
+    const every = (sec) => (sec >= 60 ? `every ~${Math.round(sec / 60)}m` : `every ~${sec}s`);
+    setText($('stage-sub'), src ? [src.perDay !== null ? `~${n(src.perDay)} / day` : `${n(src.messages24h)} today`, src.members ? `${n(src.members)} members` : '', src.pushed ? 'pushed by Telegram' : src.peeked ? `new messages within ~${state.peekSeconds}s` : src.member ? `member · read ${every(src.everyS)}` : `read from outside · ${every(src.everyS)}`].filter(Boolean).join(' · ') : '');
   }
 
+  /** One tab per group. Redrawn only when the groups change; the active one is marked in place. */
   function renderTabs() {
     const box = $('hud-tabs');
-    const want = order.map((k) => [k, clouds.get(k)?.title, k === activeKey, clouds.get(k)?.channel]);
+    const want = order.map((k) => [k, clouds.get(k)?.title, Boolean(clouds.get(k)?.channel)]);
     const sig = JSON.stringify(want);
-    if (box.__sig === sig) return;
-    box.__sig = sig;
-    box.replaceChildren(...want.map(([k, title, on, channel]) => el('button', {
-      role: 'tab',
-      'aria-selected': on ? 'true' : 'false',
-      class: `${on ? 'on' : ''}${channel ? ' channel' : ''}`,
-      title,
-      onclick: () => {
-        focus(k);
-        api.onPick?.(Number(k.slice(2)));
-      },
-    }, title)));
-    // Bring the active tab into view inside the strip only: the page itself never scrolls.
-    const on = box.querySelector('.on');
+    if (box.__sig !== sig) {
+      box.__sig = sig;
+      box.replaceChildren(...want.map(([k, title, channel]) => el('button', {
+        role: 'tab',
+        'data-key': k,
+        class: channel ? 'channel' : '',
+        title,
+        onclick: () => {
+          focus(k);
+          api.onPick?.(Number(k.slice(2)));
+        },
+      }, title)));
+    }
+    let on = null;
+    for (const b of box.children) {
+      const is = b.dataset.key === activeKey;
+      b.classList.toggle('on', is);
+      if (b.getAttribute('aria-selected') !== String(is)) b.setAttribute('aria-selected', String(is));
+      if (is) on = b;
+    }
+    // Bring the active tab into view inside the strip only (the strip is positioned, so offsetLeft
+    // is measured in it); the page itself never scrolls.
     if (on && (on.offsetLeft < box.scrollLeft || on.offsetLeft + on.offsetWidth > box.scrollLeft + box.clientWidth)) {
-      box.scrollTo({ left: on.offsetLeft - 24, behavior: calm.matches ? 'auto' : 'smooth' });
+      box.scrollTo({ left: Math.max(0, on.offsetLeft - 24), behavior: calm.matches ? 'auto' : 'smooth' });
     }
   }
 
@@ -915,7 +961,7 @@
     if (a.method === 'stored') return ['read', `${a.target} +${Number((/^(\d+)/.exec(a.detail) || [])[1] || 1)}`, ''];
     if (a.method === 'messages.GetPeerDialogs') return ['peek', `${(/→ (\d+)/.exec(a.detail) || [])[1] ?? '?'} chats · ${a.ms ?? '?'}ms`, 'dim'];
     if (a.method === 'messages.GetHistory' && /→ 0 messages/.test(a.detail)) return ['scan', a.target, 'dim'];
-    if (a.method === 'in the group') return ['link', `${a.target} · ${a.detail}`.slice(0, 60), 'cyan'];
+    if (a.method === 'in the group') return ['link', cut(`${a.target} · ${a.detail}`, 60), 'cyan'];
     if (a.method === 'news in the group') return ['flag', `HOT · ${a.target}`, 'pink'];
     if (a.method === 'group was first') return ['flag', `FIRST · ${a.target}`, 'pink'];
     if (a.method === 'feed failed' || a.method === 'feed back' || a.method === 'news checked') return ['feed', `${a.target} · ${a.method}`, 'cyan'];
@@ -923,6 +969,7 @@
     return null;
   }
 
+  /** Messages stored in the last minute (for the rate), trimmed as they come in. */
   const stored = [];
   function rate() {
     const t = now();
@@ -948,7 +995,7 @@
     const max = Math.max(1, ...list.map((s) => s.messages24h));
     setText($('i-groups-n'), `${list.length}/${state.sources.length}`);
     const box = $('i-groups-list');
-    const sig = JSON.stringify([list.map((s) => [s.chatId, s.title, s.messages24h, removedOf(s.chatId)]), activeKey]);
+    const sig = JSON.stringify([list.map((s) => [s.chatId, s.title, s.messages24h, removedOf(s.chatId), clouds.get(`g:${s.chatId}`)?.channel]), activeKey]);
     if (box.__sig === sig) return;
     box.__sig = sig;
     box.replaceChildren(...list.slice(0, 8).map((s) => {
@@ -956,16 +1003,16 @@
       const ch = clouds.get(`g:${s.chatId}`)?.channel;
       const removed = Math.min(s.messages24h, removedOf(s.chatId));
       const kept = el('i');
-      const cut = el('i', { class: 'cut' });
+      const cutBar = el('i', { class: 'cut' });
       kept.style.width = `${Math.max(s.messages24h ? 2 : 0, ((s.messages24h - removed) / max) * 100)}%`;
-      cut.style.width = `${(removed / max) * 100}%`;
+      cutBar.style.width = `${(removed / max) * 100}%`;
       return el('li', { class: `${on ? 'on' : ''}${ch ? ' channel' : ''}`, title: `${s.title}: ${n(s.messages24h)} messages today, ${n(removed)} removed as noise` },
         el('div', { class: 'row' }, el('span', { class: 'name', text: s.title }), el('span', { class: 'count', text: s.messages24h ? `${n(s.messages24h)}${removed ? ` · ${Math.round((removed / s.messages24h) * 100)}%` : ''}` : '0' })),
-        el('div', { class: 'bar' }, kept, cut));
+        el('div', { class: 'bar' }, kept, cutBar));
     }));
   }
 
-  /** The denoiser: what it removed today, by why, across the groups. */
+  /** The denoiser: what it removed over the last day, by why, across the groups. */
   function renderDenoiser() {
     if (!pulse || !pulse.noise) return;
     const kinds = ['chatter', 'sticker', 'repeat', 'command', 'spam'];
@@ -990,11 +1037,37 @@
     setText($('i-noise-note'), `this session · ${n(sessionTagged)} tagged · ${n(sessionDropped)} dropped`);
   }
 
+  /** The keyword detector: today's top stories (dashed: how many outlets; filled: your groups). */
   function renderRadar() {
     const svg = $('i-radar-svg');
-    if (!news) return;
+    const bars = $('i-radar-bars');
+    if (!news) return setText($('i-radar-n'), '—'); // not loaded yet
+    if (!news.enabled) {
+      setText($('i-radar-n'), 'radar off');
+      if (svg.__sig !== 'off') {
+        svg.__sig = 'off';
+        svg.replaceChildren();
+        bars.replaceChildren();
+        bars.__sig = '';
+      }
+      return;
+    }
+    const echoed = news.keywords.filter((k) => k.groups.length).length;
+    const hot = news.alerts.filter((a) => a.kind === 'hot').length;
+    const first = news.alerts.filter((a) => a.kind === 'first').length;
+    setText($('i-radar-n'), `${echoed} in your groups`);
+    const barSig = JSON.stringify([echoed, hot, first]);
+    if (bars.__sig !== barSig) {
+      bars.__sig = barSig;
+      const most = Math.max(1, echoed, hot, first);
+      bars.replaceChildren(...[['stories', echoed, 'teal'], ['hot', hot, 'pink'], ['had it first', first, 'yellow']].map(([label, v, cls]) => {
+        const bar = el('i', { class: cls });
+        bar.style.width = `${(v / most) * 100}%`;
+        return el('li', {}, el('span', { text: label }), el('span', { class: 'b' }, bar), el('b', { text: v }));
+      }));
+    }
     const topics = news.keywords.filter((k) => k.sources.length >= 2 || k.groups.length).sort((a, b) => b.score - a.score).slice(0, 7);
-    const sig = JSON.stringify(topics.map((k) => [k.id, k.sources.length, k.groups.map((g) => g.count)]));
+    const sig = JSON.stringify(topics.map((k) => [k.label, k.sources.length, k.groups.map((g) => g.count)]));
     if (svg.__sig === sig) return;
     svg.__sig = sig;
     const NS = 'http://www.w3.org/2000/svg';
@@ -1010,27 +1083,19 @@
     for (const ring of [0.33, 0.66, 1]) svg.append(mk('polygon', { points: Array.from({ length: m }, (_, i) => pt(i, ring * 62).join(',')).join(' '), class: 'ring' }));
     for (let i = 0; i < m; i++) svg.append(mk('line', { x1: 0, y1: 0, x2: pt(i, 62)[0], y2: pt(i, 62)[1], class: 'spoke' }));
     const maxSources = Math.max(1, ...topics.map((k) => k.sources.length));
-    const maxEcho = Math.max(1, ...topics.map((k) => k.groups.reduce((s, g) => s + g.count, 0)));
+    const echoOf = (k) => k.groups.reduce((s, g) => s + g.count, 0);
+    const maxEcho = Math.max(1, ...topics.map(echoOf));
     svg.append(mk('polygon', { class: 'outlets', points: Array.from({ length: m }, (_, i) => pt(i, topics[i] ? 10 + 52 * (topics[i].sources.length / maxSources) : 4).join(',')).join(' ') }));
-    svg.append(mk('polygon', { class: 'echo', points: Array.from({ length: m }, (_, i) => pt(i, topics[i] ? 4 + 58 * (Math.log1p(topics[i].groups.reduce((s, g) => s + g.count, 0)) / Math.log1p(maxEcho)) : 4).join(',')).join(' ') }));
+    svg.append(mk('polygon', { class: 'echo', points: Array.from({ length: m }, (_, i) => pt(i, topics[i] ? 4 + 58 * (Math.log1p(echoOf(topics[i])) / Math.log1p(maxEcho)) : 4).join(',')).join(' ') }));
     topics.forEach((k, i) => {
       const [x, y] = pt(i, 76);
       const label = mk('text', { x, y: y + 3, 'text-anchor': Math.abs(x) < 8 ? 'middle' : x > 0 ? 'start' : 'end', class: k.groups.length ? 'hit' : '' });
-      label.textContent = (k.label.split(' · ')[0] || '').slice(0, 9);
+      label.textContent = Array.from(k.label.split(' · ')[0] || '').slice(0, 9).join('');
       svg.append(label);
     });
-    const echoed = news.keywords.filter((k) => k.groups.length).length;
-    const hot = news.alerts.filter((a) => a.kind === 'hot').length;
-    const first = news.alerts.filter((a) => a.kind === 'first').length;
-    const bars = $('i-radar-bars');
-    const top = Math.max(1, echoed, hot, first);
-    bars.replaceChildren(...[['stories', echoed, 'teal'], ['hot', hot, 'pink'], ['had it first', first, 'yellow']].map(([label, v, cls]) => {
-      const bar = el('i', { class: cls });
-      bar.style.width = `${(v / top) * 100}%`;
-      return el('li', {}, el('span', { text: label }), el('span', { class: 'b' }, bar), el('b', { text: v }));
-    }));
   }
 
+  /** Messages per hour over the last day, and the day's totals. */
   function renderHeat() {
     if (!pulse || !state) return;
     const grid = $('i-heat-grid');
@@ -1044,38 +1109,32 @@
     if (grid.__sig !== sig) {
       grid.__sig = sig;
       grid.replaceChildren(...rows.map((r) => el('div', { class: `heat-row${`g:${r.chatId}` === activeKey ? ' on' : ''}`, title: `${r.src.title}: messages per hour, last 24 hours` },
-        el('span', { class: 'code', text: [...r.src.title.replace(/[^\p{L}\p{N}]/gu, '')].slice(0, 3).join('').toUpperCase() }),
+        el('span', { class: 'code', text: Array.from(r.src.title.replace(/[^\p{L}\p{N}]/gu, '')).slice(0, 3).join('').toUpperCase() }),
         ...r.counts.map((v, i) => el('i', { class: `l${v ? Math.min(5, 1 + Math.floor((Math.log1p(v) / Math.log1p(max)) * 5)) : 0}`, title: `${HM.format((pulse.from + i * pulse.bucketS) * 1000)} · ${n(v)} messages` })))));
     }
     const total = state.sources.reduce((s, x) => s + x.messages24h, 0);
     setText($('i-heat-total'), n(total));
     const stats = $('i-heat-stats');
     const removed = pulse.noise ? pulse.noise.reduce((s, x) => s + Object.values(x.removed).reduce((a, b) => a + b, 0), 0) : null;
-    const vals = [['read', n(total), ''], ['removed', removed === null ? '—' : n(removed), 'dim'], ['linked', news ? n(news.hits.length) : '—', 'cyan'], ['written', n(state.activity.counts.write || 0), 'teal']];
+    const vals = [['read', n(total), ''], ['removed', removed === null ? '—' : n(removed), 'dim'], ['linked', news && news.enabled ? n(linkedCount()) : '—', 'cyan'], ['written', n(state.activity.counts.write || 0), 'teal']];
     if (stats.__sig !== JSON.stringify(vals)) {
       stats.__sig = JSON.stringify(vals);
       stats.replaceChildren(...vals.map(([k, v, cls]) => el('div', {}, el('dt', { text: k }), el('dd', { class: cls, text: v }))));
     }
   }
 
+  /** Messages in your groups that named today's news (every echo the radar counted, not a page of them). */
+  const linkedCount = () => (news ? news.keywords.reduce((s, k) => s + k.groups.reduce((a, g) => a + g.count, 0), 0) : 0);
+
+  /** How long new messages took from being posted to being stored: the last few, and their median. */
   function renderSpeed() {
     const list = lags.slice(-40);
     const spark = $('i-spark');
     const gauge = $('i-gauge');
     const NS = 'http://www.w3.org/2000/svg';
-    if (list.length === 0) return;
-    const recent = list.slice(-10).map((x) => x.lag).sort((a, b) => a - b);
-    const median = recent[Math.floor(recent.length / 2)];
-    const cap = 60;
-    const pts = list.map((x, i) => `${(i / Math.max(1, list.length - 1)) * 200},${36 - (Math.min(cap, x.lag) / cap) * 32}`).join(' ');
+    setText($('i-speed-n'), list.length ? `${list.length} samples` : lagsLoaded ? 'no samples' : '—');
     spark.setAttribute('viewBox', '0 0 200 40');
-    spark.replaceChildren();
-    const line = document.createElementNS(NS, 'polyline');
-    line.setAttribute('points', pts);
-    spark.append(line);
-    // The gauge: three quarters of a circle, full at 0 s, empty at a minute.
     gauge.setAttribute('viewBox', '-50 -50 100 100');
-    const frac = 1 - Math.min(cap, median) / cap;
     const arc = (f) => {
       const a0 = Math.PI * 0.75;
       const a1 = a0 + Math.PI * 1.5 * f;
@@ -1083,13 +1142,27 @@
       const large = Math.PI * 1.5 * f > Math.PI ? 1 : 0;
       return `M ${Math.cos(a0) * r} ${Math.sin(a0) * r} A ${r} ${r} 0 ${large} 1 ${Math.cos(a1) * r} ${Math.sin(a1) * r}`;
     };
-    gauge.replaceChildren();
-    for (const [f, cls] of [[1, 'track'], [Math.max(0.001, frac), median <= 15 ? 'good' : median <= 60 ? 'ok' : 'slow']]) {
+    const path = (f, cls) => {
       const p = document.createElementNS(NS, 'path');
       p.setAttribute('d', arc(f));
       p.setAttribute('class', cls);
-      gauge.append(p);
+      return p;
+    };
+    if (list.length === 0) {
+      spark.replaceChildren();
+      gauge.replaceChildren(path(1, 'track'));
+      setText($('i-gauge-num'), '—');
+      setText($('i-speed-note'), lagsLoaded ? 'no new messages in the last 6 hours' : 'waiting for the first numbers');
+      return;
     }
+    const recent = list.slice(-10).map((x) => x.lag).sort((a, b) => a - b);
+    const median = recent[Math.floor(recent.length / 2)];
+    const cap = 60;
+    const line = document.createElementNS(NS, 'polyline');
+    line.setAttribute('points', list.map((x, i) => `${(i / Math.max(1, list.length - 1)) * 200},${36 - (Math.min(cap, x.lag) / cap) * 32}`).join(' '));
+    spark.replaceChildren(line);
+    // The gauge: three quarters of a circle, full at 0 s, empty at a minute.
+    gauge.replaceChildren(path(1, 'track'), path(Math.max(0.001, 1 - Math.min(cap, median) / cap), median <= 15 ? 'good' : median <= 60 ? 'ok' : 'slow'));
     setText($('i-gauge-num'), `${median}s`);
     setText($('i-speed-note'), `median of the last ${recent.length} · fastest ${recent[0]}s`);
   }
@@ -1111,15 +1184,17 @@
       pre.append(line);
       while (pre.children.length > 13) pre.firstChild.remove();
       for (const c of pre.querySelectorAll('.cursor')) if (c.parentNode !== line) c.remove();
-      code.typing = { text: next[0], at: 0, node: line.firstChild };
+      code.typing = { chars: Array.from(next[0]), at: 0, node: line.firstChild };
     }
     const tp = code.typing;
-    const step = calm.matches || document.hidden ? tp.text.length : Math.max(1, Math.ceil(tp.text.length / 26));
-    tp.at = Math.min(tp.text.length, tp.at + step);
-    tp.node.textContent = tp.text.slice(0, tp.at);
-    if (tp.at >= tp.text.length) {
+    const step = calm.matches || document.hidden ? tp.chars.length : Math.max(1, Math.ceil(tp.chars.length / 26));
+    tp.at = Math.min(tp.chars.length, tp.at + step);
+    tp.node.textContent = tp.chars.slice(0, tp.at).join('');
+    if (tp.at >= tp.chars.length) {
       code.typing = null;
-      code.doneAt.push(Date.now());
+      const t = Date.now();
+      code.doneAt.push(t);
+      while (code.doneAt.length && code.doneAt[0] < t - 60_000) code.doneAt.shift();
     }
     code.timer = setTimeout(typeNext, code.typing ? 28 : 160);
   }
@@ -1130,19 +1205,27 @@
     setText($('i-code-rate'), `${code.doneAt.length} l/m`);
   }, 2000);
 
+  /** Who is signed in, and how digests and notifications are set up. */
   function renderStatus() {
     if (!state) return;
     const a = state.account;
     const conn = a && a.connection;
     const parts = a
       ? [a.name, `ID ${a.id}`, conn ? (conn.state === 'offline' ? 'Telegram unreachable · retrying' : `connected since ${HM.format(conn.since * 1000)}`) : 'signed in', 'revoke in Telegram → Devices']
-      : ['not signed in'];
-    parts.push(state.bot ? `digests via @${state.bot.username}` : 'digests stay on this page', state.claude.ready ? `Claude ${state.claude.model}` : 'Claude API not set: digests come from Claude Desktop', state.notifications ? 'macOS notifications on' : 'notifications off', `messages kept ${state.retentionDays} days`);
+      : [state.readerConfigured ? 'not signed in: run npm run login, then restart' : 'not signed in: set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env, then npm run login'];
+    const lw = state.activity.lastWrite;
+    if (lw) parts.push(`last write: ${lw.method} · ${lw.target} · ${HM.format(lw.at * 1000)}`);
+    parts.push(
+      state.bot ? `digests go to chat ${state.reportTo ?? '—'} through @${state.bot.username}` : 'digests stay on this page',
+      state.claude.ready ? `Claude ${state.claude.model} · ${usd(state.costs.day.costUsd)} today · ${usd(state.costs.all.costUsd)} total` : 'Claude API not set: digests come from Claude Desktop',
+      state.notifications ? 'macOS notifications on' : 'notifications off',
+      `messages kept ${state.retentionDays} days`,
+    );
     const box = $('hud-status');
     const sig = JSON.stringify(parts);
     if (box.__sig === sig) return;
     box.__sig = sig;
-    box.replaceChildren(...parts.map((p, i) => el('span', { class: i === 0 ? 'who' : '' }, p)));
+    box.replaceChildren(...parts.map((p, i) => el('span', { class: i === 0 ? 'who' : p.startsWith('last write') ? 'pink' : '' }, p)));
     setText($('hud-brand'), a ? `${a.name} · read-only` : 'read-only');
   }
 
@@ -1157,10 +1240,16 @@
   function loadPulse(delay = 0) {
     clearTimeout(pulseTimer);
     pulseTimer = setTimeout(async () => {
+      if (document.hidden) {
+        pulseStale = true; // fetched when the page is shown again
+        return;
+      }
+      pulseStale = false;
       try {
         pulse = await get('/api/pulse');
         lags.length = 0;
         lags.push(...pulse.lags.slice().reverse());
+        lagsLoaded = true;
         renderHeat();
         renderSpeed();
         renderGroups();
@@ -1171,10 +1260,17 @@
     }, delay);
   }
   setInterval(() => !document.hidden && loadPulse(), 60_000);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && pulseStale) loadPulse();
+  });
 
-  /** New messages in a group: the crawler goes there and tags their words. */
+  /**
+   * New messages in a group: the crawler goes there; the denoiser takes out the noise and the
+   * detector tags the rest. `at` is when the service stored them (for how long that took); `seed`
+   * is the first look at page load, which moves nothing in the log or the counts.
+   */
   const readAt = new Map();
-  async function read(chatId, count) {
+  async function read(chatId, count, at, seed = false) {
     const c = clouds.get(`g:${chatId}`);
     if (!c) return;
     focus(c.key);
@@ -1198,9 +1294,11 @@
           setTimeout(() => spawnTag(word, kind, c), spawned++ * 160);
         }
       }
+      if (seed) return;
       if (dropped.length) {
-        logLine('drop', `${dropped.length} · ${[...new Set(dropped)].join(', ')}`, 'dim');
-        say(`denoise(drop=${dropped.length})  # ${[...new Set(dropped)].join(', ')}`, 'dim');
+        const kinds = [...new Set(dropped)].join(', ');
+        logLine('drop', `${dropped.length} · ${kinds}`, 'dim');
+        say(`denoise(drop=${dropped.length})  # ${kinds}`, 'dim');
         sessionDropped += dropped.length;
       }
       if (tagged.length) {
@@ -1209,15 +1307,26 @@
         sessionTagged += tagged.length;
       }
       renderDenoiser();
+      // Stored at `at`; the newest of them was posted at its date: that is how long it took.
       const newest = msgs[msgs.length - 1];
-      if (newest) {
-        lags.push({ at: now(), chatId, lag: Math.max(0, Math.round(now() - newest.date)) });
-        if (lags.length > 60) lags.shift();
+      if (newest && at && newest.date <= at + 5) {
+        lags.push({ at, chatId, lag: Math.max(0, Math.round(at - newest.date)) });
+        while (lags.length > 60) lags.shift();
         renderSpeed();
       }
     } catch {
       // nothing to tag this time
     }
+  }
+
+  /** The source an activity row is about. Rows name chats by title: an ambiguous title gives none. */
+  function sourceByTitle(title) {
+    if (!state) return null;
+    const on = state.sources.filter((s) => s.enabled && s.title === title);
+    if (on.length === 1) return on[0];
+    if (on.length > 1) return null;
+    const any = state.sources.filter((s) => s.title === title);
+    return any.length === 1 ? any[0] : null;
   }
 
   // ── what the page tells it ─────────────────────────────────────────────
@@ -1227,43 +1336,50 @@
 
     /** The console state (every few seconds). */
     setState(s) {
+      const firstTime = !state;
       state = s;
       startedAt = s.startedAt || startedAt;
       const enabled = s.sources.filter((x) => x.enabled);
       const keys = new Set(enabled.map((x) => `g:${x.chatId}`));
       for (const k of [...clouds.keys()]) if (k.startsWith('g:') && !keys.has(k)) clouds.delete(k);
-      const before = order.join();
       order = enabled.slice().sort((a, b) => b.messages24h - a.messages24h || a.chatId - b.chatId).map((x) => `g:${x.chatId}`);
       for (const src of enabled) {
         const c = cloudFor(`g:${src.chatId}`, 'group', src.title);
         c.count = src.messages24h;
         c.sub = `${n(src.messages24h)} today · ${src.error ? 'error' : src.behind ? 'catching up' : src.peeked || src.pushed ? 'live' : `every ~${src.everyS >= 60 ? `${Math.round(src.everyS / 60)}m` : `${src.everyS}s`}`}`;
       }
-      if (!clouds.has('news') && s.news) cloudFor('news', 'news', 'first-tier news');
-      const n0 = clouds.get('news');
-      if (n0 && s.news) {
-        n0.count = s.news.items24h;
-        n0.sub = `${n(s.news.items24h)} items · ${s.news.sources} sources`;
-      }
-      if (order.join() !== before) {
-        // A new order of the groups: the clouds keep their shapes and glide to their new places.
-        layout();
+      if (s.news && !clouds.has('news')) cloudFor('news', 'news', 'first-tier news');
+      if (!s.news) clouds.delete('news');
+      const nc = clouds.get('news');
+      if (nc && s.news) {
+        nc.count = s.news.items24h;
+        nc.sub = `${n(s.news.items24h)} items · ${s.news.sources} sources`;
       }
       if (view.w) rebuildClouds(false);
       if (!activeKey || !clouds.has(activeKey)) {
+        activeKey = null;
         const newest = enabled.slice().sort((a, b) => (b.newest || 0) - (a.newest || 0))[0];
         if (newest) {
           focus(`g:${newest.chatId}`);
-          if (!api.seeded) {
-            api.seeded = true;
-            read(newest.chatId, 4);
-          }
+          if (firstTime) read(newest.chatId, 4, null, true);
         }
+      }
+      if (firstTime) {
+        say('# reader.py · reads your groups, never writes', 'dim');
+        say(`groups = watch(${enabled.length})  # read-only`);
+        say(s.news ? `news = radar(${s.news.sources})  # first-tier feeds` : 'news = None  # PULSE_NEWS=off', s.news ? '' : 'dim');
       }
       setText(hud.groups, `${enabled.length}/${s.sources.length}`);
       setText(hud.messages, n(s.sources.reduce((t, x) => t + x.messages24h, 0)));
       setText(hud.writes, n(s.activity.counts.write || 0));
+      setText(hud.errors, n(s.activity.errors));
+      hud.errors.className = s.activity.errors ? 'pink' : '';
       if (s.news) setText(hud.news, n(s.news.items24h));
+      else {
+        setText(hud.news, 'off');
+        setText(hud.links, '—');
+        setText(hud.flags, '—');
+      }
       showTitle();
       renderTabs();
       renderGroups();
@@ -1277,48 +1393,54 @@
     setNews(v) {
       const prev = news;
       news = v;
-      if (!v.enabled) return;
+      if (!v.enabled) {
+        links.length = 0;
+        seenHits = new Set();
+        renderRadar();
+        return;
+      }
       const channels = new Set(v.sources.filter((x) => x.kind === 'telegram').map((x) => `g:${x.id.slice(3)}`));
       for (const c of clouds.values()) c.channel = channels.has(c.key);
       const nc = clouds.get('news');
       if (nc) {
-        nc.words = v.keywords.filter((k) => k.sources.length >= 2).slice(0, 3).map((k) => k.label.length > 30 ? `${k.label.slice(0, 29)}…` : k.label);
-        if (prev && v.items24h > prev.items24h) {
+        nc.words = v.keywords.filter((k) => k.sources.length >= 2).slice(0, 3).map((k) => cut(k.label, 30));
+        if (prev && prev.enabled && v.items24h > prev.items24h) {
           ping(nc.x, nc.y, C.cyan);
           logLine('feed', `+${v.items24h - prev.items24h} news items`, 'cyan');
           say(`news.fetch()  # +${v.items24h - prev.items24h} items`);
         }
       }
-      // One link per group and story; the ones that arrived while watching are drawn bright.
-      const known = new Set(links.map((l) => `${l.chatId}:${l.topicId}`));
-      const levels = new Map(v.keywords.flatMap((k) => k.groups.map((g) => [`${g.chatId}:${k.id}`, g.level])));
-      const pairs = new Map();
-      for (const h of v.hits) pairs.set(`${h.chatId}:${h.topicId}`, h);
-      // The detector's verdicts from the radar: each newly matched message becomes a flag at its group.
+      // New matches: a message the radar matched that was not in the last view. Each becomes a flag
+      // at its group, and its group's link to the story is drawn bright.
+      const t0 = performance.now();
+      const ids = new Set();
       for (const h of v.hits) {
         const id = `${h.chatId}:${h.messageId}`;
-        if (seenHits.has(id)) continue;
-        seenHits.add(id);
-        if (!prev) continue;
+        ids.add(id);
+        if (!prev || !prev.enabled || seenHits.has(id)) continue;
+        const story = h.label.split(' · ')[0];
         const mark = h.marks && h.marks[0];
-        const word = mark ? h.text.slice(mark[0], mark[1]) : (h.terms[0] || h.label);
+        const word = mark ? h.text.slice(mark[0], mark[1]) : h.terms[0] || story;
+        fresh.set(`${h.chatId}:${h.topicId}`, t0);
         const g = clouds.get(`g:${h.chatId}`);
         if (g) {
           focus(g.key);
-          spawnTag(`${word} → ${h.label.split(' · ')[0]}`, 'news', g);
+          spawnTag(`${cut(word, 16)} → ${cut(story, 18)}`, 'news', g);
         }
+        logLine('link', `${cut(h.group, 18)} → ${cut(story, 24)}`, 'cyan');
+        say(`link("${cut(h.group, 14)}", "${cut(story, 18)}")`, 'cyan');
         sessionTagged++;
       }
-      for (const [key, h] of pairs) {
-        if (known.has(key)) continue;
-        links.push({ chatId: h.chatId, topicId: h.topicId, level: levels.get(key) || 'echo', bend: ((hash(key) % 100) / 100 - 0.5) * 1.2, born: prev ? performance.now() : -1e9 });
-        if (prev) {
-          logLine('link', `${h.group} → ${h.label}`, 'cyan');
-          say(`link("${h.group.slice(0, 14)}", "${h.label.split(' · ')[0]}")`, 'cyan');
+      seenHits = ids;
+      for (const [key, t1] of fresh) if (t0 - t1 > 15_000) fresh.delete(key);
+      // The links: one per group and story in today's view (stories come and go with the view).
+      links.length = 0;
+      for (const k of v.keywords) {
+        for (const g of k.groups) {
+          links.push({ chatId: g.chatId, level: g.level, bend: ((hash(`${g.chatId}:${k.label}`) % 100) / 100 - 0.5) * 1.2, born: fresh.get(`${g.chatId}:${k.id}`) ?? -1e9 });
         }
       }
-      for (const l of links) l.level = levels.get(`${l.chatId}:${l.topicId}`) || l.level;
-      setText(hud.links, n(v.hits.length));
+      setText(hud.links, n(linkedCount()));
       setText(hud.flags, n(v.alerts.length));
       setText(hud.news, n(v.items24h));
       renderRadar();
@@ -1343,19 +1465,20 @@
         say(`# WRITE: ${a.method}`, 'pink');
         return;
       }
-      const chat = state ? state.sources.find((s) => s.title === a.target) : null;
+      const chat = sourceByTitle(a.target);
       if (a.method === 'stored' && chat) {
         const count = Number((/^(\d+)/.exec(a.detail) || [])[1] || 1);
         stored.push([now(), count]);
-        say(`read("${a.target.slice(0, 16)}")  # +${count}`);
-        read(chat.chatId, count);
+        rate(); // trims what is older than a minute
+        say(`read("${cut(a.target, 16)}")  # +${count}`);
+        read(chat.chatId, count, a.at);
         loadPulse(4000);
       } else if (a.method === 'messages.GetPeerDialogs') {
         if (clouds.get(activeKey)) ping(crawler.x, crawler.y);
         say(`peek(chats=${(/→ (\d+)/.exec(a.detail) || [])[1] ?? '?'})  # ${a.ms ?? '?'}ms`, 'dim');
       } else if (a.method === 'news in the group' || a.method === 'group was first') {
         const first = a.method === 'group was first';
-        say(`flag("${a.target.slice(0, 16)}", ${first ? 'first' : 'hot'}=True)`, 'pink');
+        say(`flag("${cut(a.target, 16)}", ${first ? 'first' : 'hot'}=True)`, 'pink');
         if (chat) spawnTag(first ? 'had it first' : 'HOT', 'news', clouds.get(`g:${chat.chatId}`));
       } else if (a.method === 'connection lost' || a.method === 'connection back') {
         say(`# ${a.method}`, 'dim');
@@ -1363,9 +1486,8 @@
     },
   };
 
-  say('# reader.py · reads your groups, never writes', 'dim');
-  say('groups = watch(read_only=True)');
-  say('news = radar(first_tier=True)');
   window.Crawler = api;
+  renderSpeed();
+  renderRadar();
   resize();
 })();

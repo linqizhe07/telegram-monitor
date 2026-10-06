@@ -1231,25 +1231,30 @@ export class Store {
     return this.all("SELECT * FROM digests WHERE kind != 'shadow' ORDER BY id DESC LIMIT ?", limit).map((r) => this.toDigest(r));
   }
 
-  /** Message count per chat since `since`, and the newest stored message date. */
+  /**
+   * Message count per chat since `since`, and the newest stored message date. One query per known
+   * chat, each a range on the (chat_id, date) index: no scan of everything kept.
+   */
   messageStats(since: number): Map<number, { count: number; newest: number | null; people: number }> {
     const out = new Map<number, { count: number; newest: number | null; people: number }>();
-    for (const r of this.all(
-      'SELECT chat_id, COUNT(*) AS n, MAX(date) AS newest, COUNT(DISTINCT user_id) AS people FROM messages WHERE date > ? GROUP BY chat_id',
-      since,
-    )) {
-      out.set(num(r.chat_id), { count: num(r.n), newest: numOrNull(r.newest), people: num(r.people) });
+    for (const c of this.all('SELECT chat_id FROM chats')) {
+      const chatId = num(c.chat_id);
+      const r = this.get('SELECT COUNT(*) AS n, MAX(date) AS newest, COUNT(DISTINCT user_id) AS people FROM messages WHERE chat_id = ? AND date > ?', chatId, since);
+      if (r && num(r.n) > 0) out.set(chatId, { count: num(r.n), newest: numOrNull(r.newest), people: num(r.people) });
     }
     return out;
   }
 
-  /** Messages per chat per time bucket since `since`: chat → (floor(date / bucketS) → count). */
+  /** Messages per chat per time bucket since `since`: chat → (floor(date / bucketS) → count). Indexed, per chat. */
   messageBuckets(since: number, bucketS: number): Map<number, Map<number, number>> {
     const out = new Map<number, Map<number, number>>();
-    for (const r of this.all('SELECT chat_id, CAST(date / ? AS INTEGER) AS b, COUNT(*) AS n FROM messages WHERE date >= ? GROUP BY chat_id, b', bucketS, since)) {
-      const chatId = num(r.chat_id);
-      if (!out.has(chatId)) out.set(chatId, new Map());
-      out.get(chatId)!.set(num(r.b), num(r.n));
+    for (const c of this.all('SELECT chat_id FROM chats')) {
+      const chatId = num(c.chat_id);
+      const m = new Map<number, number>();
+      for (const r of this.all('SELECT CAST(date / ? AS INTEGER) AS b, COUNT(*) AS n FROM messages WHERE chat_id = ? AND date >= ? GROUP BY b', bucketS, chatId, since)) {
+        m.set(num(r.b), num(r.n));
+      }
+      if (m.size) out.set(chatId, m);
     }
     return out;
   }
@@ -1259,12 +1264,14 @@ export class Store {
    * `since`, the time from the newest message it stored being posted to it being stored.
    */
   captureLags(since: number, limit: number): { at: number; chatId: number; lag: number }[] {
-    const byTitle = new Map<string, number>();
-    for (const c of this.listChats(false)) if (!byTitle.has(c.title)) byTitle.set(c.title, c.chatId);
+    // The event names its chat by title: a title two chats share (a channel and its discussion
+    // group, often) says nothing about which one, so it is left out rather than guessed.
+    const byTitle = new Map<string, number | null>();
+    for (const c of this.listChats(false)) byTitle.set(c.title, byTitle.has(c.title) ? null : c.chatId);
     const out: { at: number; chatId: number; lag: number }[] = [];
     for (const r of this.all("SELECT at, target FROM activity WHERE method = 'stored' AND at >= ? ORDER BY id DESC LIMIT ?", since, limit)) {
       const chatId = byTitle.get(String(r.target));
-      if (chatId === undefined) continue;
+      if (chatId === undefined || chatId === null) continue;
       const at = num(r.at);
       const newest = numOrNull(this.get('SELECT MAX(date) AS d FROM messages WHERE chat_id = ? AND date <= ?', chatId, at)?.d);
       if (newest !== null) out.push({ at, chatId, lag: at - newest });

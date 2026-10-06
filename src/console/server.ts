@@ -61,6 +61,8 @@ const ASSETS: Record<string, { file: URL; type: string }> = {
   '/crawler.js': { file: new URL('./crawler.js', import.meta.url), type: 'text/javascript; charset=utf-8' },
 };
 const PAGE = new URL('./page.html', import.meta.url);
+
+type NoiseRow = { chatId: number; total: number; removed: Record<string, number> };
 const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /** Every digest file under data/digests (one folder per group, and older files at the top). */
@@ -373,8 +375,9 @@ export class ConsoleServer {
 
   /**
    * For the live view: each group's messages per hour over the last day, what the denoiser removed
-   * from each (the last day, as the digest reads it; worked out at most once a minute), and how long
-   * recent messages took to be stored.
+   * from each over the last day (as the digest reads it), and how long recent messages took to be
+   * stored. The denoiser counts are worked out once, then again in the background at most once a
+   * minute, one group at a time, so a request never waits on a whole day of every group.
    */
   private pulse() {
     const { store, now: clock } = this.deps;
@@ -382,31 +385,57 @@ export class ConsoleServer {
     const HOUR = 3600;
     const first = Math.floor(now / HOUR) - 23; // 24 buckets; the last one is the current hour
     const buckets = store.messageBuckets(first * HOUR, HOUR);
-    if (!this.noiseCache || now - this.noiseCache.at >= 60) {
-      const noise = store
-        .listChats(false)
-        .filter((c) => c.kind === 'watched' && c.enabled)
-        .map((c) => {
-          const d = denoise(store.messages(c.chatId, now - 86_400, now + 1));
-          return { chatId: c.chatId, total: d.total, removed: d.removed };
-        })
-        .filter((x) => x.total > 0);
-      this.noiseCache = { at: now, noise };
-    }
+    if (!this.noise.rows) this.noise = { at: now, rows: this.noiseRows(now, null), running: false };
+    else if (now - this.noise.at >= 60 && !this.noise.running) void this.refreshNoise();
     return {
       now,
       from: first * HOUR,
       bucketS: HOUR,
       hours: [...buckets].map(([chatId, m]) => ({ chatId, counts: Array.from({ length: 24 }, (_, i) => m.get(first + i) ?? 0) })),
-      noise: this.noiseCache.noise,
+      noise: this.noise.rows,
       lags: store.captureLags(now - 6 * HOUR, 60),
     };
   }
-  private noiseCache: { at: number; noise: { chatId: number; total: number; removed: Record<string, number> }[] } | null = null;
+
+  private noise: { at: number; rows: NoiseRow[] | null; running: boolean } = { at: 0, rows: null, running: false };
+
+  /** What the denoiser removes from each watched group's last day. `pause` lets the event loop breathe between groups. */
+  private noiseRows(now: number, pause: null): NoiseRow[];
+  private noiseRows(now: number, pause: () => Promise<void>): Promise<NoiseRow[]>;
+  private noiseRows(now: number, pause: (() => Promise<void>) | null): NoiseRow[] | Promise<NoiseRow[]> {
+    const { store } = this.deps;
+    const chats = store.listChats(false).filter((c) => c.kind === 'watched' && c.enabled);
+    const one = (chatId: number): NoiseRow => {
+      const d = denoise(store.messages(chatId, now - 86_400, now + 1));
+      return { chatId, total: d.total, removed: d.removed };
+    };
+    if (!pause) return chats.map((c) => one(c.chatId)).filter((x) => x.total > 0);
+    return (async () => {
+      const rows: NoiseRow[] = [];
+      for (const c of chats) {
+        rows.push(one(c.chatId));
+        await pause();
+      }
+      return rows.filter((x) => x.total > 0);
+    })();
+  }
+
+  private async refreshNoise(): Promise<void> {
+    this.noise.running = true;
+    try {
+      const now = this.deps.now();
+      const rows = await this.noiseRows(now, () => new Promise<void>((resolve) => setImmediate(resolve)));
+      this.noise = { at: now, rows, running: false };
+    } catch {
+      this.noise.running = false;
+    }
+  }
 
   /**
-   * The last `limit` messages of a chat. With `withNoise`, each also says whether the denoiser drops
-   * it and why (judged over the last day, as the digest is), or null when it is kept.
+   * The last `limit` messages of a chat. With `withNoise`, each message of the last 6 hours also says
+   * whether the denoiser drops it and why, or null when it is kept (older ones carry no verdict). The
+   * rules are the digest's; the digest judges a whole day, so it also catches a repeat of something
+   * said earlier than that.
    */
   private messages(chatId: number, limit: number, withNoise = false) {
     const { store, now } = this.deps;
@@ -416,7 +445,8 @@ export class ConsoleServer {
     // The last day usually holds them; only a quiet chat needs the whole history.
     const day = store.messages(chatId, end - 86_400, end);
     const rows = (day.length >= want ? day : store.messages(chatId, 0, end)).slice(-want);
-    const noise = withNoise ? denoise(day).noise : null;
+    const judgedFrom = end - 6 * 3600;
+    const noise = withNoise ? denoise(day.filter((m) => m.date >= judgedFrom)).noise : null;
     return rows.map((m) => ({
       id: m.messageId,
       date: m.date,
@@ -424,7 +454,7 @@ export class ConsoleServer {
       text: m.text,
       replyTo: m.replyTo,
       reactions: m.reactions,
-      ...(noise ? { noise: noise.get(m.messageId) ?? null } : {}),
+      ...(noise && m.date >= judgedFrom ? { noise: noise.get(m.messageId) ?? null } : {}),
     }));
   }
 

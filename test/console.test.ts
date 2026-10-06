@@ -272,8 +272,14 @@ test('the pulse: each group\'s messages per hour, what the denoiser removed, and
   const dates = [now - 30 * 3600, now - 2 * 3600 - 10, now - 30, now - 8];
   const texts = ['an old one', '大饼要涨到10万了', 'hi', '/start'];
   dates.forEach((date, i) => store.saveMessage({ chatId: GROUP, messageId: i + 1, threadId: null, userId: 5, date, text: texts[i], replyTo: null, reactions: 0, edited: false }));
+  // Two chats with one title (a channel and its discussion group): their events say nothing about which.
+  const defaults = { language: 'auto' as const, digestHour: 9, timezone: 'UTC', rsiMode: 'auto' as const };
+  store.watchChat({ chatId: -1003333333333, title: 'Twin', username: 'twin_a', type: 'channel', ref: '@twin_a' }, 42, null, defaults);
+  store.watchChat({ chatId: -1004444444444, title: 'Twin', username: 'twin_b', type: 'supergroup', ref: '@twin_b' }, 42, null, defaults);
+  store.saveMessage({ chatId: -1004444444444, messageId: 9, threadId: null, userId: 6, date: now - 5000, text: 'a quiet one', replyTo: null, reactions: 0, edited: false });
   activity.event('reader', 'stored', 'A group', '2 new messages · noticed by the chat-list check');
   activity.event('reader', 'stored', 'Not a source', '1 new message');
+  activity.event('reader', 'stored', 'Twin', '1 new message');
   const server = new ConsoleServer({
     store,
     activity,
@@ -300,14 +306,29 @@ test('the pulse: each group\'s messages per hour, what the denoiser removed, and
     const expected = Array.from({ length: 24 }, (_, i) => dates.filter((d) => Math.floor(d / 3600) === first + i).length);
     assert.deepEqual(row.counts, expected, 'the message 30 hours old is outside the day');
     assert.equal(row.counts.reduce((a: number, b: number) => a + b, 0), 3);
-    assert.deepEqual(pulse.lags, [{ at: now, chatId: GROUP, lag: 8 }], 'stored 8 seconds after it was posted; an unknown chat is left out');
-    assert.deepEqual(pulse.noise, [{ chatId: GROUP, total: 3, removed: { sticker: 0, chatter: 1, command: 1, spam: 0, repeat: 0 } }]);
+    assert.deepEqual(pulse.lags, [{ at: now, chatId: GROUP, lag: 8 }], 'stored 8 seconds after it was posted; an unknown chat, and a title two chats share, are left out');
+    assert.deepEqual(pulse.noise.find((x: { chatId: number }) => x.chatId === GROUP), { chatId: GROUP, total: 3, removed: { sticker: 0, chatter: 1, command: 1, spam: 0, repeat: 0 } });
     // The denoiser's verdict on each of the latest messages, for the crawler's second hand.
     const latest = JSON.parse((await call(Number(new URL(server.url).port), `/api/messages?chat=${GROUP}&limit=3&noise=1`)).body);
     assert.deepEqual(latest.map((m: { text: string; noise: string | null }) => [m.text, m.noise]), [['大饼要涨到10万了', null], ['hi', 'chatter'], ['/start', 'command']]);
     const plain = JSON.parse((await call(Number(new URL(server.url).port), `/api/messages?chat=${GROUP}&limit=10`)).body);
     assert.equal(plain.length, 4, 'without the last day filling the limit, the whole history is read');
     assert.equal('noise' in plain[0], false);
+    const all = JSON.parse((await call(Number(new URL(server.url).port), `/api/messages?chat=${GROUP}&limit=10&noise=1`)).body);
+    assert.equal('noise' in all[0], false, 'a message older than the judged window carries no verdict (not "kept")');
+    assert.equal(all[1].noise, null);
+    // The denoiser counts are refreshed in the background, at most once a minute.
+    store.saveMessage({ chatId: GROUP, messageId: 5, threadId: null, userId: 7, date: now + 30, text: 'ok', replyTo: null, reactions: 0, edited: false });
+    const port = Number(new URL(server.url).port);
+    clock.t = now + 30;
+    const soon = JSON.parse((await call(port, '/api/pulse')).body);
+    assert.equal(soon.noise.find((x: { chatId: number }) => x.chatId === GROUP).total, 3, 'within the minute: the counts already worked out');
+    clock.t = now + 61;
+    const stale = JSON.parse((await call(port, '/api/pulse')).body);
+    assert.equal(stale.noise.find((x: { chatId: number }) => x.chatId === GROUP).total, 3, 'a request never waits for the recount');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const fresh = JSON.parse((await call(port, '/api/pulse')).body);
+    assert.deepEqual(fresh.noise.find((x: { chatId: number }) => x.chatId === GROUP).removed, { sticker: 0, chatter: 2, command: 1, spam: 0, repeat: 0 }, 'the recount has the new chatter');
   } finally {
     await server.stop();
   }

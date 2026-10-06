@@ -1,67 +1,22 @@
-# Telegram Monitor · 会自我进化的群聊速览
+# Telegram Monitor
 
-盯住 Telegram 群，包括 Binance、OKX 这类你说了不算的公开大群，每天告诉你群里在聊什么、有什么痛点、新想法和机会。摘要的写法还会自己越改越好。
+**English** · [中文](README.zh-CN.md)
 
-**完整上手指南：[COOKBOOK.md](COOKBOOK.md)**，从注册账号到 24 小时部署，按步骤来。
+Follow the Telegram groups that matter to you, including big public groups you don't run (Binance, OKX…), through your own account. Every message is matched against the day's first-tier news the moment it arrives, the noise is stripped out, and Claude writes a daily digest: topics, pain points, ideas, opportunities and open questions.
 
+## Features
 
-> **2026-10 更新**：不配 bot 和 API key 也能用。`npm start` 自带本地控制台（http://127.0.0.1:4830），账号的每个请求都实时可见；离线期间的消息上线后按时间补齐；读之前先去噪。摘要由 Claude 桌面端通过 MCP（`src/mcp.ts`）和定时任务来写。见 [COOKBOOK.md 第 6A 节](COOKBOOK.md#6a-不配-bot不配-api-key控制台--claude-桌面端)。
->
-> **新闻雷达**：从 Bloomberg、纽约时报、a16z、YC（Hacker News）、The Block、CoinDesk、Odaily 和你订阅的新闻频道，挖出当天的关键词。每条群消息一存下就拿去配对，中文别名和黑话（大饼、鲍威尔、大零币）也认得。群里在聊刚出的新闻、或者比第一篇报道还早，就在控制台标出来并弹通知。你在群里的群，新消息约 10 秒内入库。见 [COOKBOOK.md「新闻雷达」](COOKBOOK.md#新闻雷达一线新闻关键词--群聊)。
->
-> **实时视图**：控制台最上面是一张实时图。每个群是一团星云，一线新闻是中间那一团，读者是一只爬虫。它走到刚有新消息的群，用两只手干活：关键词检测器给有用的词打标签，命中当天新闻就插旗、连线到新闻星云；去噪器把摘要会丢掉的消息拽出来粉碎。下面一排仪表都是实时数据：抓取日志、各群消息和噪音、新闻关键词雷达、去噪统计、24 小时热图、消息从发出到入库的秒数。页面看不见时动画自动停，不占 CPU。
->
-> **私密群**：贴邀请链接只读预览，附上加入前该知道的提醒。你在官方 App 里自己加入并回答入群验证，服务只确认一次你已加入，之后跟踪你在群里的状态：等待验证时页面顶部有横幅、弹 macOS 通知，被移出会自动停读。读者账号在代码层面只读：入群、发言、按按钮、标已读，都会在发出前被拦下。设计和证据见 [docs/private-groups.md](docs/private-groups.md)。
+- **Read-only reader.** Your Telegram account, over the official MTProto API. Public groups are read without joining; private groups once you have joined them in the Telegram app. Joining, sending, button presses and read receipts are refused in code.
+- **Seconds, not minutes.** The chats you are in are checked every 10 seconds with a single request. Anything missed while the computer slept is caught up in order.
+- **News radar.** Keywords of the day from Bloomberg, The New York Times, a16z, Y Combinator, The Block, CoinDesk, Odaily and your news channels, matched against every message, group slang included (大饼 = BTC). When a group reacts to a story, or talks about it before the first report, you get a notification.
+- **Denoiser.** Stickers, one-word chatter, bot commands, repeats and scams are removed before anything is read.
+- **Live console** at `127.0.0.1:4830`. Each group is a nebula; the reader is a crawler whose two hands are a keyword detector and a denoiser. Live instruments below, and every request the account sends.
+- **Digests by Claude.** Claude Desktop writes them through MCP, no API key needed. With an API key and a bot, the service writes and sends them itself, and the digest's playbook improves itself from blind tests and your votes.
+- **Local.** Messages are kept in a local SQLite file for 7 days.
 
-## 两种接法
+## Quick start
 
-| | 别人的群（Binance、OKX…） | 你自己管的群 |
-|---|---|---|
-| 怎么读到消息 | **读者账号**：一个 Telegram 用户账号（专用号或你自己的号），走官方 MTProto 协议。公开群和频道不用加入（跟手机上的预览一样）；私密群由你在官方 App 里加入，控制台先预览邀请链接 | bot 在群里（关隐私模式，或给 bot 管理员权限） |
-| 摘要发到哪 | 不配 bot：留在本地控制台，由 Claude 桌面端来写。配了 bot：你和 bot 的私聊，或团队私密群。都不会发回原群 | 群里 |
-| 反馈来自 | 你和你的团队 | 群成员 |
-| 需要 | 读者账号的 `api_id/api_hash` + `PULSE_OWNER_IDS`；bot token 和 Claude API key 可选 | bot token + Claude API key |
-
-为什么别人的群不能直接用 bot：bot 只能由群管理员拉进群，自己不能凭链接加群；官方大群不会同意，在别人群里发摘要也等于刷屏。
-
-## 它做三件事
-
-1. **记录**：消息存在本地 SQLite，默认保留 7 天。
-2. **总结**：每天定时出一份 24 小时速览，分**话题 / 痛点 / 新想法 / 机会 / 悬而未决**五栏，每条都链接到原消息。同一个痛点连续出现会标上「↻ 第 3 天」。
-3. **自我进化（RSI）**：每出一份摘要，就跑一轮递归自我改进。它改写自己的摘要规则（playbook），拿新规则在最近几天的聊天上和现任版本盲测，赢了才采用。读者投 👎 可以否决新版本。
-
-下面是 Claude 在仓库自带的合成群聊（`fixtures/alpha-builders.zh.json`，人物都是虚构的）上写的第一天摘要，节选。这是干跑：由 Claude 子代理代替 API，逐字回答 Pulse 生成的真实请求文件。
-
-```
-📡 Alpha Builders 研究群
-2026-10-03 09:00 → 2026-10-04 09:00 · 112 条消息 · 14 人
-
-一句话  多人吐槽 CEX API key 没法给 agent 限定币种、额度和期限，讨论收敛到 session key + 限额的思路，小鱼凌晨已写出 proxy 原型并称明天开源。
-
-🧭 话题
-1. agent 授权：从裸 API key 转向 session key — 小鱼等吐槽 CEX API key 权限太粗…… ↗
-2. 代币化美股：周末价格无锚，亚洲时段盘口薄 — Kevin 发现某热门科技股代币版周末比周五收盘高 1.4% 又跌回…… ↗
-
-😣 痛点
-• CEX API key 只有大开关，限不了币种和额度 ‼️ — 小鱼想把 agent 限制在「只能动 ETH、单笔不超过 500U」却根本没地方设…… ↗
-    “交易一开就是全币种全仓位”
-
-🎯 机会
-• 亚洲时段与周末的美股代币流动性缺口 — Kevin 分享其平台半年数据…… ↗
-    ↳ 为什么是现在: 成交一大半发生在美股收盘后的亚洲白天和晚上…… · 下一步: ……
-
-❓ 悬而未决
-• 哪家券商 API 能给 agent 开子账户、单独限额 — Ray 晚间问……截至窗口结束没有人回答。 ↗
-
-🧬 playbook v0 · 自我进化中 · /rsi
-[👍 有用] [👎 没用]
-```
-
-这份摘要的自动检查：17 条全部引用真实消息、引文都能在原消息里找到；8 个最热的讨论全覆盖；人工埋的 15 个点找到 14 个，且都在对的栏目里；引用的 61 条消息里没有一条是闲聊噪音。它的毛病也很明显：每条写了 3–4 句，而 playbook 要求 1–2 句。这正是 RSI 这一轮要修的。
-
-## 快速开始
-
-需要 Node ≥ 22.18（直接用 Node 自带的 TypeScript 运行和 SQLite，没有构建步骤）。细节都在 [COOKBOOK.md](COOKBOOK.md)。
+Requires Node ≥ 22.18.
 
 ```bash
 npm install
@@ -71,74 +26,21 @@ npm install
 cp .env.example .env
 ```
 
-**只看别人的群（不配 bot、不配 API key）**
+In `.env`, set `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` (from my.telegram.org) and your Telegram id in `PULSE_OWNER_IDS` (after the first start it is shown in the console's status line). Then log in once and start:
 
-1. `.env` 填 `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`（用读者账号登录 my.telegram.org 申请）和 `PULSE_OWNER_IDS`（你的 Telegram id，控制台实时视图下方的状态行里就有）。
-2. 运行一次 `npm run login`（扫码登录），然后 `npm start`，打开 http://127.0.0.1:4830 。账号已经在的群会自动出现；公开群贴 `@用户名` 查看后点 Watch it；私密群贴邀请链接，在 Telegram App 里加入。
-3. 摘要交给 Claude 桌面端写：见 [COOKBOOK.md 第 6A 节](COOKBOOK.md#6a-不配-bot不配-api-key控制台--claude-桌面端)。
-
-**要把摘要发到 Telegram，或用在自己的群里**：再填 `TELEGRAM_BOT_TOKEN`（找 @BotFather 发 `/newbot`）和 `ANTHROPIC_API_KEY`，私聊 bot 发 `/watch @某个公开群`，摘要就会发到这个私聊。管理自己的群：把 bot 拉进去，并在 @BotFather 关掉隐私模式。
-
-## 命令
-
-| 命令 | 在哪用 | 作用 |
-|---|---|---|
-| `/watch @群` · `/unwatch @群` · `/sources` | 报告台（你的私聊或团队群，仅 owner） | 开始监控（`@用户名`、`t.me` 链接，或读者账号已加入的私密群的名字）· 停止监控 · 列表和状态 |
-| `/digest [@群] [小时]` | 都可以（30 分钟冷却） | 立即总结最近 N 小时，默认 24 |
-| `/pulse [@群]` | 都可以 | 状态：近 24 小时消息数、下一份摘要的时间、playbook 版本 |
-| `/rsi [@群]` · `playbook` · `evolve` · `rollback [v]` | 都可以；后两个限管理员 | 进化记录、当前规则、立即跑一轮、回退版本（回退也算一次否决） |
-| `/feedback [@群] 内容`，或直接回复某份摘要 | 都可以 | 告诉摘要哪里该改 |
-| 👍 / 👎 按钮 | 都可以 | 投票会进入下一轮自我改进，也能否决刚上任的版本 |
-| `/settings [@群] …` | 查看：都可以；修改：管理员 | `hour 21` · `tz Europe/London` · `lang auto\|en\|zh` · `rsi auto\|propose\|off` · `here` |
-| `/optout` · `/optin` | 只在 bot 模式的群里 | 不收录自己的消息（并删除已存的）· 恢复收录 |
-
-报告台里只监控一个群时，`@群` 可以省略；监控多个群时写 `@用户名` 或 `#序号`。界面文字有中英两套，自动切换。
-
-## RSI：它怎么改进自己
-
-```
-每日摘要（现任 playbook vN）──→ 读者 👍/👎、回复、/feedback
-        │
-        ▼  每天发完摘要后跑一轮（每个群单独跑，至少间隔 20 小时）
-① 校准评审：读者反馈 → judge notes（评审的口味）。只有读者能改它
-② 编辑批评：现任摘要漏了哪些讨论、哪些放错栏、哪些是空话
-③ 改进者：根据批评、自动检查、读者反馈和历代谱系，提出 K 个变异版 playbook
-          （repair / specialize / simplify / crossover / explore），
-          同时重写它自己的策略笔记 ← 递归的那一层
-④ 回放：每个候选在最近 N 天的同一批消息上重写摘要（影子摘要，不发群）
-⑤ 盲测：评审逐天对比「候选 vs 现任」，正反顺序各比一次，抵消位置偏好
-   代码检查：引用的消息必须存在、引文必须原样出现在被引用的消息里、最热的讨论有没有覆盖到
-⑥ 选择：评审胜率 ≥ 62.5%、引用核验不下降、覆盖率下降不超过 10 个点 → 采用（auto）或请管理员批准（propose）
-⑦ 试用期：新版本的前 3 份摘要里 👎 ≥ 3 且 ≥ 2×👍 → 自动退回上一版。
-          这一版记为「被读者否决」，改进者下一轮会看到，也不能把同一版再提一次
+```bash
+npm run login
 ```
 
-**三层结构**
+```bash
+npm start
+```
 
-- **第 0 层：playbook**（摘要怎么写）。由改进者变异，赢了才留下。
-- **第 1 层：改进者的策略笔记**（怎么改进）。每轮由改进者自己重写，依据是它以前提的修改哪些赢了、哪些输了、哪些被读者否决（每种算子的采用率都会算给它看）。改进的方法本身也在改进。
-- **锚**：系统改不了自己的部分。宪法（`src/prompts.ts`）、代码检查（`src/rsi/fitness.ts`）、选择规则（`src/rsi/evolve.ts`），还有只能由读者反馈改写的 judge notes，以及读者的否决权。改进者不能「给自己判卷子放水」。
+Open http://127.0.0.1:4830. Groups your account is in show up on their own; add a public group by its @username, a private one by its invite link.
 
-跟 REvolve / FORGE 一类「LLM 进化 + 人类反馈」的方法对照着看：playbook 对应奖励函数，评审盲测加代码检查对应 fitness，读者投票对应 human feedback，谱系和算子采用率对应进化数据库。每代是一个 (1+λ) 锦标赛：λ 个候选对一个现任。
+Claude Desktop, bot mode, commands, running 24/7, settings and troubleshooting: see the [Cookbook](COOKBOOK.md) (in Chinese).
 
-## 成本（估算，按 Claude Opus 5.5 的标价 $4 / $20 每百万 token）
-
-- 每日摘要：200 条左右的群约 1 万 token 输入，一份约 **$0.15–0.3**。
-- 一轮 RSI（默认 2 个候选 × 2 天）：1 次批评 + 1 次改进 + 4 份影子摘要 + 8 次评审，约 15 次调用，大约 **$1.5–2.5**。
-- 省钱：`PULSE_RSI_EVERY_HOURS=72`（三天一轮），或 `PULSE_RSI_CANDIDATES=1`，或 `PULSE_RSI_MODE=off`（只要摘要）。
-- 每次调用的 token 和估算花费都记在库里，`/rsi` 会显示近 7 天花了多少。
-
-## 隐私
-
-- 消息只存在本地 `data/pulse.db`，过了保留期（`PULSE_RETENTION_DAYS`）自动删除。
-- 要分析的消息会发给 Anthropic 的 Claude API。发送前，名字统一换成代号（U1、U2…）；消息正文不改，正文里提到的名字还在。
-- 联系人卡片、位置坐标从不复制；转发自个人的消息不记原作者名字。
-- `/optout` 立刻删除这个人已存的消息，之后也不再记录。
-- 宪法禁止给个人画像、禁止输出个人信息，也禁止听从聊天里对 AI 下的指令（防注入）。
-- Bot 进群时会公开说明自己记录什么、保留多久、怎么退出。
-- 监控别人的群时没有这一步：群成员不会知道有人在读，跟任何一个潜水成员一样。请遵守群规和当地的数据保护法，摘要只给自己和团队看，见 [COOKBOOK.md](COOKBOOK.md) 第 13 步。
-
-## 开发
+## Development
 
 ```bash
 npm test
@@ -152,67 +54,4 @@ npm run typecheck
 npm run replay -- --fake
 ```
 
-- `npm test`：132 个测试，覆盖这几块：
-  - 转写、引用核验、渲染；
-  - 整个 RSI 循环：采用、拒绝、提议、否决、校准；
-  - bot 收发和定时器；
-  - 读者账号：MTProto 消息转换、分页和游标、报错翻译、按名字找私密群、离线补齐和断点续传、对账、请求节奏和限流时整号暂停；
-  - 去噪规则；
-  - 跟随群列表：新群加入、退出和重新加入、每个群的开关、只对可能是加群退群的推送去核对；
-  - 控制台：主机校验、两把令牌、实时流、清空存储，以及实时视图用的数据（每小时消息量、逐条去噪判定、入库延迟）；
-  - 私密群：邀请预览、查链接的配额、申请复查的节奏、加入后的状态、入群验证提示、被移出、写操作拦截、通知参数防注入；
-  - 报告台：私聊 `/watch`，摘要、投票和回复都回到被监控的群。
-
-  其中几个控制台测试要监听本地端口，在不允许监听的沙箱里会跳过。
-
-  用的是假 Telegram、假 MTProto 客户端和一个确定性的替身模型。另有两个测试用模拟的 HTTP 层驱动真实的 Claude SDK，检查发出的请求，以及对拒答、截断、格式错误的处理。
-- `npm run replay -- --fake`：在 `fixtures/alpha-builders.zh.json` 上离线回放。这是一个合成的两天群聊，218 条消息，带人工标注的「埋点」（痛点、想法、机会……）。回放先发两天摘要，再跑几代 RSI，并用埋点做外部核对（RSI 循环本身看不到埋点）。
-- `npm run replay -- --generations 2`：同样的回放，用真 Claude，需要 `ANTHROPIC_API_KEY`，约花 $5。
-- `npm run replay -- --answers <dir>`：提示词干跑。每次模型调用都写成一个请求文件，答案从对应的文件读回，方便逐个检查真实请求。
-
-```
-src/
-  main.ts          启动：长轮询、读者账号、定时器、保留期清理
-  bot.ts           Telegram 更新：记录消息、命令、报告台、/watch、按钮、反馈、进群
-  reader.ts        读者账号：解析群、按游标拉取新消息、摘要前刷新表情数和编辑、报错翻译
-  reader-client.ts 用 npm run login 保存的会话连上 Telegram（GramJS / MTProto）
-  engine.ts        每个群串行跑：摘要 → 发群 → 一轮 RSI；采用、否决、回退的公告
-  digest.ts        写摘要（窗口太长时分段再合并）、连续天数
-  prompts.ts       系统提示词 + 宪法、种子 playbook、各角色的任务
-  llm.ts           Claude 调用（结构化输出、流式、自适应思考、服务端 fallback、费用估算）
-  rsi/evolve.ts    RSI 循环、选择规则、试用期否决
-  rsi/judge.ts     正反两次的盲测对比
-  rsi/fitness.ts   代码检查：引用核验、热门讨论覆盖率
-  transcript.ts    消息 → 带编号的转写、热门讨论识别、时区
-  render.ts        Telegram HTML、分段、投票按钮
-  store.ts         SQLite（node:sqlite）
-  fake-llm.ts      测试和 --fake 用的替身模型
-  activity.ts      活动日志；把每个请求分成读 / 写 / 系统
-  probe.ts         加入之前只读查看一个群
-  denoise.ts       去噪：贴纸、闲聊、刷屏、诈骗；合并碎句；按对话分组
-  recording.ts     没有 bot 时把要发的消息留在控制台；记录 Claude 调用
-  mcp.ts           MCP 服务：Claude 桌面端读数据、写摘要
-  console/         本地控制台（127.0.0.1:4830）；crawler.js 是最上面的实时视图
-  invites.ts       私密群：邀请预览、确认加入、加入后的状态跟踪
-  invite-rules.ts  私密群的规则：提醒、配额、复查节奏、状态判断、验证消息识别
-  notify.ts        macOS 通知
-scripts/login.ts   读者账号登录（默认扫码；`--phone` 用手机号 + 登录码；两步验证密码由你本人输入；从不注册新账号）
-scripts/probe.ts   命令行版的只读查看（服务开着时请用控制台）
-scripts/autostart.ts  macOS 开机自启（launchd）
-scripts/replay.ts  离线回放
-docs/private-groups.md  私密群的设计、证据和第二阶段
-fixtures/          合成群聊 + 标注
-```
-
-## 诚实说明
-
-- **读者账号接过真 Telegram，bot 还没有**：
-  - 读者账号从 2026-10-05 起在一个真实账号上实跑。离线补齐经过几次真实断线、睡眠和重启，对账结果都是缺失 0；去噪、跟随群列表都实跑过。
-  - 私密群这条线只实测了预览邀请链接（一个失效链接），完整的加入流程还在等一个真实的邀请链接。
-  - Bot 一侧没有 bot token，只按 Bot API 文档写，测试用假 Telegram。
-- **读者账号有被 Telegram 限制或封号的风险**：程序只读（写操作在代码里直接拒绝）、低频（默认 2 分钟一轮），也不自动进群，但无法保证。用专用号还是自己的号，取舍见 [COOKBOOK.md](COOKBOOK.md) 第 0、13 步。
-- **没调过真 Claude API**：这里没有 API key（Claude 桌面端这条路，用 MCP 的 SDK 客户端实测过）。代码按 SDK 0.131 的类型写，类型检查通过。用到了结构化输出、流式、自适应思考、`fallbacks: "default"`（beta `server-side-fallback-2026-07-01`），这几项都没有实际调用过。提示词另外做过一次干跑：用 Claude 子代理代替 API，逐个回答真实请求文件。
-- **覆盖率靠回复链和对话爆发来识别「热门讨论」**：群里很少用「回复」的话，这个信号会弱一些。
-- **评审和写摘要的是同一类模型**，会有共同盲区。代码检查和读者投票能缓解，不能根除。
-- **评估窗口是最近几天，批评也来自这几天**，所以样本内外有重叠。数据攒多了以后，可以调大 `PULSE_RSI_EVAL_WINDOWS`。
-- 普通群（非超级群）没有消息链接；一个 token 只能跑一个实例（长轮询只允许一个消费者）。
+The last one replays a synthetic group chat offline, with no Telegram and no API key.
