@@ -3,9 +3,9 @@
 // It never joins, posts, reacts, or marks anything read.
 
 import { Api, type TelegramClient } from 'telegram';
-import { explain, parseRef } from './reader.ts';
+import { explain, FOLDER_LINK, parseRef } from './reader.ts';
 
-export type Verdict = 'read-from-outside' | 'member' | 'join-needed' | 'request-needed' | 'unsafe' | 'not-found';
+export type Verdict = 'read-from-outside' | 'member' | 'join-needed' | 'request-needed' | 'unsafe' | 'not-found' | 'folder-link';
 
 export interface ProbeResult {
   target: string;
@@ -39,7 +39,7 @@ export interface ProbeResult {
   linkedChatId?: number | null;
   about?: string;
   history?: { readable: boolean; error?: string; sampled: number; newest: number | null; people: number; botMessages: number; perDay: number | null };
-  invite?: { requestNeeded: boolean; previewUntil?: number };
+  invite?: { requestNeeded: boolean; previewUntil?: number; paid?: boolean };
 }
 
 const big = (x: unknown) => Number(String(x));
@@ -47,7 +47,8 @@ const channelId = (e: Api.Channel) => -(1_000_000_000_000 + big(e.id));
 const on = (o: object, names: string[]) => names.filter((n) => Boolean((o as Record<string, unknown>)[n]));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function channel(client: TelegramClient, target: string, e: Api.Channel, now: number): Promise<ProbeResult> {
+/** What the account can see of a group or channel it has the object of (the probe's details). */
+export async function probeChannel(client: TelegramClient, target: string, e: Api.Channel, now: number): Promise<ProbeResult> {
   const r: ProbeResult = {
     target,
     verdict: 'join-needed',
@@ -138,13 +139,14 @@ async function channel(client: TelegramClient, target: string, e: Api.Channel, n
 export async function probe(client: TelegramClient, target: string, now = Math.floor(Date.now() / 1000)): Promise<ProbeResult> {
   const ref = parseRef(target);
   if (!ref) return { target, verdict: 'not-found', summary: 'Not a @username, t.me link or invite link.' };
+  if (ref.kind === 'chatlist') return { target, verdict: 'folder-link', summary: FOLDER_LINK };
   try {
     if (ref.kind === 'invite') {
       // checkChatInvite only reads the invite: it does not join, and the group is not told.
       const inv = await client.invoke(new Api.messages.CheckChatInvite({ hash: ref.hash }));
-      if (inv instanceof Api.ChatInviteAlready && inv.chat instanceof Api.Channel) return channel(client, target, inv.chat, now);
+      if (inv instanceof Api.ChatInviteAlready && inv.chat instanceof Api.Channel) return probeChannel(client, target, inv.chat, now);
       if (inv instanceof Api.ChatInvitePeek && inv.chat instanceof Api.Channel) {
-        const r = await channel(client, target, inv.chat, now);
+        const r = await probeChannel(client, target, inv.chat, now);
         r.invite = { requestNeeded: false, previewUntil: inv.expires };
         return r;
       }
@@ -163,7 +165,7 @@ export async function probe(client: TelegramClient, target: string, now = Math.f
           member: false,
           flags: { verified: Boolean(inv.verified), scam: false, fake: false },
           about: (inv.about ?? '').slice(0, 400),
-          invite: { requestNeeded: Boolean(inv.requestNeeded) },
+          invite: { requestNeeded: Boolean(inv.requestNeeded), paid: Boolean(inv.subscriptionPricing) },
         };
       }
       return { target, verdict: 'member', summary: 'The account is already in this chat.' };
@@ -172,7 +174,7 @@ export async function probe(client: TelegramClient, target: string, now = Math.f
     if (!(e instanceof Api.Channel)) {
       return { target, verdict: 'not-found', summary: e instanceof Api.User ? 'That is a person, not a group or channel.' : 'Not a group or channel the account can see.' };
     }
-    return await channel(client, target, e, now);
+    return await probeChannel(client, target, e, now);
   } catch (err) {
     const e = explain(err);
     return { target, verdict: 'not-found', summary: e.message, error: e.message };

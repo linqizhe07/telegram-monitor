@@ -8,7 +8,7 @@ import { UpdateConnectionState } from 'telegram/network/index.js';
 import { StringSession } from 'telegram/sessions/index.js';
 import { classify, describeCall, describeTarget, type Activity } from './activity.ts';
 import type { Config } from './config.ts';
-import type { MtClient } from './reader.ts';
+import type { MembershipNotice, MtClient, MtEntity } from './reader.ts';
 
 export function newClient(config: Config, session = ''): TelegramClient {
   return new TelegramClient(new StringSession(session), config.telegramApiId!, config.telegramApiHash, {
@@ -27,10 +27,15 @@ export function newClient(config: Config, session = ''): TelegramClient {
   });
 }
 
+/** Never retried by the door itself: a lookup Telegram rations like a username lookup (see invites.ts). */
+const NO_RETRY = new Set(['messages.CheckChatInvite']);
+
 /**
  * The one door every request goes through: all GramJS helpers use `invoke`, file downloads use
  * `invokeWithSender`; only the connection handshake and keep-alive pings bypass it (they carry
  * nothing about any chat). At this door each request is
+ *  - refused if it is a write (join, leave, send, press a button, vote, mark read, open a bot
+ *    page, pay, or anything unknown): this build only reads, and that is enforced here, in code;
  *  - paced: an account-wide budget of about one request a second (Telegram's limits are not
  *    published; the last public figure was 30 history requests per 30 seconds);
  *  - held while Telegram has asked the account to wait (FLOOD_WAIT), for every chat at once;
@@ -40,7 +45,7 @@ export function superviseRequests(
   client: TelegramClient,
   activity: Activity,
   titleOf: (chatId: number) => string | null,
-  opts: { intervalMs?: number; burst?: number } = {},
+  opts: { intervalMs?: number; burst?: number; readOnly?: boolean } = {},
 ): { pausedUntil: () => number } {
   const interval = opts.intervalMs ?? 1100;
   let tokens = opts.burst ?? 5;
@@ -76,6 +81,18 @@ export function superviseRequests(
       const req = request as unknown as Record<string, unknown>;
       const kind = classify(request.className, req as { increment?: boolean });
       const target = describeTarget(req, titleOf);
+      if (kind === 'write' && (opts.readOnly ?? true)) {
+        activity.record({
+          actor: 'reader',
+          kind: 'error',
+          method: request.className,
+          target,
+          detail: 'blocked write: this build never joins, posts, presses, votes or marks anything read; nothing was sent',
+          ok: false,
+          ms: 0,
+        });
+        throw Object.assign(new Error(`WRITE_BLOCKED ${request.className}`), { errorMessage: 'WRITE_BLOCKED' });
+      }
       for (let attempt = 0; ; attempt++) {
         if (kind !== 'system') await turn();
         const started = Date.now();
@@ -91,7 +108,7 @@ export function superviseRequests(
             // Telegram asked this account to slow down: hold every request, not just this one.
             pausedUntil = Math.max(pausedUntil, Date.now() + wait * 1000 * 1.1 + 1000);
             activity.record({ actor: 'reader', kind: 'error', method: request.className, target, detail: `FLOOD_WAIT ${wait}s: Telegram asked the account to slow down; every request now waits until ${new Date(pausedUntil).toISOString()}`, ok: false, ms: Date.now() - started });
-            if (wait <= 60 && attempt === 0) continue; // short: wait it out once, then retry
+            if (wait <= 60 && attempt === 0 && !NO_RETRY.has(request.className)) continue; // short: wait it out once, then retry
             throw err;
           }
           activity.record({ actor: 'reader', kind, method: request.className, target, detail: code, ok: false, ms: Date.now() - started });
@@ -117,6 +134,8 @@ export interface ReaderConnection {
   raw: TelegramClient;
   name: string;
   id: string;
+  /** The account's @username (without @), if it has one. */
+  username: string | null;
   disconnect: () => Promise<void>;
   /** Drops the connection and opens a new one (when requests hang). */
   reconnect: () => Promise<void>;
@@ -124,8 +143,21 @@ export interface ReaderConnection {
   state: () => { state: ConnectionState; since: number };
   /** Until when (ms epoch) Telegram has asked the account to wait; 0 = not waiting. */
   pausedUntil: () => number;
-  /** Called when Telegram says the account joined, left or was removed from some chat. */
-  onMembershipNotice: (l: () => void) => void;
+  /** Called when Telegram says the account joined, left or was removed from some chat (or a chat it is in changed). */
+  onMembershipNotice: (l: (n: MembershipNotice) => void) => void;
+}
+
+/** The chat a membership notice is about (-100… for channels and supergroups, -id for basic groups). */
+export function membershipNoticeChat(update: unknown): number | null {
+  const channel = (id: unknown) => -(1_000_000_000_000 + Number(String(id)));
+  if (update instanceof Api.UpdateChannel) return channel(update.channelId);
+  if (update instanceof Api.UpdateChat) return -Number(String(update.chatId));
+  const m = update instanceof Api.UpdateNewMessage || update instanceof Api.UpdateNewChannelMessage ? update.message : null;
+  if (m instanceof Api.MessageService) {
+    if (m.peerId instanceof Api.PeerChannel) return channel(m.peerId.channelId);
+    if (m.peerId instanceof Api.PeerChat) return -Number(String(m.peerId.chatId));
+  }
+  return null;
 }
 
 /**
@@ -232,7 +264,7 @@ export async function connectReader(
     log(`reader: connection ${state === 'online' ? `back after ${now - was.since}s` : 'lost; retrying every 3s'}`);
     opts.activity?.event('reader', state === 'online' ? 'connection back' : 'connection lost', 'Telegram', state === 'online' ? `offline for ${now - was.since}s; catching up` : 'network unreachable or the server stopped answering; retrying', state === 'online');
   };
-  const membershipListeners = new Set<() => void>();
+  const membershipListeners = new Set<(n: MembershipNotice) => void>();
   const selfId = String(me.id);
   client.addEventHandler((update: unknown) => {
     if (update instanceof UpdateConnectionState) {
@@ -240,7 +272,18 @@ export async function connectReader(
       else setState('offline');
       return;
     }
-    if (isMembershipNotice(update, selfId)) for (const l of membershipListeners) l();
+    if (!isMembershipNotice(update, selfId)) return;
+    const chatId = membershipNoticeChat(update);
+    // GramJS attaches the chats that came with the update, keyed by the marked id (client/updates.js).
+    const bundled = (update as { _entities?: Map<string, unknown> })._entities;
+    const entity = chatId !== null ? ((bundled?.get(String(chatId)) as MtEntity | undefined) ?? null) : null;
+    for (const l of membershipListeners) {
+      try {
+        l({ chatId, entity });
+      } catch (err) {
+        log(`reader: membership notice: ${(err as Error).message}`);
+      }
+    }
   });
   let reconnecting: Promise<void> | null = null;
   return {
@@ -248,13 +291,14 @@ export async function connectReader(
     raw: client,
     name: me.username ? `@${me.username}` : ([me.firstName, me.lastName].filter(Boolean).join(' ') || String(me.id)),
     id: String(me.id),
+    username: me.username ?? null,
     disconnect: async () => {
       closing = true;
       await client.disconnect();
       lock.release();
     },
     pausedUntil: () => supervisor?.pausedUntil() ?? 0,
-    onMembershipNotice: (l: () => void) => {
+    onMembershipNotice: (l: (n: MembershipNotice) => void) => {
       membershipListeners.add(l);
     },
     reconnect: () => {

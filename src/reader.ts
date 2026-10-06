@@ -32,6 +32,19 @@ export interface MtEntity {
   megagroup?: boolean;
   broadcast?: boolean;
   participantsCount?: number;
+  verified?: boolean;
+  scam?: boolean;
+  fake?: boolean;
+  /** Joining needs an admin's approval. */
+  joinRequest?: boolean;
+}
+
+/** A button under a message, as far as the private-group flow reads it (labels; never pressed). */
+export interface MtButton {
+  className: string;
+  text?: string;
+  data?: Uint8Array;
+  url?: string;
 }
 
 export interface MtMessage {
@@ -55,6 +68,12 @@ export interface MtMessage {
     };
   };
   reactions?: { results?: { count?: number }[] };
+  /** The account was mentioned (or replied to) in this message. */
+  mentioned?: boolean;
+  entities?: { className: string; userId?: unknown }[];
+  replyMarkup?: { className: string; rows?: { buttons: MtButton[] }[] };
+  /** Posted by a person through an inline bot ("via @bot"). */
+  viaBotId?: unknown;
 }
 
 /** The part of a GramJS TelegramClient the reader uses. */
@@ -89,10 +108,13 @@ export interface SourceInfo {
 /** A problem worth showing to the person who asked (not a crash). */
 export class ReaderError extends Error {
   readonly retryAfter: number;
-  constructor(message: string, retryAfter = 0) {
+  /** Telegram's own error code (CHANNEL_PRIVATE, FLOOD_WAIT, …), when there was one. */
+  readonly code: string;
+  constructor(message: string, retryAfter = 0, code = '') {
     super(message);
     this.name = 'ReaderError';
     this.retryAfter = retryAfter;
+    this.code = code;
   }
 }
 
@@ -114,66 +136,91 @@ export function peerOf(e: MtEntity): string | null {
   return null;
 }
 
-export type Ref = { kind: 'username'; value: string } | { kind: 'id'; value: number } | { kind: 'invite'; hash: string };
+export type Ref =
+  | { kind: 'username'; value: string }
+  | { kind: 'id'; value: number }
+  | { kind: 'invite'; hash: string }
+  /** A folder link (t.me/addlist/…): a bundle of chats, opened only in the Telegram app. */
+  | { kind: 'chatlist'; slug: string };
 
-/** Accepts @name, name, t.me/name, https://t.me/name/123, a -100… id, or an invite link (t.me/+hash, t.me/joinchat/hash). */
+/**
+ * Accepts @name, name, t.me/name, https://t.me/name/123, a -100… id, an invite link (t.me/+hash,
+ * t.me/joinchat/hash, tg://join?invite=hash), a members-only message link (t.me/c/123/45), or a
+ * folder link (t.me/addlist/slug).
+ */
 export function parseRef(input: string): Ref | null {
-  let s = input.trim().replace(/^https?:\/\//i, '').replace(/^(www\.)?(t|telegram)\.me\//i, '');
-  const invite = /^(?:\+|joinchat\/)([A-Za-z0-9_-]{8,})/i.exec(s) ?? /^tg:\/\/join\?invite=([A-Za-z0-9_-]{8,})/i.exec(input.trim());
+  const raw = input.trim();
+  let s = raw.replace(/^https?:\/\//i, '').replace(/^(www\.)?(t|telegram)\.me\//i, '');
+  const invite = /^(?:\+|joinchat\/)([A-Za-z0-9_-]{8,})/i.exec(s) ?? /^tg:\/\/join\?invite=([A-Za-z0-9_-]{8,})/i.exec(raw);
   if (invite) return { kind: 'invite', hash: invite[1] };
   if (/^\+|^joinchat\//i.test(s)) return null;
+  const folder = /^addlist\/([A-Za-z0-9_-]+)/i.exec(s) ?? /^tg:\/\/addlist\?slug=([A-Za-z0-9_-]+)/i.exec(raw);
+  if (folder) return { kind: 'chatlist', slug: folder[1] };
+  const members = /^c\/(\d+)(?:[/?#]|$)/i.exec(s) ?? /^tg:\/\/privatepost\?channel=(\d+)/i.exec(raw);
+  if (members) return { kind: 'id', value: -(1_000_000_000_000 + Number(members[1])) };
   s = s.replace(/^@/, '').replace(/^s\//, '').replace(/[/?#].*$/, '');
   if (/^-?\d+$/.test(s)) return { kind: 'id', value: Number(s) };
   if (/^[A-Za-z][A-Za-z0-9_]{3,31}$/.test(s)) return { kind: 'username', value: s };
   return null;
 }
 
+export const FOLDER_LINK =
+  'This is a folder link (a bundle of chats). Open it in your Telegram app and add only the group you want; it then appears under Sources by itself. Nothing was looked up.';
+
 /** Turns Telegram's error codes into something the owner can act on. */
 export function explain(err: unknown): ReaderError {
   if (err instanceof ReaderError) return err;
   const e = err as { errorMessage?: string; message?: string; seconds?: number };
   const code = e.errorMessage ?? e.message ?? String(err);
+  const raw = /^[A-Z][A-Z0-9_]+$/.test(code) ? code : '';
+  const r = (message: string, retryAfter = 0) => new ReaderError(message, retryAfter, raw);
   if (typeof e.seconds === 'number' || /FLOOD_WAIT/.test(code)) {
     const s = e.seconds ?? Number(/FLOOD_WAIT_(\d+)/.exec(code)?.[1] ?? 60);
-    return new ReaderError(`Telegram asked the reader account to slow down for ${s}s`, s);
+    return new ReaderError(`Telegram asked the reader account to slow down for ${s}s`, s, 'FLOOD_WAIT');
+  }
+  if (/WRITE_BLOCKED/.test(code)) {
+    return new ReaderError('refused here: this build is read-only (it never joins, posts, presses buttons or marks anything read)', 0, 'WRITE_BLOCKED');
   }
   if (/FROZEN_METHOD_INVALID|FROZEN_PARTICIPANT_MISSING/.test(code)) {
-    return new ReaderError('Telegram has FROZEN the reader account: it can only appeal. Open Telegram on the phone and follow the appeal link it shows; do not retry from here');
+    return r('Telegram has FROZEN the reader account: it can only appeal. Open Telegram on the phone and follow the appeal link it shows; do not retry from here');
   }
   if (/USER_DEACTIVATED_BAN/.test(code)) {
-    return new ReaderError('Telegram BANNED the reader account. Logging in again will not help: appeal through recover@telegram.org or @SpamBot');
+    return r('Telegram BANNED the reader account. Logging in again will not help: appeal through recover@telegram.org or @SpamBot');
   }
   if (/AUTH_KEY_DUPLICATED/.test(code)) {
-    return new ReaderError('the reader session was used by two processes at once and Telegram revoked it: stop the other process (another `npm start` or `npm run probe`), then run `npm run login` again');
+    return r('the reader session was used by two processes at once and Telegram revoked it: stop the other process (another `npm start` or `npm run probe`), then run `npm run login` again');
   }
   if (/AUTH_KEY_UNREGISTERED|SESSION_REVOKED|SESSION_EXPIRED|USER_DEACTIVATED/.test(code)) {
-    return new ReaderError('the reader account session is no longer valid (logged out or terminated): run `npm run login` again');
+    return r('the reader account session is no longer valid (logged out or terminated): run `npm run login` again');
   }
   if (/PEER_FLOOD|USER_RESTRICTED/.test(code)) {
-    return new ReaderError('Telegram has limited the reader account (spam restriction): stop joining and contacting; check @SpamBot');
+    return r('Telegram has limited the reader account (spam restriction): stop joining and contacting; check @SpamBot');
   }
   if (/CHANNELS_TOO_MUCH/.test(code)) {
-    return new ReaderError('the reader account is in too many groups and channels (Telegram caps this): leave some first');
+    return r('the reader account is in too many groups and channels (Telegram caps this): leave some first');
   }
   if (/CHANNEL_PUBLIC_GROUP_NA/.test(code)) {
-    return new ReaderError('this public group is not available to the account (Telegram restricts it)');
+    return r('this public group is not available to the account (Telegram restricts it)');
+  }
+  if (/INVITE_HASH_EXPIRED|INVITE_HASH_INVALID|INVITE_HASH_EMPTY/.test(code)) {
+    return r('this invite link no longer works (expired, revoked or mistyped)');
   }
   if (/USERNAME_NOT_OCCUPIED|USERNAME_INVALID|No user has/i.test(code)) {
-    return new ReaderError('no public group or channel has that username');
+    return r('no public group or channel has that username');
   }
   if (/Cannot find any entity/i.test(code)) {
-    return new ReaderError('Telegram did not return that chat to this account (unknown name, or not visible to it)');
+    return r('Telegram did not return that chat to this account (unknown name, or not visible to it)');
   }
   if (/CHANNEL_PRIVATE/.test(code)) {
-    return new ReaderError('the account cannot see this chat: for a private group it must join first; for a PUBLIC group this usually means the account was banned from it (joining again will not help)');
+    return r('the account cannot see this chat: for a private group it must join first; for a PUBLIC group this usually means the account was banned from it (joining again will not help)');
   }
   if (/CHANNEL_INVALID|PEER_ID_INVALID/.test(code)) {
-    return new ReaderError('the saved address of this chat no longer works; it will be looked up again on the next read');
+    return r('the saved address of this chat no longer works; it will be looked up again on the next read');
   }
   if (/CHAT_FORBIDDEN/.test(code)) {
-    return new ReaderError('the account is not allowed in this chat (removed or never a member)');
+    return r('the account is not allowed in this chat (removed or never a member)');
   }
-  return new ReaderError(code.slice(0, 200));
+  return r(code.slice(0, 200));
 }
 
 const duration = (s: number) => `${Math.floor(s / 60)}:${String(Math.round(s) % 60).padStart(2, '0')}`;
@@ -302,9 +349,36 @@ export interface ReaderDeps {
     /** Where their digests go. */
     reportTo: number | null;
     defaults: ChatDefaults;
-    /** How often to re-check the chat list even without a membership notice (default 10 min). */
+    /**
+     * How often to re-check the chat list even without a membership notice (default 1 hour).
+     * Loading the chat list again and again is what Telegram punishes with the longest waits, so
+     * joins are picked up from Telegram's own notices instead, and this is only the safety net.
+     */
     everyMs?: number;
+    /** The shortest gap between two checks a notice triggers (default 1 minute). */
+    noticeGapMs?: number;
+    /** Told what each check found; `first` is the first check after start (the whole backlog). */
+    onReconciled?: (r: Reconciled, first: boolean) => void;
   };
+  /** Every history page fetched, before it is stored (the private-group flow looks for checks addressed to the account). */
+  onBatch?: (chatId: number, batch: MtMessage[]) => void;
+  /** A pull failed because the account cannot see the chat any more (CHANNEL_PRIVATE / CHAT_FORBIDDEN). */
+  onAccessLost?: (chatId: number, err: ReaderError) => Promise<void>;
+}
+
+/** What one chat-list check changed: chats new to the list, sources the account left, and ones it came back to. */
+export interface Reconciled {
+  added: SourceInfo[];
+  left: ChatRow[];
+  back: SourceInfo[];
+}
+
+/** A notice that something about the account's own membership changed, with what Telegram sent along. */
+export interface MembershipNotice {
+  /** The chat it is about (-100… / -id), when the notice names one. */
+  chatId: number | null;
+  /** The chat object Telegram bundled with the notice, if any (it can be a "min" copy: a hint, not proof). */
+  entity: MtEntity | null;
 }
 
 /** Rejects with a ReaderError if `p` takes longer than `ms`. */
@@ -323,6 +397,28 @@ const PAGE = 100;
 // and the next pull continues from it (a busy group passed 8,000 messages a day on 2026-10-05).
 const MAX_PAGES_PER_PULL = 100;
 
+/**
+ * What a source is, from the chat object Telegram returned. Refuses people, and chats Telegram
+ * restricts for every client (those are not read at all).
+ */
+export function toSourceInfo(e: MtEntity): SourceInfo {
+  if (e.className === 'User') throw new ReaderError('that is a person, not a group or channel');
+  const everywhere = (e.restrictionReason ?? []).filter((r) => r.platform === 'all');
+  if (everywhere.length) {
+    throw new ReaderError(`Telegram restricts this chat for every client (${everywhere.map((r) => r.reason).join(', ')}: ${everywhere[0].text.slice(0, 120)}); it is not read`);
+  }
+  const chatId = chatIdOf(e);
+  return {
+    chatId,
+    title: e.title ?? String(chatId),
+    username: e.username ?? null,
+    type: e.className === 'Channel' ? (e.broadcast ? 'channel' : 'supergroup') : 'group',
+    ref: e.username ? `@${e.username}` : String(chatId),
+    members: e.participantsCount ?? null,
+    peer: peerOf(e),
+  };
+}
+
 export class Reader {
   private readonly deps: ReaderDeps;
   private readonly entities = new Map<number, MtEntity>();
@@ -335,8 +431,9 @@ export class Reader {
   async resolve(input: string): Promise<SourceInfo> {
     const ref = parseRef(input);
     if (ref?.kind === 'invite') {
-      throw new ReaderError('an invite link cannot be watched directly: join the group with the reader account in the Telegram app, then watch it by its name');
+      throw new ReaderError('an invite link cannot be watched directly: check it first (the console shows how to join it in your Telegram app)');
     }
+    if (ref?.kind === 'chatlist') throw new ReaderError(FOLDER_LINK);
     if (!ref) return this.info(await this.byTitle(input));
     if (ref.kind === 'id') return this.info(await this.byId(ref.value).catch((err) => Promise.reject(explain(err))));
     try {
@@ -402,8 +499,11 @@ export class Reader {
   }
 
   private lastReconcile = 0;
+  private reconcileCount = 0;
   private reconcileTimer: ReturnType<typeof setTimeout> | null = null;
-  private reconciling: Promise<{ added: SourceInfo[]; left: ChatRow[] }> | null = null;
+  private reconciling: Promise<Reconciled> | null = null;
+  /** Chats a notice already sent to a chat-list check, and when (so one chat cannot keep triggering it). */
+  private readonly noticed = new Map<number, number>();
 
   /**
    * Brings the sources in line with the account's chat list:
@@ -413,21 +513,22 @@ export class Reader {
    *    removed); joining it again switches it back on, unless the owner switched it off by hand;
    *  - an owner's on/off choice is never overridden, and renames are picked up.
    */
-  reconcile(): Promise<{ added: SourceInfo[]; left: ChatRow[] }> {
+  reconcile(): Promise<Reconciled> {
     this.reconciling ??= this.reconcileOnce().finally(() => {
       this.reconciling = null;
     });
     return this.reconciling;
   }
 
-  private async reconcileOnce(): Promise<{ added: SourceInfo[]; left: ChatRow[] }> {
+  private async reconcileOnce(): Promise<Reconciled> {
     const d = this.deps.discovery;
     const { store, activity } = this.deps;
-    if (!d) return { added: [], left: [] };
+    if (!d) return { added: [], left: [], back: [] };
     this.lastReconcile = Date.now();
     const { chats, complete, skipped } = await this.membership();
     const added: SourceInfo[] = [];
     const left: ChatRow[] = [];
+    const back: SourceInfo[] = [];
     const inList = new Set(chats.map((c) => c.chatId));
     for (const c of chats) {
       const row = store.getChat(c.chatId);
@@ -460,6 +561,7 @@ export class Reader {
         store.updateChat(c.chatId, { enabled: true, readerError: null });
         store.setKv(`reader_off_reason:${c.chatId}`, '');
         store.setKv(`reader_floor:${c.chatId}`, String(this.deps.now() - 86_400));
+        back.push(c);
         activity?.event('reader', 'rejoined', c.title, 'the account is back in this chat: reading again (from up to 24 hours back)');
       }
     }
@@ -481,18 +583,54 @@ export class Reader {
     for (const c of added) {
       if (store.getChat(c.chatId)?.enabled) void this.pull(store.getChat(c.chatId)!).catch(() => undefined); // its first 24 hours, now
     }
-    return { added, left };
+    try {
+      d.onReconciled?.({ added, left, back }, this.reconcileCount === 0);
+    } catch (err) {
+      this.deps.log(`reader: after the chat list check: ${(err as Error).message}`);
+    }
+    this.reconcileCount++;
+    return { added, left, back };
   }
 
   /** A membership notice arrived (joined, left, removed): re-check the chat list shortly. */
   reconcileSoon(): void {
     if (!this.deps.discovery || this.reconcileTimer) return;
-    const wait = Math.max(3_000, 60_000 - (Date.now() - this.lastReconcile)); // at most once a minute
+    const gap = this.deps.discovery.noticeGapMs ?? 60_000;
+    const wait = Math.max(Math.min(3_000, gap), gap - (Date.now() - this.lastReconcile)); // at most once a minute
     this.reconcileTimer = setTimeout(() => {
       this.reconcileTimer = null;
       void this.reconcile().catch((err) => this.deps.log(`reader: chat list check failed: ${(err as Error).message}`));
     }, wait);
     this.reconcileTimer.unref?.();
+  }
+
+  /**
+   * Telegram said something changed about the account's membership somewhere. Telegram sends
+   * these for routine changes too (a group's photo, its title), so the chat list is only loaded
+   * when the notice can mean a join, a leave or a removal:
+   *  - a chat that is not a source yet (most likely just joined);
+   *  - a source the notice shows the account is no longer in (left, kicked, banned);
+   *  - a source that was off because the account had left, and that it is now in again;
+   *  - a notice that names no chat, or a source with no chat object bundled (cannot tell).
+   * The same chat triggers at most one check an hour; the hourly check covers anything missed.
+   */
+  membershipNotice(n: MembershipNotice): void {
+    const { store } = this.deps;
+    if (!this.deps.discovery) return;
+    if (n.chatId === null) return this.reconcileSoon();
+    const row = store.getChat(n.chatId);
+    const e = n.entity;
+    const gone = Boolean(e && (e.className === 'ChannelForbidden' || e.className === 'ChatForbidden' || e.left || e.deactivated));
+    let why: string | null = null;
+    if (!row || row.kind !== 'watched') why = gone ? null : 'a chat that is not a source yet';
+    else if (gone) why = row.readerOrigin === 'dialog' && row.enabled ? 'the account may have left or been removed' : null;
+    else if (!row.enabled && store.getKv(`reader_off_reason:${n.chatId}`) === 'left') why = 'the account may be back in it';
+    else if (!e) why = row.readerOrigin === 'dialog' ? 'no details came with the notice' : null;
+    if (!why) return;
+    const last = this.noticed.get(n.chatId) ?? 0;
+    if (Date.now() - last < 3_600_000) return;
+    this.noticed.set(n.chatId, Date.now());
+    this.reconcileSoon();
   }
 
   /** By id: works for chats GramJS has seen; after a restart, loading the chat list teaches it the private ones. */
@@ -506,22 +644,9 @@ export class Reader {
   }
 
   private info(e: MtEntity): SourceInfo {
-    if (e.className === 'User') throw new ReaderError('that is a person, not a group or channel');
-    const everywhere = (e.restrictionReason ?? []).filter((r) => r.platform === 'all');
-    if (everywhere.length) {
-      throw new ReaderError(`Telegram restricts this chat for every client (${everywhere.map((r) => r.reason).join(', ')}: ${everywhere[0].text.slice(0, 120)}); it is not read`);
-    }
-    const chatId = chatIdOf(e);
-    this.entities.set(chatId, e);
-    return {
-      chatId,
-      title: e.title ?? String(chatId),
-      username: e.username ?? null,
-      type: e.className === 'Channel' ? (e.broadcast ? 'channel' : 'supergroup') : 'group',
-      ref: e.username ? `@${e.username}` : String(chatId),
-      members: e.participantsCount ?? null,
-      peer: peerOf(e),
-    };
+    const info = toSourceInfo(e);
+    this.entities.set(info.chatId, e);
+    return info;
   }
 
   private async entity(chat: ChatRow): Promise<MtEntity> {
@@ -647,6 +772,11 @@ export class Reader {
       if (batch.length === 0) {
         caughtUp = true;
         break;
+      }
+      try {
+        this.deps.onBatch?.(chatId, batch);
+      } catch {
+        // looking for checks addressed to the account must never stop the capture
       }
       const last = batch[batch.length - 1];
       if (epoch !== this.epoch) throw new ReaderError('pull abandoned: the connection was replaced while it was waiting');
@@ -792,8 +922,8 @@ export class Reader {
     const loop = async () => {
       while (!stopped) {
         let retrySoon = false;
-        // The chat list: on the first round, then every 10 minutes (joins also trigger it sooner).
-        if (this.deps.discovery && Date.now() - this.lastReconcile >= (this.deps.discovery.everyMs ?? 600_000)) {
+        // The chat list: on the first round, then hourly (Telegram's notices of a join trigger it sooner).
+        if (this.deps.discovery && Date.now() - this.lastReconcile >= (this.deps.discovery.everyMs ?? 3_600_000)) {
           await withTimeout(this.reconcile(), 120_000, 'checking the chat list').catch((err) => log(`reader: chat list check failed: ${(err as Error).message}`));
         }
         for (const chat of store.listChats(true).filter((c) => c.kind === 'watched')) {
@@ -810,6 +940,7 @@ export class Reader {
             store.updateChat(chat.chatId, { readerError: e.message.slice(0, 300) });
             log(`reader: ${chat.title}: ${e.message}`);
             this.deps.activity?.event('reader', 'pull failed', chat.title, e.message, false);
+            if (/^(CHANNEL_PRIVATE|CHAT_FORBIDDEN)$/.test(e.code)) await this.deps.onAccessLost?.(chat.chatId, e).catch(() => undefined);
             if (e.retryAfter) await sleep(e.retryAfter * 1000);
             else if (/took longer than|Not connected|disconnected|TIMEOUT/i.test(e.message) && this.deps.reconnect) {
               // The watchdog: a hung request means a dead connection; open a new one (at most once a minute).

@@ -120,3 +120,18 @@ test('a chat Telegram restricts for every client is refused, not read', async ()
   const reader = new Reader({ client, store, config: testConfig(), log: () => undefined, now: () => T0 });
   await assert.rejects(reader.resolve('@somegroup'), /restricts this chat for every client \(porn/);
 });
+
+test('an invite check is never retried by the door (a flood there pauses invite checks instead); history still is', async () => {
+  const store = memoryStore(new Clock());
+  const sent: string[] = [];
+  const { client } = fakeGram(async (req) => {
+    sent.push(req.className);
+    if (sent.filter((c) => c === req.className).length === 1) throw Object.assign(new Error('FLOOD_WAIT_1'), { errorMessage: 'FLOOD_WAIT', seconds: 1 });
+    return { messages: [] };
+  });
+  superviseRequests(client, new Activity(store), () => null, { intervalMs: 1, burst: 10 });
+  await assert.rejects(client.invoke({ className: 'messages.CheckChatInvite' }), (e: { seconds?: number }) => e.seconds === 1);
+  assert.deepEqual(sent, ['messages.CheckChatInvite'], 'one request, no retry');
+  await client.invoke({ className: 'messages.GetHistory' });
+  assert.deepEqual(sent, ['messages.CheckChatInvite', 'messages.GetHistory', 'messages.GetHistory'], 'a history read still waits and retries once');
+});

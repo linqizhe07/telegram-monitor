@@ -22,6 +22,11 @@ test('requests are sorted into reads, writes and upkeep; anything unknown counts
   assert.equal(classify('updates.GetState'), 'system');
   assert.equal(classify('InvokeWithLayer'), 'system');
   assert.equal(classify('payments.SomethingNew'), 'write');
+  assert.equal(classify('payments.GetPaymentForm'), 'write', 'nothing about payments is a plain read here');
+  assert.equal(classify('help.GetAppConfig'), 'read', 'paced and recorded, not hidden as upkeep');
+  assert.equal(classify('updates.GetChannelDifference'), 'read');
+  assert.equal(classify('messages.RequestWebView'), 'write');
+  assert.equal(classify('chatlists.JoinChatlistInvite'), 'write');
 
   const titles = (id: number) => (id === -1001136071376 ? '币安官方中文群' : null);
   assert.equal(describeTarget({ peer: { className: 'InputPeerChannel', channelId: '1136071376' } }, titles), '币安官方中文群');
@@ -182,4 +187,42 @@ test('clearing storage deletes what was collected and keeps sources, switches an
   store.clearStored({ activity: true });
   assert.equal(store.storageCounts().messages, 1);
   assert.equal(store.storageCounts().activity, 0);
+});
+
+test('two tokens: the page can do everything; local tools (Claude) only the actions their tools use', async (t) => {
+  const { mkdtempSync, readFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const clock = new Clock();
+  const store = memoryStore(clock);
+  const activity = new Activity(store);
+  const config = testConfig({ reportTo: 700000001 });
+  const handoffFile = join(mkdtempSync(join(tmpdir(), 'pulse-console-')), 'console.json');
+  const server = new ConsoleServer({ store, activity, config, port: 0, now: clock.now, log: () => undefined, startedAt: clock.now(), account: null, reader: null, bot: null, claude: { ready: false, model: config.model }, handoffFile });
+  try {
+    await server.start();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EPERM') return t.skip('this sandbox does not allow listening on a local port');
+    throw err;
+  }
+  const port = Number(new URL(server.url).port);
+  try {
+    const page = await call(port, '/');
+    const pageToken = /name="console-token" content="([^"]+)"/.exec(page.body)![1];
+    const toolToken = (JSON.parse(readFileSync(handoffFile, 'utf8')) as { token: string }).token;
+    assert.notEqual(pageToken, toolToken);
+    assert.ok(!page.body.includes(toolToken), 'the page never carries the tool token');
+    const post = (path: string, token: string, body = '{}') => call(port, path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-console-token': token }, body });
+    for (const path of ['/api/invite/confirm', '/api/invite/recheck', '/api/invite/dismiss', '/api/membership/check', '/api/digest', '/api/settings', '/api/clear', '/api/unwatch', '/api/notify-test']) {
+      assert.equal((await post(path, toolToken)).status, 403, `${path}: not for local tools`);
+      assert.notEqual((await post(path, pageToken)).status, 403, `${path}: the page may`);
+    }
+    for (const path of ['/api/probe', '/api/watch', '/api/pull', '/api/audit', '/api/toggle', '/api/refresh']) {
+      assert.notEqual((await post(path, toolToken, '{"target":"@x","chatId":1}')).status, 403, `${path}: what Claude's tools call`);
+    }
+    const state = JSON.parse((await call(port, '/api/state')).body);
+    assert.equal(state.privateGroups, null, 'no reader account: no private-group state');
+  } finally {
+    await server.stop();
+  }
 });

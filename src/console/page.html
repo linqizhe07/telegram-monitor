@@ -17,10 +17,14 @@
       <p class="sub">Console · this computer only (127.0.0.1)</p>
     </div>
   </div>
-  <div class="live" id="live"><span class="dot"></span><span id="live-text">connecting…</span></div>
+  <div class="top-right">
+    <button class="btn" id="notify-test" title="Shows a macOS notification (nothing is sent to Telegram)" hidden>Send test notification</button>
+    <div class="live" id="live"><span class="dot"></span><span id="live-text">connecting…</span></div>
+  </div>
 </header>
 
 <main>
+  <div id="verify-banner" role="alert" hidden></div>
   <section class="cards" id="cards" aria-label="Status"></section>
 
   <section class="panel" aria-labelledby="sources-h">
@@ -30,16 +34,22 @@
         <label class="switch-label" title="Groups and channels you join in Telegram show up here by themselves">
           <input type="checkbox" role="switch" id="auto-watch"> Read new groups I join automatically
         </label>
-        <button class="btn" id="refresh-list" title="Check the account's chat list now (it also runs every 10 minutes and right after you join a group)">Refresh from Telegram</button>
+        <button class="btn" id="refresh-list" title="Check the account's chat list now (it also runs every hour, and soon after you join a group)">Refresh from Telegram</button>
       </div>
     </div>
-    <p class="hint">Everything the account is in shows up here on its own, and new groups appear within seconds of joining. Each one has its own switch. Reading from outside means the account never joined.</p>
+    <p class="hint">Everything the account is in shows up here on its own, and new groups appear within about a minute of joining. Each one has its own switch. Reading from outside means the account never joined. For a private group, paste its invite link below: you join in your Telegram app, this page only looks.</p>
     <div class="table-wrap"><table class="sources" id="sources"></table></div>
     <form class="add" id="add-form" autocomplete="off">
       <input id="add-input" placeholder="@username, t.me link, or invite link" aria-label="Group or channel to check">
       <button type="submit" id="probe-btn">Check (read-only)</button>
     </form>
     <div id="probe-result" hidden></div>
+    <div class="invites" id="invites" hidden>
+      <h3>Private groups (invite links)</h3>
+      <p class="hint">You join in your Telegram app; this page only looks. Paste an invite link above to start.</p>
+      <ol id="invite-list"></ol>
+      <p class="hint" id="invite-budget"></p>
+    </div>
   </section>
 
   <div class="split">

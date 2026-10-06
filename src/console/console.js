@@ -107,6 +107,35 @@ const METHODS = {
   reconnect: 'reconnect',
   recovered: 'RECOVERED missed messages',
   'was off': 'service was off',
+  'channels.GetParticipant': 'read own membership',
+  'messages.GetChats': 'read group info',
+  'invite previewed': 'looked at an invite (no join)',
+  'opened invite link': 'opened an invite in Telegram',
+  'owner says joined': 'you said: joined',
+  'owner says requested': 'you said: request sent',
+  'stopped tracking': 'stopped tracking an invite',
+  'not a member yet': 'not a member yet',
+  'request pending': 'join request still pending',
+  'request not answered': 'join request: no answer in 14 days',
+  'invite link dead': 'invite link no longer works',
+  'invite check deferred': 'invite check deferred (rationed)',
+  'invite checks paused': 'invite checks PAUSED',
+  'invite checks stopped': 'invite checks STOPPED',
+  membership: 'joined: standing read',
+  'history hidden': 'history before your join is hidden',
+  'verification in progress': 'VERIFICATION waiting: answer it in Telegram',
+  'verification over': 'verification over',
+  muted: 'still cannot send (reading works)',
+  removed: 'REMOVED from a group: reading stopped',
+  banned: 'BANNED from a group',
+  'ban over': 'ban over: reading again',
+  approved: 'notification: join approved',
+  verifying: 'notification: verification waiting',
+  paused: 'notification: invite checks paused',
+  test: 'test notification',
+  'notification failed': 'notification failed',
+  'notification shown': 'macOS notification',
+  'internal error': 'internal error',
 };
 const KIND = {
   read: ['READ', 'read'],
@@ -183,9 +212,16 @@ function renderSources(s) {
     const bots = src.bots || [];
     for (const b of bots.slice(0, 4)) guards.push(el('span', { class: 'chip', text: b }));
     if (bots.length > 4) guards.push(el('span', { class: 'chip', text: `+${bots.length - 4} more`, title: bots.slice(4).join('  ') }));
-    const OFF = { owner: 'switched off', left: 'you left it in Telegram', 'auto-watch off': 'new; auto-read is off' };
+    const OFF = { owner: 'switched off', left: 'you left it in Telegram', 'auto-watch off': 'new; auto-read is off', banned: 'banned' };
+    const standing = ((s.privateGroups && s.privateGroups.memberships) || []).find((m) => m.chatId === src.chatId);
     const status = !src.enabled
-      ? el('span', { class: 'pill muted', text: OFF[src.offReason] || 'off', title: src.error || '' })
+      ? (src.offReason === 'left' || src.offReason === 'banned') && src.error
+        ? el('span', { class: 'pill bad', text: src.error, title: src.error })
+        : el('span', { class: 'pill muted', text: OFF[src.offReason] || 'off', title: src.error || '' })
+      : standing && standing.state === 'verifying'
+        ? el('span', { class: 'pill warn', text: 'check waiting in your Telegram app' })
+      : standing && standing.state === 'muted'
+        ? el('span', { class: 'pill muted', text: 'muted (reading works)' })
       : src.error
         ? el('span', { class: 'pill bad', text: src.error, title: src.error })
         : src.behind
@@ -261,9 +297,168 @@ const VERDICT = {
   'request-needed': ['Must request to join', 'warn'],
   unsafe: ['Marked scam / fake', 'bad'],
   'not-found': ['Not found', 'bad'],
+  'folder-link': ['Folder link', 'warn'],
 };
 
+// ── private groups (invite links) ──────────────────────────────────────────
+
+const INVITE_VERDICT = {
+  member: ['Already a member', 'read'],
+  join: ['Private: join in your Telegram app', 'warn'],
+  request: ['Private: admin approval needed', 'warn'],
+  peek: ['Readable without joining, for now', 'ok'],
+  paid: ['Paid: Stars subscription', 'bad'],
+  refused: ['Marked SCAM / FAKE', 'bad'],
+  dead: ['Link no longer works', 'bad'],
+};
+const INVITE_STATE = {
+  previewed: ['previewed', 'muted'],
+  'owner-opened': ['opened in Telegram', 'muted'],
+  requested: ['request pending', 'warn'],
+  joined: ['joined: checking', 'read'],
+  verifying: ['check waiting in Telegram', 'warn'],
+  watching: ['in · reading', 'ok'],
+  removed: ['removed', 'bad'],
+  'no-answer': ['no answer (14 days)', 'muted'],
+  'link-dead': ['link dead', 'bad'],
+  refused: ['scam / fake', 'bad'],
+  dismissed: ['not tracked', 'muted'],
+  expired: ['expired', 'muted'],
+};
+const WARN_LABEL = { stop: 'Stop', caution: 'Careful', info: 'Note' };
+
+async function inviteAction(button, path, body, done) {
+  button.disabled = true;
+  try {
+    const r = await api(path, body);
+    if (r && r.error) toast(r.error);
+    else if (r && r.message) toast(r.message);
+    else if (r && r.note) toast(r.note);
+    if (done) done(r);
+    await refresh();
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/** The buttons for an invite, by where it stands. Only the one check, never a join. */
+function inviteButtons(inv, onDone) {
+  const out = [];
+  const opened = () => api('/api/invite/opened', { id: inv.id }).then(() => refresh()).catch(() => undefined);
+  if (inv.links && !['watching', 'verifying', 'joined', 'removed'].includes(inv.state)) {
+    out.push(
+      el('a', { class: 'btn primary', href: inv.links.tg, text: 'Open in Telegram', title: 'Opens the official Telegram app at this invite', onclick: opened }),
+      el('a', { class: 'btn', href: inv.links.tme, target: '_blank', rel: 'noopener noreferrer', text: 'Open t.me link', onclick: opened }),
+      el('button', { class: 'btn', text: 'Copy link', onclick: () => navigator.clipboard.writeText(inv.links.tme).then(() => toast('Link copied: open it on your phone if you prefer.'), () => toast(inv.links.tme)) }),
+    );
+  }
+  // A dead link cannot confirm anything: if the account did join, the chat-list check finds the group.
+  const waiting = ['previewed', 'owner-opened', 'no-answer'].includes(inv.state) || (inv.state === 'link-dead' && inv.said);
+  if (inv.verdict === 'member' && inv.state === 'previewed' && inv.links) {
+    out.push(el('button', { class: 'btn primary', text: 'Read it', onclick: (e) => inviteAction(e.target, '/api/watch', { target: inv.links.tme }, onDone) }));
+  } else if (waiting && inv.verdict !== 'refused' && inv.verdict !== 'dead') {
+    out.push(
+      el('button', { class: `btn ${inv.verdict === 'request' ? '' : 'primary'}`, text: "I've joined", onclick: (e) => inviteAction(e.target, '/api/invite/confirm', { id: inv.id, said: 'joined' }, onDone) }),
+      el('button', { class: `btn ${inv.verdict === 'request' ? 'primary' : ''}`, text: "I've sent a join request", onclick: (e) => inviteAction(e.target, '/api/invite/confirm', { id: inv.id, said: 'requested' }, onDone) }),
+    );
+  }
+  if (inv.state === 'requested' || inv.state === 'no-answer') out.push(el('button', { class: 'btn', text: 'Check now', title: 'One invite check (rationed)', onclick: (e) => inviteAction(e.target, '/api/invite/recheck', { id: inv.id }) }));
+  if (!['dismissed', 'expired', 'refused', 'watching', 'verifying', 'removed', 'link-dead', 'no-answer'].includes(inv.state)) {
+    out.push(el('button', { class: 'btn', text: inv.state === 'requested' ? 'Stop tracking' : 'Not now', onclick: (e) => inviteAction(e.target, '/api/invite/dismiss', { id: inv.id }, onDone) }));
+  }
+  return out;
+}
+
+function warningList(warnings) {
+  return el('ul', { class: 'warns' }, warnings.map((w) => el('li', { class: w.level, title: w.evidence.length ? `Evidence: ${w.evidence.join(', ')} (docs/private-groups.md)` : '' }, el('b', { text: WARN_LABEL[w.level] || w.level }), w.text)));
+}
+
+function budgetLine(b) {
+  if (!b) return '';
+  return `Invite checks in the last 24 hours: ${b.used24h} of ${b.perDay} (rationed: Telegram limits link lookups the way it limits username lookups)${b.frozenUntil ? ` · PAUSED until ${fmtDateTime(b.frozenUntil)}: Telegram asked the account to slow down` : ''}.`;
+}
+
+function renderInviteCard(r) {
+  const inv = r.invite;
+  const box = $('probe-result');
+  box.hidden = false;
+  const [label, cls] = INVITE_VERDICT[inv.verdict] || [inv.verdict, 'muted'];
+  const rows = [];
+  const add = (k, v) => v !== undefined && v !== null && v !== '' && rows.push(el('dt', { text: k }), el('dd', { text: String(v) }));
+  if (inv.verdict !== 'dead') {
+    add('Title', inv.title);
+    add('Type', inv.kind);
+    add('Members', inv.members ? n(inv.members) : null);
+    add('About', inv.about);
+    add('Telegram flags', [inv.flags.verified && 'verified', inv.flags.scam && 'SCAM', inv.flags.fake && 'FAKE', inv.flags.paid && 'paid', inv.flags.requestNeeded && 'join approval'].filter(Boolean).join(', ') || 'none');
+  }
+  if (r.history) add('Readable now', r.history.readable ? `yes · ~${n(r.history.perDay)} messages/day` : 'no');
+  if (r.bots && r.bots.length) add('Bots in the group', r.bots.join('  '));
+  box.replaceChildren(
+    el('div', { class: 'invite-card' },
+      el('div', { class: 'invite-head' }, el('span', { class: `pill ${cls}`, text: label }), el('span', { class: 'title', text: inv.title || 'Invite' }), el('span', { class: 'src-ref', text: `invite ${inv.hashTail}` })),
+      el('div', { class: 'inv-note', text: inv.note }),
+      el('dl', { class: 'kv' }, rows),
+      warningList(inv.warnings),
+      el('div', { class: 'links' }, inviteButtons(inv, () => ($('probe-result').hidden = true))),
+      el('div', { class: 'footnote', text: 'You join in your Telegram app. This page never joins, never answers a check, and never presses anything in Telegram. When you say you\'re in, it looks once.' }),
+      el('div', { class: 'footnote', text: budgetLine(state && state.privateGroups && state.privateGroups.budget) })));
+}
+
+function renderInvites(s) {
+  const pg = s.privateGroups;
+  const box = $('invites');
+  const list = (pg && pg.invites) || [];
+  box.hidden = !pg || list.length === 0;
+  if (!pg) return;
+  $('invite-budget').textContent = budgetLine(pg.budget);
+  const focus = /^#invite-(\d+)$/.exec(location.hash);
+  $('invite-list').replaceChildren(...list.map((inv) => {
+    const [label, cls] = INVITE_STATE[inv.state] || [inv.state, 'muted'];
+    const age = inv.state === 'requested' && inv.saidAt ? `request sent ${ago(inv.saidAt)}` : inv.joinedAt ? `in since ${fmtDateTime(inv.joinedAt)}` : `added ${ago(inv.createdAt)}`;
+    const next = inv.nextCheckAt && ['requested', 'owner-opened', 'previewed', 'link-dead'].includes(inv.state) ? ` · next check ${until(inv.nextCheckAt)}` : '';
+    const li = el('li', { id: `invite-${inv.id}`, class: focus && Number(focus[1]) === inv.id ? 'focus' : '' },
+      el('div', { class: 'inv-row' }, el('span', { class: `pill ${cls}`, text: inv.checking ? 'checking…' : label }), el('span', { class: 'title', text: inv.title || 'Invite' }), el('span', { class: 'src-ref', text: `${age}${next} · invite ${inv.hashTail}` })),
+      el('div', { class: 'inv-note', text: inv.note }),
+      inv.state === 'requested' ? el('div', { class: 'footnote', text: 'Telegram has no way to withdraw a request. If the group\'s bot wants something first, it messages you in Telegram within a few minutes of the request.' }) : null,
+      el('div', { class: 'links' }, inviteButtons(inv)),
+      inv.warnings.length && ['previewed', 'owner-opened'].includes(inv.state) ? el('details', { class: 'inv-more' }, el('summary', { text: `Before joining (${inv.warnings.length} notes)` }), warningList(inv.warnings)) : null);
+    return li;
+  }));
+  if (focus && !renderInvites.scrolled) {
+    renderInvites.scrolled = true;
+    document.getElementById(`invite-${focus[1]}`)?.scrollIntoView({ block: 'center' });
+  }
+}
+
+function renderBanner(s) {
+  const banner = $('verify-banner');
+  const held = ((s.privateGroups && s.privateGroups.memberships) || []).filter((m) => m.state === 'verifying');
+  banner.hidden = held.length === 0;
+  banner.replaceChildren(...held.map((m) => el('section', { class: 'verify' },
+    el('h3', { text: `Verification in progress in «${m.title}»: answer it in your Telegram app.` }),
+    el('div', { class: 'sub', text: m.cause === 'restricted' ? 'Telegram shows this account as restricted there (it cannot send messages yet).' : 'A bot addressed you there right after you joined.' }),
+    m.priors ? el('div', { class: 'sub', text: `Usual timing for this bot: ${m.priors}.` }) : null,
+    m.hints.length ? el('ul', { class: 'hints' }, m.hints.map((h) => el('li', {},
+      el('div', { class: 'from', text: `From ${h.sender.username ? `@${h.sender.username}` : h.sender.name}${h.sender.bot ? ' (bot)' : ''} · ${fmtTime(h.date)} · why: ${h.why.join('; ')}` }),
+      h.suspicious ? el('div', { class: 'suspicious', text: h.suspicious }) : null,
+      h.text ? el('div', { class: 'text', text: h.text }) : null,
+      h.media ? el('div', { class: 'labels', text: h.media }) : null,
+      h.buttons.length ? el('div', { class: 'labels', text: `Buttons (labels only, answer in Telegram): ${h.buttons.join(' · ')}` }) : null))) : null,
+    el('ul', { class: 'always' },
+      el('li', { text: 'This page cannot answer checks and cannot see all of them. Some appear only inside the Telegram app (pages inside Telegram, or messages only you can see).' }),
+      el('li', { text: 'Real checks never ask for codes, passwords, your phone number, a wallet, or anything to paste or run.' })),
+    el('div', { class: 'links' },
+      m.openLink ? el('a', { class: 'btn primary', href: m.openLink, text: 'Open the group in Telegram' }) : null,
+      el('button', { class: 'btn', text: "I've answered it — check now", onclick: (e) => inviteAction(e.target, '/api/membership/check', { chatId: m.chatId }) })))));
+}
+
+$('notify-test').addEventListener('click', (e) => inviteAction(e.target, '/api/notify-test', {}));
+
 function renderProbe(r) {
+  if (r.invite && r.invite.id) return renderInviteCard(r);
   const box = $('probe-result');
   box.hidden = false;
   const [label, cls] = VERDICT[r.verdict] || [r.verdict, 'muted'];
@@ -287,7 +482,9 @@ function renderProbe(r) {
     el('dl', { class: 'kv' }, rows),
     el('div', { class: 'actions' },
       canWatch ? el('button', { class: 'btn primary', text: r.verdict === 'member' ? 'Watch it' : 'Watch it (read without joining)', onclick: (e) => watch(e.target, r.target) }) : null,
-      !canWatch && r.verdict !== 'not-found' && r.verdict !== 'unsafe' ? el('span', { class: 'src-ref', text: 'Joining is a separate, confirmed step (coming next). Nothing has been joined.' }) : null));
+      !canWatch && r.verdict !== 'not-found' && r.verdict !== 'unsafe' && r.verdict !== 'folder-link'
+        ? el('span', { class: 'src-ref', text: 'Not readable from outside. To follow it, join in your Telegram app with its invite link (paste the link here first: the page shows what to expect). Nothing has been joined.' })
+        : null));
 }
 
 async function watch(button, target) {
@@ -318,7 +515,10 @@ $('add-form').addEventListener('submit', async (e) => {
   try {
     const r = await api('/api/probe', { target });
     if (r.error && !r.verdict) toast(r.error);
-    else renderProbe(r);
+    else {
+      if (r.invite) await refresh(); // the ration and the invite list moved
+      renderProbe(r);
+    }
   } catch (err) {
     toast(err.message);
   } finally {
@@ -550,9 +750,12 @@ function scheduleRefresh() {
 async function refresh() {
   try {
     state = await api('/api/state');
+    renderBanner(state);
     renderCards(state);
     renderSources(state);
+    renderInvites(state);
     renderOutbox(state);
+    $('notify-test').hidden = !state.notifications;
   } catch (err) {
     setLive(false, 'console not reachable');
   }

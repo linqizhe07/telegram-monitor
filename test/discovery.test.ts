@@ -52,7 +52,7 @@ function setup(autoWatch = true) {
     now: clock.now,
     pageDelayMs: 0,
     activity,
-    discovery: { autoWatch: () => auto, reportTo: 42, defaults: DEFAULTS },
+    discovery: { autoWatch: () => auto, reportTo: 42, defaults: DEFAULTS, noticeGapMs: 5 },
   });
   return { clock, store, account, reader, events, setAuto: (v: boolean) => (auto = v) };
 }
@@ -188,4 +188,40 @@ test('only notices about the account itself count as membership changes', () => 
   assert.equal(isMembershipNotice(service(new Api.MessageActionChatJoinedByLink({ inviterId: '5' as never }), '777'), self), false);
   assert.equal(isMembershipNotice(service(new Api.MessageActionChatDeleteUser({ userId: self as never })), self), true);
   assert.equal(isMembershipNotice(new Api.UpdateNewChannelMessage({ message: new Api.Message({ id: 2, peerId: new Api.PeerChannel({ channelId: 1 as never }), date: T0, message: 'hi' }), pts: 1, ptsCount: 1 }), self), false);
+});
+
+test('a membership notice loads the chat list only when it can mean a join, a leave or a removal', async () => {
+  const env = setup();
+  const vip = ch(3333, 'Alpha VIP');
+  env.account.dialogs = [vip];
+  await env.reader.reconcile();
+  const loads = () => env.account.dialogParams.length;
+  const wait = () => new Promise((r) => setTimeout(r, 40));
+  const before = loads();
+
+  env.reader.membershipNotice({ chatId: idOf(3333), entity: { ...vip, title: 'Alpha VIP (new photo)' } });
+  await wait();
+  assert.equal(loads(), before, 'a routine change to a chat it is in: nothing loaded');
+
+  env.reader.membershipNotice({ chatId: idOf(4444), entity: { className: 'ChannelForbidden', id: 4444 } });
+  await wait();
+  assert.equal(loads(), before, 'removed from a chat that is not a source: nothing to do');
+
+  env.account.dialogs = [vip, ch(5555, 'Fresh')];
+  env.reader.membershipNotice({ chatId: idOf(5555), entity: ch(5555, 'Fresh') });
+  env.reader.membershipNotice({ chatId: idOf(5555), entity: ch(5555, 'Fresh') });
+  await wait();
+  assert.equal(loads(), before + 1, 'a chat that is not a source yet: one load, however many notices');
+  assert.equal(env.store.getChat(idOf(5555))!.kind, 'watched');
+
+  env.account.dialogs = [ch(5555, 'Fresh')];
+  env.reader.membershipNotice({ chatId: idOf(3333), entity: { ...vip, left: true } });
+  await wait();
+  assert.equal(loads(), before + 2, 'a source the notice shows it left: checked');
+  assert.equal(env.store.getChat(idOf(3333))!.enabled, false);
+
+  env.account.dialogs = [vip, ch(5555, 'Fresh')];
+  env.reader.membershipNotice({ chatId: idOf(3333), entity: vip });
+  await wait();
+  assert.equal(loads(), before + 2, 'the same chat again within the hour: the hourly check will see it');
 });

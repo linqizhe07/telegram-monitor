@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { Activity } from './activity.ts';
 import { loadConfig } from './config.ts';
 import { denoise, formatSignal } from './denoise.ts';
+import { formatInviteStatus, InviteBudget } from './invite-rules.ts';
 import { SEED_PLAYBOOK } from './prompts.ts';
 import { escapeHtml } from './render.ts';
 import { Store, type ChatRow } from './store.ts';
@@ -356,7 +357,9 @@ server.registerTool(
   {
     title: 'Check a Telegram group (read-only)',
     description:
-      'Looks at a group or channel without joining: whether the account can read it from outside, members, activity per day, join approval, hidden history, and the bots that guard it. Needs the monitor service running.',
+      'Looks at a group or channel without joining: whether the account can read it from outside, members, activity per day, join approval, hidden history, and the bots that guard it. ' +
+      'For a private invite link (t.me/+…) it returns a preview with warnings and links to open it in the Telegram app: the owner joins there and then presses «I\'ve joined» in the console. ' +
+      'You cannot join, confirm a join or answer a check. Invite checks are rationed (5 a day from here). Needs the monitor service running.',
     inputSchema: { target: z.string().describe('@username, t.me link, or invite link') },
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
@@ -366,6 +369,22 @@ server.registerTool(
     } catch (err) {
       return fail((err as Error).message);
     }
+  },
+);
+
+server.registerTool(
+  'invite_status',
+  {
+    title: 'Private groups: invite links and standing',
+    description:
+      'The invite links the owner is following (previewed, request pending, joined, removed) and the account\'s standing in groups it joined through them (member, a check waiting, muted, removed). ' +
+      'Read-only, from the local database: no Telegram request. It never shows a check\'s text or buttons: checks are answered by the owner in the Telegram app.',
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  async () => {
+    const titles = new Map(store.listChats(false).map((c) => [c.chatId, c.title]));
+    const memberships = store.memberships().map((m) => ({ ...m, title: titles.get(m.chatId) ?? String(m.chatId) }));
+    return text(formatInviteStatus(store.invites(), memberships, new InviteBudget(store, now).view(), now(), config.timezone));
   },
 );
 
@@ -441,7 +460,7 @@ server.registerTool(
   {
     title: 'Re-check the account\'s chat list',
     description:
-      'Checks now which groups and channels the account is in: new ones become sources (read automatically when auto-read is on), ones it left stop being read. It also happens every 10 minutes and right after a join. Needs the monitor service running.',
+      'Checks now which groups and channels the account is in: new ones become sources (read automatically when auto-read is on), ones it left stop being read. It also happens every hour and soon after a join. Needs the monitor service running.',
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
   async () => {

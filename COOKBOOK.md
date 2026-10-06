@@ -206,7 +206,7 @@ reader account: @your_reader_account        ← 监控模式才有
 | 区块 | 看什么 |
 |---|---|
 | Reader account | 登录的是哪个号；随时可以在 Telegram → 设置 → 设备里终止 |
-| Account actions | 24 小时内账号发给 Telegram 的请求：读几次、**写几次**（加群、发言、按按钮、标已读都算写）。正常是 0 次写 |
+| Account actions | 24 小时内账号发给 Telegram 的请求：读几次、**写几次**（加群、发言、按按钮、标已读都算写）。正常是 0 次写：所有请求都过同一个入口，入口在代码里直接拒绝任何写操作（记为 ERROR「blocked write」，什么都没发出去） |
 | Sources | 每个群：从外面读，还是已是成员；过去 24 小时存了多少条；群的日均量；门口的守卫（入群审批、群里的机器人）；是否已追平。「隐藏历史」和「反垃圾」只有管理员能看到，从外面看显示为未知，不代表没有 |
 | Activity | 账号发出的**每一个**请求，实时滚动。GramJS 所有请求都经过同一个被记录的入口，只有建连接的握手和心跳不记（它们不涉及任何群） |
 | Captured messages | `Signal` = 去噪后 Claude 实际读到的内容；`All` = 原始消息 |
@@ -218,13 +218,41 @@ reader account: @your_reader_account        ← 监控模式才有
 
 不用一个个添加。服务会核对这个账号的群列表（包括归档的群）：
 
-- **你在 Telegram 里新加入的群或频道，自动出现在 Sources 里，并开始读取**，从最近 24 小时读起。Telegram 一推送"你加入了"，几秒内就会核对；另外每 10 分钟、以及每次启动时，也会各核对一次。离线期间加入的群，上线后照样补上。
+- **你在 Telegram 里新加入的群或频道，自动出现在 Sources 里，并开始读取**，从最近 24 小时读起。Telegram 一推送"你加入了"，一分钟内就会核对；另外每小时、以及每次启动时，也会各核对一次。离线期间加入的群，上线后照样补上。
+- 只有可能是加群、退群、被移出的推送才会触发核对；群改了头像、标题这类日常推送不会。同一个群一小时最多触发一次。原因：反复拉群列表是 Telegram 最常用长时间限流来惩罚的行为。
 - **你退出或被移出的群**：自动停止读取，状态显示「you left it in Telegram」。之后再加入，会自动恢复读取。
 - **每个群前面都有一个开关**：关掉就不再读，已经存下的消息保留到保留期结束；重新打开时，从断点继续补，但最多补最近 24 小时。**你手动关掉的群，核对群列表时不会被重新打开。**
 - 页面顶部有「Read new groups I join automatically」总开关：关掉后，新加入的群只会出现在列表里，默认不读。对应 `.env` 里的 `PULSE_AUTO_WATCH_NEW`。
 - 「Refresh from Telegram」按钮会立刻核对一次。
 - 从外面按 @用户名读的公开群（比如币安英文群）不受群列表影响，即使你不在群里也照常读。
 - Claude 那边对应的工具是 `set_monitoring`（开关某个群）和 `refresh_sources`（立刻核对）。
+
+### 私密群：邀请链接、入群验证
+
+私密群只能靠邀请链接进。**加群这一步由你本人在官方 Telegram App 里完成**，服务只负责「看」，原因：
+
+- 很多群用机器人做入群验证（按按钮、算术、图片、Mini App 页面）。这些验证会出现在你自己的 App 里，你本来就要在那里回答。
+- 服务用的 GramJS 是旧协议版本（layer 198），看不到 Mini App 验证页和只给你一个人看的临时消息。
+- 由软件发起的加群，机器人的验证页面只能在发起加群的那个会话里完成，转到 App 里做不了。
+- 入群申请一旦发出，用户这边撤回不了。
+
+流程：
+
+1. 把邀请链接（`t.me/+…`、`t.me/joinchat/…`）贴进 Sources 下面的输入框，点 **Check**。服务只调一次 `checkChatInvite`，这是只读请求，不会加群。页面显示：群名、类型、人数、是否需要管理员审批、Telegram 的 SCAM/FAKE/verified 标记、是否收费（Stars 订阅），以及一组提醒（加入后谁能看到你、验证可能只有几十秒、真验证从不要验证码和钱包等）。标记为 SCAM/FAKE 的群不给加入链接。
+2. 点 **Open in Telegram**（或复制链接到手机上打开），在 App 里加入或发送申请。有验证就在 App 里回答。
+3. 回到控制台点 **I've joined** 或 **I've sent a join request**，服务再查一次：
+   - 已是成员：自动成为来源并打开读取（即使总开关是关的，也会打开，因为这个群是你点名要的）。会顺带读三样：你在群里的状态（`channels.getChannels`）、怎么加入的和加入时间（`channels.getParticipant`）、群是否对新成员隐藏历史（`channels.getFullChannel`）。如果隐藏了历史，就从你加入后开始读。
+   - 申请还在等审批：按 1 小时、6 小时、1 天、之后每天一次的节奏再查，最多查 14 天（共 17 次）。Telegram 从不通知申请人被拒，所以 14 天没批就停。通过后会弹 macOS 通知；通常更快，因为 Telegram 推送「你加入了」时群列表核对会马上发现。
+4. **入群验证横幅**：加入后如果 Telegram 显示你在群里还不能发言（被禁言等验证），或者 15 分钟内有机器人点名你（按钮里带着你的账号 id、@你、提到你的用户名），页面顶部会出现黄色横幅「Verification in progress: answer it in your Telegram app」，同时弹一条通知。横幅里列出机器人的原话和按钮文字，只供参考，**这里按不了任何按钮**。有些验证只出现在 App 里，这里看不到。回答完点 **I've answered it — check now**，服务读一次状态：能发言了，横幅就消失。
+5. **被移出**：读取时遇到 `CHANNEL_PRIVATE`，或者群列表核对发现你不在群里了，服务读一次状态，分清是退出、被踢（有时限，比如 45 秒或 1 小时）还是被封，然后停止读取并弹通知。之后你在 App 里重新加入，会自动恢复读取。
+
+额度：Telegram 把查看邀请链接和查用户名算在同一类限额里，没有公开上限。所以服务给自己定了配额：每 24 小时最多 20 次（定时检查占 12 次，Claude 占 5 次），两次之间至少隔 30 秒。同一个链接 10 分钟内重复查看，直接用上次的结果。万一被 Telegram 要求等待，邀请检查暂停至少 6 小时；读群不受影响。
+
+文件夹链接（`t.me/addlist/…`）不会去查：请在 App 里打开，只添加你要的那个群，它会自动出现在 Sources 里。
+
+所有动作都在 Activity 里：每个请求、你点的每个按钮、每次状态变化、每条通知。macOS 通知可以用右上角的 **Send test notification** 先试一下；如果没弹出来，在「系统设置 → 通知」里允许「脚本编辑器」，并检查专注模式。`.env` 里 `PULSE_NOTIFY=off` 关闭通知，`PULSE_NOTIFY_TITLES=0` 让锁屏上不显示群名。
+
+完整设计、证据和以后的第二阶段（软件代为加群，暂不做）见 `docs/private-groups.md`。
 
 ### 离线期间的消息
 
@@ -257,9 +285,11 @@ claude mcp add --scope user telegram-monitor -- /opt/homebrew/bin/node --no-expe
 
 这条命令是给 Claude Code 和定时任务用的。桌面端的聊天要在 `~/Library/Application Support/Claude/claude_desktop_config.json` 的 `mcpServers` 里加同样的 command 和 args，然后重启 Claude。
 
-工具：`list_sources`、`read_messages`（默认是去噪后的信号，可切 `off-topic` 或 `all`，分页）、`overview`、`search_messages`、`get_playbook`、`save_digest`、`account_activity`、`catch_up_now`、`audit_capture`、`check_group`（只读查看一个群）、`watch_source`（开始读，从不加群）。
+工具：`list_sources`、`read_messages`（默认是去噪后的信号，可切 `off-topic` 或 `all`，分页）、`overview`、`search_messages`、`get_playbook`、`save_digest`、`account_activity`、`catch_up_now`、`audit_capture`、`check_group`（只读查看一个群；邀请链接会给出预览和提醒）、`watch_source`（开始读，从不加群）、`invite_status`（私密群的跟踪状态，只读）。
 
 需要动用 Telegram 的工具，会通过正在运行的服务去请求，**不会**另开一个连接：同一个会话在两处同时使用，可能被 Telegram 判定冲突而作废（AUTH_KEY_DUPLICATED）。
+
+Claude 拿到的令牌（`data/console.json`）只能调用它的工具本来就用的那几个接口：查看、开始读、追平、对账、开关、刷新群列表。确认入群、清空存储、改设置这些，只有控制台页面能做。这样 Claude 读到的群消息里就算藏了指令，也碰不到这些操作。
 
 每天的摘要用 Claude 桌面端的定时任务跑（侧边栏 Scheduled → 「Telegram 群每日摘要（去噪）」，每天 9:03）：先追平，读完所有去噪后的信号页，按 话题 / 痛点 / 新想法 / 机会 / 待解问题 写成摘要，每条都标上引用的消息 #id，最后存进控制台和 `data/digests/`。第一次请在侧边栏点 **Run now**，把它要用的工具批准一次，之后自动运行。注意定时任务只在桌面端开着时运行；错过的会在下次打开时补跑。
 
@@ -276,7 +306,7 @@ claude mcp add --scope user telegram-monitor -- /opt/homebrew/bin/node --no-expe
 也可以发 `t.me/某个公开群` 链接。bot 会回复群名、人数，并立刻读入最近 24 小时的消息；接着发 `/digest`，马上就能看到第一份摘要。
 
 - **公开频道**也能监控，比如交易所的公告频道。它的摘要更像「本周公告要点」。
-- **私密群**：先用专用账号在手机上点邀请链接加入。入群验证（「点按钮证明不是机器人」之类）由你本人手动完成，程序不会也不应该替你过验证。加入后在报告台发 `/watch 群名`：在读者账号自己的聊天列表里按名字找，写一部分也行；重名时 bot 会列出来让你写得更具体。
+- **私密群**：把邀请链接贴进控制台查看，然后在官方 App 里加入，回控制台点「I've joined」（见 6A「私密群」）。入群验证由你本人在 App 里完成，程序不会也不应该替你过验证。加入后它会自动出现在 Sources 里；bot 模式下也可以在报告台发 `/watch 群名`，在读者账号自己的聊天列表里按名字找。
 - **批量配置**：`.env` 里写 `PULSE_WATCH=@群A,@群B` 和 `PULSE_REPORT_TO=报告台 id`（不填就是第一个 owner 的私聊），启动时自动登记。
 - 读取频率：每 120 秒（±15%）轮询一遍所有被监控的群，可以用 `PULSE_READER_POLL_SECONDS` 调整。群太多（几十个）就适当调大，别让读者账号显得像在刷接口。
 
@@ -407,6 +437,9 @@ journalctl -u telegram-monitor -f
 | `PULSE_READER_SESSION` | `./data/reader.session` | `npm run login` 保存的会话 |
 | `PULSE_READER_POLL_SECONDS` | 120 | 读者账号轮询间隔，30–3600 |
 | `PULSE_WATCH` / `PULSE_REPORT_TO` | 空 / 第一个 owner | 启动时自动监控的群，以及摘要发到哪 |
+| `PULSE_CONSOLE_PORT` | 4830 | 控制台端口，0 关闭 |
+| `PULSE_AUTO_WATCH_NEW` | on | 账号新加入的群自动开始读（off：只列出来，默认关） |
+| `PULSE_NOTIFY` / `PULSE_NOTIFY_TITLES` | on / 1 | 需要你去 App 里操作时弹 macOS 通知；`0` 让通知里不显示群名 |
 | `PULSE_TIMEZONE` / `PULSE_DIGEST_HOUR` | Asia/Shanghai / 9 | 新群的默认值，之后每个群可用 `/settings` 改 |
 | `PULSE_LANGUAGE` | auto | 摘要语言：auto 跟着群走，也可以固定 en 或 zh |
 | `PULSE_MODEL` | claude-opus-5-5 | 也可以填 claude-sonnet-5-5（便宜一半） |

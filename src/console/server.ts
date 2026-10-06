@@ -1,8 +1,11 @@
 // The console: a local web page that shows what the service is doing, live. It binds to
-// 127.0.0.1 only, answers only requests addressed to that host (no DNS rebinding), and its few
-// actions need a per-run token that only the page itself carries (no cross-site requests).
+// 127.0.0.1 only, answers only requests addressed to that host (no DNS rebinding), and its
+// actions need a per-run token (no cross-site requests). There are two tokens: the page's, good
+// for every action, and the one left for local tools (Claude's MCP server), good only for the few
+// actions those tools use. So nothing Claude reads (other people's messages) can steer it into
+// confirming a join, clearing storage or changing settings.
 
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -10,8 +13,11 @@ import type { TelegramClient as GramClient } from 'telegram';
 import type { Activity } from '../activity.ts';
 import type { Config } from '../config.ts';
 import { denoise, formatSignal } from '../denoise.ts';
+import { inviteHash } from '../invite-rules.ts';
+import type { InviteTracker } from '../invites.ts';
+import type { Notifier } from '../notify.ts';
 import { probe, type ProbeResult } from '../probe.ts';
-import { withTimeout, type Reader } from '../reader.ts';
+import { parseRef, withTimeout, type Reader } from '../reader.ts';
 import type { Store } from '../store.ts';
 import { lastSlot } from '../transcript.ts';
 
@@ -34,7 +40,16 @@ export interface ConsoleDeps {
    * Claude) can ask the running service instead of opening a second Telegram connection.
    */
   handoffFile?: string;
+  /** Private groups reached by invite links (null: not signed in). */
+  invites?: InviteTracker | null;
+  /** macOS notifications (for the test button). */
+  notifier?: Notifier | null;
 }
+
+/** The only actions local tools (Claude's MCP server) may take: the ones its tools call. */
+const TOOL_ALLOWED = new Set(['/api/probe', '/api/watch', '/api/pull', '/api/audit', '/api/toggle', '/api/refresh']);
+
+const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
 const ASSETS: Record<string, { file: URL; type: string }> = {
   '/console.js': { file: new URL('./console.js', import.meta.url), type: 'text/javascript; charset=utf-8' },
@@ -49,7 +64,10 @@ export function probeKey(chatId: number): string {
 
 export class ConsoleServer {
   private readonly deps: ConsoleDeps;
-  private readonly token = randomBytes(24).toString('base64url');
+  /** Injected into the page only: every action. */
+  private readonly pageToken = randomBytes(24).toString('base64url');
+  /** Written to the handoff file only: the actions in TOOL_ALLOWED. */
+  private readonly toolToken = randomBytes(24).toString('base64url');
   private readonly streams = new Set<ServerResponse>();
   private server: Server | null = null;
   private unsubscribe: (() => void) | null = null;
@@ -78,7 +96,7 @@ export class ConsoleServer {
     if (addr && typeof addr === 'object') this.port = addr.port;
     if (this.deps.handoffFile) {
       mkdirSync(dirname(this.deps.handoffFile), { recursive: true });
-      writeFileSync(this.deps.handoffFile, JSON.stringify({ url: this.url, token: this.token, pid: process.pid }), { mode: 0o600 });
+      writeFileSync(this.deps.handoffFile, JSON.stringify({ url: this.url, token: this.toolToken, pid: process.pid }), { mode: 0o600 });
     }
     this.unsubscribe = this.deps.activity.subscribe((row) => {
       const line = `id: ${row.id}\nevent: activity\ndata: ${JSON.stringify(row)}\n\n`;
@@ -134,7 +152,7 @@ export class ConsoleServer {
             'x-frame-options': 'DENY',
             'referrer-policy': 'no-referrer',
           });
-          res.end(readFileSync(PAGE, 'utf8').replace('__CONSOLE_TOKEN__', this.token));
+          res.end(readFileSync(PAGE, 'utf8').replace('__CONSOLE_TOKEN__', this.pageToken));
           return;
         case '/api/state':
           return this.json(res, 200, this.state());
@@ -169,16 +187,32 @@ export class ConsoleServer {
       return;
     }
     if (req.method === 'POST') {
-      if (req.headers['x-console-token'] !== this.token || !(req.headers['content-type'] ?? '').startsWith('application/json')) {
+      const token = String(req.headers['x-console-token'] ?? '');
+      const role = same(token, this.pageToken) ? 'page' : same(token, this.toolToken) && TOOL_ALLOWED.has(url.pathname) ? 'tool' : null;
+      if (!role || !(req.headers['content-type'] ?? '').startsWith('application/json')) {
         res.writeHead(403).end('forbidden');
         return;
       }
       const body = await this.body(req);
+      const invites = this.deps.invites ?? null;
+      const id = Number(body.id);
       switch (url.pathname) {
         case '/api/probe':
-          return this.json(res, 200, await this.probe(String(body.target ?? '')));
+          return this.json(res, 200, await this.probe(String(body.target ?? ''), role === 'tool' ? 'mcp' : 'owner'));
         case '/api/watch':
           return this.json(res, 200, await this.watch(String(body.target ?? '')));
+        case '/api/invite/opened':
+          return this.json(res, 200, invites?.opened(id) ?? { error: 'Unknown invite.' });
+        case '/api/invite/confirm':
+          return this.json(res, 200, invites?.confirm(id, body.said === 'requested' ? 'requested' : 'joined') ?? { error: 'Unknown invite.' });
+        case '/api/invite/recheck':
+          return this.json(res, 200, invites?.recheck(id) ?? { error: 'Unknown invite.' });
+        case '/api/invite/dismiss':
+          return this.json(res, 200, invites?.dismiss(id) ?? { error: 'Unknown invite.' });
+        case '/api/membership/check':
+          return this.json(res, 200, invites ? await withTimeout(invites.checkMembership(Number(body.chatId)), 60_000, 'the check').catch((err) => ({ ok: false, message: (err as Error).message })) : { ok: false, message: 'The reader account is not signed in.' });
+        case '/api/notify-test':
+          return this.json(res, 200, this.notifyTest());
         case '/api/unwatch':
           return this.json(res, 200, this.unwatch(Number(body.chatId)));
         case '/api/pull':
@@ -254,6 +288,8 @@ export class ConsoleServer {
       claude: this.deps.claude,
       reportTo: config.reportTo,
       autoWatchNew: (store.getKv('auto_watch_new') || (config.autoWatchNew ? 'on' : 'off')) === 'on',
+      privateGroups: this.deps.invites?.views() ?? null,
+      notifications: Boolean(this.deps.notifier) && config.notify && process.platform === 'darwin',
       pollSeconds: config.readerPollSeconds,
       retentionDays: config.retentionDays,
       sources,
@@ -340,11 +376,16 @@ export class ConsoleServer {
 
   // ── actions ──────────────────────────────────────────────────────────────
 
-  private async probe(target: string): Promise<ProbeResult | { error: string }> {
+  private async probe(target: string, lane: 'owner' | 'mcp'): Promise<unknown> {
     const { account, activity } = this.deps;
     if (!account) return { error: 'The reader account is not signed in.' };
     if (!target.trim()) return { error: 'Type a @username, a t.me link or an invite link.' };
-    activity.event('console', 'probe', target, 'read-only look requested from the console');
+    // An invite link: the private-group flow (a rationed look, then joining in the Telegram app).
+    if (this.deps.invites && inviteHash(target)) {
+      return withTimeout(this.deps.invites.preview(target.trim(), lane), 150_000, 'the check').catch((err) => ({ error: (err as Error).message }));
+    }
+    const shown = parseRef(target)?.kind === 'invite' ? 'an invite link' : target; // never log a full invite hash
+    activity.event(lane === 'mcp' ? 'claude' : 'console', 'probe', shown, 'read-only look requested');
     let r: ProbeResult;
     try {
       r = await withTimeout(probe(account.raw, target.trim(), this.deps.now()), 120_000, 'the check');
@@ -360,6 +401,10 @@ export class ConsoleServer {
     const { reader, store, config, activity } = this.deps;
     if (!reader) return { ok: false, message: 'The reader account is not signed in.' };
     if (config.reportTo === null) return { ok: false, message: 'Set PULSE_OWNER_IDS (or PULSE_REPORT_TO) in .env so digests have somewhere to go.' };
+    const hash = inviteHash(target);
+    if (hash && this.deps.invites) {
+      return withTimeout(this.deps.invites.watchMember(hash), 90_000, 'starting to read it').catch((err) => ({ ok: false, message: (err as Error).message }));
+    }
     const ref = target.trim();
     let info;
     try {
@@ -415,7 +460,7 @@ export class ConsoleServer {
     return { ok: true, message: `${chat.title}: off. It is not read any more.` };
   }
 
-  /** Re-checks the account's chat list now (it also runs every 10 minutes and after a join). */
+  /** Re-checks the account's chat list now (it also runs hourly, and soon after a join). */
   private async refreshList(): Promise<{ ok: boolean; message: string }> {
     const { reader } = this.deps;
     if (!reader) return { ok: false, message: 'The reader account is not signed in.' };
@@ -464,6 +509,14 @@ export class ConsoleServer {
     // The one trace that remains: that a clear happened (not what was in it).
     activity.event('console', 'cleared storage', 'owner', summary);
     return { ok: true, message: `Cleared: ${summary}. Sources, switches and reading positions are kept, so nothing is downloaded again.` };
+  }
+
+  private notifyTest(): { ok: boolean; message: string } {
+    const { notifier, config } = this.deps;
+    if (!notifier || !config.notify || process.platform !== 'darwin') return { ok: false, message: 'Notifications are off (they need macOS; PULSE_NOTIFY=on).' };
+    notifier.notify({ kind: 'test', group: null, body: 'Notifications work. Nothing was sent to Telegram.' });
+    this.deps.activity.event('console', 'test', 'notification', 'test notification requested');
+    return { ok: true, message: 'Sent. If nothing appears, allow notifications for "Script Editor" in System Settings → Notifications, and check Focus.' };
   }
 
   private settings(body: Record<string, unknown>): { ok: boolean; message: string } {

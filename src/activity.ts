@@ -47,15 +47,18 @@ export class Activity {
 // ── classifying MTProto requests ───────────────────────────────────────────
 
 const SYSTEM = /^(help|updates|langpack)\.|^(InvokeWithLayer|InitConnection|InvokeWithoutUpdates|Ping|PingDelayDisconnect|DestroySession|ReqPq|ReqDHParams|SetClientDHParams)$|^auth\.(ExportAuthorization|ImportAuthorization|BindTempAuthKey)$/;
+// Upkeep-looking reads that do say something about the account's chats: paced and recorded.
+const RECORDED_UPKEEP = new Set(['help.GetAppConfig', 'updates.GetDifference', 'updates.GetChannelDifference']);
 const READ = /^\w+\.(Get|Check|Resolve|Search)\w*$/;
 // Reads by name that still change something someone else can see.
 const READS_THAT_WRITE = new Set(['messages.GetBotCallbackAnswer', 'messages.GetMessagesViews']);
 
 /** read / write / system for a GramJS request class name (e.g. "messages.GetHistory"). Unknown = write, to be safe. */
 export function classify(className: string, request?: { increment?: boolean }): ActivityKind {
+  if (RECORDED_UPKEEP.has(className)) return 'read';
   if (SYSTEM.test(className)) return 'system';
   if (className === 'messages.GetMessagesViews') return request?.increment ? 'write' : 'read';
-  if (READS_THAT_WRITE.has(className)) return 'write';
+  if (READS_THAT_WRITE.has(className) || className.startsWith('payments.')) return 'write';
   if (READ.test(className)) return 'read';
   return 'write';
 }

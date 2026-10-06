@@ -159,6 +159,57 @@ export interface OutboxRow {
   delivered: boolean;
 }
 
+/** An invite link being followed (docs/private-groups.md, section 2). */
+export interface InviteRow {
+  id: number;
+  /** The full hash: needed for checks, never logged; null once the row has been done with for 30 days. */
+  hash: string | null;
+  createdAt: number;
+  updatedAt: number;
+  origin: 'console' | 'mcp';
+  state: string;
+  verdict: string;
+  title: string;
+  kind: string;
+  members: number | null;
+  about: string;
+  /** verified, scam, fake, paid, request */
+  flags: string[];
+  peekUntil: number | null;
+  chatId: number | null;
+  /** The chat's saved address (JSON), from an "already a member" answer. */
+  peer: string | null;
+  said: 'joined' | 'requested' | null;
+  saidAt: number | null;
+  openedAt: number | null;
+  joinedAt: number | null;
+  checks: number;
+  lastCheckAt: number | null;
+  lastResult: string;
+  nextCheckAt: number | null;
+  /** When it reached a state it does not leave by itself (for pruning). */
+  doneAt: number | null;
+  note: string;
+}
+
+/** The account's own standing in a chat it joined. */
+export interface MembershipRow {
+  chatId: number;
+  state: string;
+  /** Why it is held: 'restricted' (Telegram says it cannot send) or 'bot message' (a bot addressed it). */
+  cause: string;
+  untilDate: number | null;
+  detail: string;
+  viaRequest: boolean;
+  joinedAt: number | null;
+  historyFrom: number | null;
+  inviteId: number | null;
+  checkedAt: number;
+  nextCheckAt: number | null;
+  checksDay: string;
+  recheckCount: number;
+}
+
 export interface ChatDefaults {
   language: Lang;
   digestHour: number;
@@ -301,6 +352,54 @@ CREATE TABLE IF NOT EXISTS outbox (
   chat_id INTEGER NOT NULL,
   html TEXT NOT NULL,
   delivered INTEGER NOT NULL DEFAULT 0
+);
+-- Private groups reached by an invite link (docs/private-groups.md). The hash is what lets anyone
+-- in: it is never logged in full, and it is dropped 30 days after the row is done with.
+CREATE TABLE IF NOT EXISTS invites (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  hash TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  origin TEXT NOT NULL,
+  state TEXT NOT NULL,
+  verdict TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'supergroup',
+  members INTEGER,
+  about TEXT NOT NULL DEFAULT '',
+  flags TEXT NOT NULL DEFAULT '',
+  peek_until INTEGER,
+  chat_id INTEGER,
+  peer TEXT,
+  said TEXT,
+  said_at INTEGER,
+  opened_at INTEGER,
+  joined_at INTEGER,
+  checks INTEGER NOT NULL DEFAULT 0,
+  last_check_at INTEGER,
+  last_result TEXT NOT NULL DEFAULT '',
+  next_check_at INTEGER,
+  done_at INTEGER,
+  note TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS invites_active_hash ON invites (hash)
+  WHERE hash IS NOT NULL AND state NOT IN ('dismissed', 'expired', 'no-answer', 'link-dead', 'refused');
+CREATE INDEX IF NOT EXISTS invites_due ON invites (state, next_check_at);
+-- The account's own standing in a chat it joined: member, held for a check, removed.
+CREATE TABLE IF NOT EXISTS memberships (
+  chat_id INTEGER PRIMARY KEY,
+  state TEXT NOT NULL,
+  cause TEXT NOT NULL DEFAULT '',
+  until_date INTEGER,
+  detail TEXT NOT NULL DEFAULT '',
+  via_request INTEGER NOT NULL DEFAULT 0,
+  joined_at INTEGER,
+  history_from INTEGER,
+  invite_id INTEGER,
+  checked_at INTEGER NOT NULL,
+  next_check_at INTEGER,
+  checks_day TEXT NOT NULL DEFAULT '',
+  recheck_count INTEGER NOT NULL DEFAULT 0
 );
 `;
 
@@ -1096,6 +1195,176 @@ export class Store {
       compacted = false; // another process held the file: the rows are gone, the space comes back later
     }
     return { deleted, compacted };
+  }
+
+  // ── invites and memberships (private groups, docs/private-groups.md) ─────
+
+  private toInvite(r: Row): InviteRow {
+    return {
+      id: num(r.id),
+      hash: strOrNull(r.hash),
+      createdAt: num(r.created_at),
+      updatedAt: num(r.updated_at),
+      origin: str(r.origin) as InviteRow['origin'],
+      state: str(r.state),
+      verdict: str(r.verdict),
+      title: str(r.title),
+      kind: str(r.kind),
+      members: numOrNull(r.members),
+      about: str(r.about),
+      flags: str(r.flags).split(',').filter(Boolean),
+      peekUntil: numOrNull(r.peek_until),
+      chatId: numOrNull(r.chat_id),
+      peer: strOrNull(r.peer),
+      said: (strOrNull(r.said) as InviteRow['said']) ?? null,
+      saidAt: numOrNull(r.said_at),
+      openedAt: numOrNull(r.opened_at),
+      joinedAt: numOrNull(r.joined_at),
+      checks: num(r.checks),
+      lastCheckAt: numOrNull(r.last_check_at),
+      lastResult: str(r.last_result),
+      nextCheckAt: numOrNull(r.next_check_at),
+      doneAt: numOrNull(r.done_at),
+      note: str(r.note),
+    };
+  }
+
+  private static readonly INVITE_COLS: Record<string, string> = {
+    hash: 'hash',
+    origin: 'origin',
+    state: 'state',
+    verdict: 'verdict',
+    title: 'title',
+    kind: 'kind',
+    members: 'members',
+    about: 'about',
+    flags: 'flags',
+    peekUntil: 'peek_until',
+    chatId: 'chat_id',
+    peer: 'peer',
+    said: 'said',
+    saidAt: 'said_at',
+    openedAt: 'opened_at',
+    joinedAt: 'joined_at',
+    checks: 'checks',
+    lastCheckAt: 'last_check_at',
+    lastResult: 'last_result',
+    nextCheckAt: 'next_check_at',
+    doneAt: 'done_at',
+    note: 'note',
+  };
+
+  addInvite(i: Pick<InviteRow, 'hash' | 'origin' | 'state' | 'verdict'> & Partial<InviteRow>): InviteRow {
+    const now = this.clock();
+    const { lastId } = this.run('INSERT INTO invites (hash, created_at, updated_at, origin, state, verdict) VALUES (?, ?, ?, ?, ?, ?)', i.hash, now, now, i.origin, i.state, i.verdict);
+    const { hash: _h, origin: _o, state: _s, verdict: _v, id: _i, createdAt: _c, updatedAt: _u, ...rest } = i;
+    this.updateInvite(lastId, rest);
+    return this.getInvite(lastId)!;
+  }
+
+  getInvite(id: number): InviteRow | null {
+    const r = this.get('SELECT * FROM invites WHERE id = ?', id);
+    return r ? this.toInvite(r) : null;
+  }
+
+  /** The row still following this link, if any (not dismissed, expired or otherwise done with). */
+  inviteByHash(hash: string): InviteRow | null {
+    const r = this.get("SELECT * FROM invites WHERE hash = ? AND state NOT IN ('dismissed', 'expired', 'no-answer', 'link-dead', 'refused') ORDER BY id DESC LIMIT 1", hash);
+    return r ? this.toInvite(r) : null;
+  }
+
+  /** The newest row for this link, whatever its state (a dead link looked at again). */
+  latestInvite(hash: string): InviteRow | null {
+    const r = this.get('SELECT * FROM invites WHERE hash = ? ORDER BY id DESC LIMIT 1', hash);
+    return r ? this.toInvite(r) : null;
+  }
+
+  updateInvite(id: number, patch: Partial<Omit<InviteRow, 'id' | 'createdAt' | 'updatedAt'>>): void {
+    for (const [key, value] of Object.entries(patch)) {
+      const col = Store.INVITE_COLS[key];
+      if (!col || value === undefined) continue;
+      const v = Array.isArray(value) ? value.join(',') : typeof value === 'boolean' ? (value ? 1 : 0) : (value as Param);
+      this.run(`UPDATE invites SET ${col} = ? WHERE id = ?`, v, id);
+    }
+    this.run('UPDATE invites SET updated_at = ? WHERE id = ?', this.clock(), id);
+  }
+
+  /** Newest first: everything still going, and what ended in the last `recentDays` days. */
+  invites(recentDays = 7): InviteRow[] {
+    const since = this.clock() - recentDays * 86_400;
+    return this.all('SELECT * FROM invites WHERE done_at IS NULL OR done_at > ? ORDER BY id DESC LIMIT 100', since).map((r) => this.toInvite(r));
+  }
+
+  dueInvites(now: number): InviteRow[] {
+    return this.all("SELECT * FROM invites WHERE next_check_at IS NOT NULL AND next_check_at <= ? AND state IN ('requested', 'owner-opened', 'previewed', 'link-dead') AND hash IS NOT NULL ORDER BY next_check_at", now).map((r) =>
+      this.toInvite(r),
+    );
+  }
+
+  /** Forgets invite hashes 30 days after a row is done with, and the rows themselves after 90. */
+  pruneInvites(now: number): number {
+    const a = this.run('UPDATE invites SET hash = NULL WHERE hash IS NOT NULL AND done_at IS NOT NULL AND done_at < ?', now - 30 * 86_400).changes;
+    const b = this.run('DELETE FROM invites WHERE done_at IS NOT NULL AND done_at < ?', now - 90 * 86_400).changes;
+    return a + b;
+  }
+
+  private toMembership(r: Row): MembershipRow {
+    return {
+      chatId: num(r.chat_id),
+      state: str(r.state),
+      cause: str(r.cause),
+      untilDate: numOrNull(r.until_date),
+      detail: str(r.detail),
+      viaRequest: num(r.via_request) === 1,
+      joinedAt: numOrNull(r.joined_at),
+      historyFrom: numOrNull(r.history_from),
+      inviteId: numOrNull(r.invite_id),
+      checkedAt: num(r.checked_at),
+      nextCheckAt: numOrNull(r.next_check_at),
+      checksDay: str(r.checks_day),
+      recheckCount: num(r.recheck_count),
+    };
+  }
+
+  private static readonly MEMBERSHIP_COLS: Record<string, string> = {
+    state: 'state',
+    cause: 'cause',
+    untilDate: 'until_date',
+    detail: 'detail',
+    viaRequest: 'via_request',
+    joinedAt: 'joined_at',
+    historyFrom: 'history_from',
+    inviteId: 'invite_id',
+    checkedAt: 'checked_at',
+    nextCheckAt: 'next_check_at',
+    checksDay: 'checks_day',
+    recheckCount: 'recheck_count',
+  };
+
+  setMembership(chatId: number, patch: Partial<Omit<MembershipRow, 'chatId'>>): MembershipRow {
+    if (!this.get('SELECT 1 AS x FROM memberships WHERE chat_id = ?', chatId)) {
+      this.run('INSERT INTO memberships (chat_id, state, checked_at) VALUES (?, ?, ?)', chatId, patch.state ?? 'unknown', patch.checkedAt ?? this.clock());
+    }
+    for (const [key, value] of Object.entries(patch)) {
+      const col = Store.MEMBERSHIP_COLS[key];
+      if (!col || value === undefined) continue;
+      const v = typeof value === 'boolean' ? (value ? 1 : 0) : (value as Param);
+      this.run(`UPDATE memberships SET ${col} = ? WHERE chat_id = ?`, v, chatId);
+    }
+    return this.membership(chatId)!;
+  }
+
+  membership(chatId: number): MembershipRow | null {
+    const r = this.get('SELECT * FROM memberships WHERE chat_id = ?', chatId);
+    return r ? this.toMembership(r) : null;
+  }
+
+  memberships(): MembershipRow[] {
+    return this.all('SELECT * FROM memberships ORDER BY checked_at DESC').map((r) => this.toMembership(r));
+  }
+
+  dueMemberships(now: number): MembershipRow[] {
+    return this.all('SELECT * FROM memberships WHERE next_check_at IS NOT NULL AND next_check_at <= ? ORDER BY next_check_at', now).map((r) => this.toMembership(r));
   }
 
   // ── key/value ────────────────────────────────────────────────────────────

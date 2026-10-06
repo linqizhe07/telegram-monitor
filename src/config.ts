@@ -44,6 +44,10 @@ export interface Config {
   consolePort: number;
   /** Start reading groups and channels the reader account joins, as soon as it joins them (the console can change it). */
   autoWatchNew: boolean;
+  /** macOS notifications when the owner has to act in the Telegram app (a join approved, a check waiting, a removal). */
+  notify: boolean;
+  /** Show the group's title in those notifications (off: "A group", for the lock screen). */
+  notifyTitles: boolean;
 }
 
 const EFFORTS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -131,6 +135,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     watch: (env.PULSE_WATCH ?? '').split(/[,\s]+/).map((x) => x.trim()).filter(Boolean),
     consolePort: field('PULSE_CONSOLE_PORT', () => int(env.PULSE_CONSOLE_PORT, 4830, 0, 65535)),
     autoWatchNew: field('PULSE_AUTO_WATCH_NEW', () => oneOf(env.PULSE_AUTO_WATCH_NEW, ['on', 'off'] as const, 'on') === 'on'),
+    notify: field('PULSE_NOTIFY', () => oneOf(env.PULSE_NOTIFY, ['on', 'off'] as const, 'on') === 'on'),
+    notifyTitles: field('PULSE_NOTIFY_TITLES', () => oneOf(env.PULSE_NOTIFY_TITLES, ['1', '0'] as const, '1') === '1'),
     reportTo: field('PULSE_REPORT_TO', () => {
       const raw = env.PULSE_REPORT_TO?.trim();
       if (!raw) return ownerIds[0] ?? null;

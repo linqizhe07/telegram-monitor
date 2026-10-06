@@ -315,10 +315,15 @@ test('a private group the reader account joined is found by its name, and by id 
 test('Telegram errors become reasons a person can act on', async () => {
   const env = setup();
   await assert.rejects(env.reader.resolve('@nobody_here'), /no public group or channel has that username/);
-  await assert.rejects(env.reader.resolve('https://t.me/+AbCdEfGh1234'), /join the group with the reader account/);
+  await assert.rejects(env.reader.resolve('https://t.me/+AbCdEfGh1234'), /invite link cannot be watched directly: check it first/);
+  await assert.rejects(env.reader.resolve('https://t.me/addlist/AbCdEf'), /folder link/);
   env.mt.entities.set('someone', user(77, 'Someone'));
   await assert.rejects(env.reader.resolve('@someone'), /a person, not a group/);
   assert.match(explain({ errorMessage: 'CHANNEL_PRIVATE' }).message, /PUBLIC group this usually means the account was banned/);
+  assert.equal(explain({ errorMessage: 'CHANNEL_PRIVATE' }).code, 'CHANNEL_PRIVATE', 'the raw code travels with the reason');
+  assert.equal(explain({ errorMessage: 'INVITE_HASH_EXPIRED' }).code, 'INVITE_HASH_EXPIRED');
+  assert.equal(explain(new Error('Cannot find any entity corresponding to "x"')).code, '');
+  assert.match(explain({ errorMessage: 'WRITE_BLOCKED' }).message, /read-only/);
   assert.match(explain({ errorMessage: 'FROZEN_METHOD_INVALID' }).message, /FROZEN/);
   assert.match(explain({ errorMessage: 'USER_DEACTIVATED_BAN' }).message, /BANNED.*appeal/);
   assert.match(explain({ errorMessage: 'USER_DEACTIVATED' }).message, /npm run login/);

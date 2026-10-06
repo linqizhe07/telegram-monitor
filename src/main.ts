@@ -3,7 +3,9 @@ import { PulseBot } from './bot.ts';
 import { loadConfig } from './config.ts';
 import { ConsoleServer } from './console/server.ts';
 import { Engine } from './engine.ts';
+import { InviteTracker, type Invoker } from './invites.ts';
 import { AnthropicLlm } from './llm.ts';
+import { MacNotifier, NullNotifier, type Notifier } from './notify.ts';
 import { connectReader, type ReaderConnection } from './reader-client.ts';
 import { Reader } from './reader.ts';
 import { RecordingApi, RecordingLlm } from './recording.ts';
@@ -72,6 +74,18 @@ async function main(): Promise<void> {
   // The reader account: groups you do not run, read through a Telegram user session (see COOKBOOK.md).
   const defaults = { language: config.language, digestHour: config.digestHour, timezone: config.timezone, rsiMode: config.rsiMode };
   let reader: Reader | null = null;
+  // Private groups by invite link: previews, the owner's word that they joined, the account's standing there.
+  let invites: InviteTracker | null = null;
+  let consoleUrl: string | null = null;
+  const notifier: Notifier =
+    config.notify && process.platform === 'darwin'
+      ? new MacNotifier({
+          enabled: true,
+          showTitles: config.notifyTitles,
+          onSent: (n) => activity.event('notify', 'notification shown', n.group ?? '', `${n.kind}: handed to macOS (Focus or notification settings can still hide it)`),
+          onError: (err) => activity.event('notify', 'notification failed', 'macOS', `${err.message.slice(0, 200)} (allow notifications for Script Editor in System Settings)`, false),
+        })
+      : NullNotifier;
   // The last thing recorded before this start: read before connecting, which records requests itself.
   const [lastSeen] = store.activity({ limit: 1 });
   const connection: ReaderConnection | null = config.telegramApiId
@@ -98,10 +112,29 @@ async function main(): Promise<void> {
         autoWatch: () => (store.getKv('auto_watch_new') || (config.autoWatchNew ? 'on' : 'off')) === 'on',
         reportTo: config.reportTo,
         defaults,
+        onReconciled: (r, first) => invites?.onReconciled(r, first),
       },
+      onBatch: (chatId, batch) => invites?.onBatch(chatId, batch),
+      onAccessLost: (chatId, err) => invites?.onAccessLost(chatId, err) ?? Promise.resolve(),
     });
     const followed = reader;
-    connection.onMembershipNotice(() => followed.reconcileSoon());
+    invites = new InviteTracker({
+      raw: connection.raw as unknown as Invoker,
+      reader,
+      store,
+      activity,
+      config,
+      notify: notifier,
+      self: { id: connection.id, username: connection.username },
+      defaults,
+      now,
+      consoleUrl: () => consoleUrl,
+    });
+    const tracker = invites;
+    connection.onMembershipNotice((n) => {
+      followed.membershipNotice(n);
+      tracker.onNotice(n);
+    });
     log(`reader account: ${connection.name}`);
     activity.event('reader', 'signed in', connection.name, `Telegram id ${connection.id}`);
     if (config.ownerIds.length === 0) log('warning: the reader account is on but PULSE_OWNER_IDS is empty, so nobody can use /watch');
@@ -139,6 +172,7 @@ async function main(): Promise<void> {
   if (claudeReady) stopScheduler = startScheduler(engine, store, { now, log });
   else log('no ANTHROPIC_API_KEY: messages are collected, but no digests are written until it is set');
   const stopReader = reader ? reader.start() : () => undefined;
+  const stopInvites = invites ? invites.start() : () => undefined;
 
   let consoleServer: ConsoleServer | null = null;
   if (config.consolePort > 0) {
@@ -155,6 +189,8 @@ async function main(): Promise<void> {
       bot: me?.username ? { username: me.username } : null,
       claude: { ready: claudeReady, model: config.model },
       handoffFile: './data/console.json',
+      invites,
+      notifier,
       digestNow: (chatId) => {
         const chat = store.getChat(chatId);
         return engine.digest(chatId, { kind: 'manual', to: chat?.kind === 'watched' ? (chat.reportChatId ?? undefined) : undefined });
@@ -162,6 +198,7 @@ async function main(): Promise<void> {
     });
     try {
       await consoleServer.start();
+      consoleUrl = consoleServer.url;
       log(`console: ${consoleServer.url}`);
     } catch (err) {
       log(`console: could not listen on 127.0.0.1:${config.consolePort} (${(err as Error).message}); set PULSE_CONSOLE_PORT to another port`);
@@ -172,6 +209,7 @@ async function main(): Promise<void> {
   const purge = () => {
     const r = store.purgeBefore(now() - config.retentionDays * 86_400);
     const a = store.pruneActivity(now() - config.retentionDays * 86_400);
+    store.pruneInvites(now());
     if (r.messages || r.shadows || a) log(`retention: deleted ${r.messages} messages, ${r.shadows} shadow digests and ${a} activity rows`);
   };
   purge();
@@ -186,6 +224,7 @@ async function main(): Promise<void> {
     abort.abort();
     stopScheduler();
     stopReader();
+    stopInvites();
     await consoleServer?.stop().catch(() => undefined);
     await connection?.disconnect().catch(() => undefined);
     clearInterval(purgeTimer);
@@ -193,6 +232,11 @@ async function main(): Promise<void> {
     store.close();
     process.exit(0);
   };
+  // A stray rejected promise (GramJS update handlers can throw) is logged, not fatal.
+  process.on('unhandledRejection', (err) => {
+    log(`unhandled: ${(err as Error)?.stack ?? String(err)}`);
+    activity.event('service', 'internal error', '', String((err as Error)?.message ?? err).slice(0, 300), false);
+  });
   process.on('SIGINT', () => void stop('SIGINT'));
   process.on('SIGTERM', () => void stop('SIGTERM'));
 
