@@ -426,7 +426,6 @@
   let raf = 0;
   let onScreen = true;
   let last = performance.now();
-  let frames = 0;
   let stillTimer = 0;
 
   function shouldRun() {
@@ -466,7 +465,6 @@
   function draw(t) {
     const dt = Math.min(0.05, Math.max(0.001, (t - last) / 1000));
     last = t;
-    frames++;
     const time = t / 1000;
     const still = calm.matches;
     const active = clouds.get(activeKey);
@@ -704,7 +702,6 @@
     }
     ctx.globalAlpha = 1;
 
-    if (frames % 15 === 0) setText(hud.frame, String(frames).padStart(4, '0'));
     // A still picture still has to take tags away when their time is up.
     if (still && (tags.length || noise.length)) wake();
   }
@@ -866,7 +863,6 @@
       return el('span', { class: 'hud-field' }, el('span', { class: 'hud-label', text: label }), b);
     };
     stats.replaceChildren(
-      el('span', { class: 'hud-field' }, el('span', { class: 'hud-label', text: 'SWARM' }), el('b', { text: 'group-pulse' })),
       field('GROUPS', 'groups'),
       field('MESSAGES', 'messages'),
       field('NEWS', 'news'),
@@ -875,8 +871,6 @@
       field('NOISE', 'noise', 'dim'),
       field('WRITES', 'writes', 'teal'),
       field('ERRORS', 'errors'),
-      field('T', 'uptime'),
-      field('FRAME', 'frame'),
     );
   }
   buildHud();
@@ -886,7 +880,6 @@
   let pulse = null;
   let pulseStale = false;
   let lagsLoaded = false;
-  let startedAt = 0;
   const lags = [];
   let sessionTagged = 0;
   let sessionDropped = 0;
@@ -894,14 +887,6 @@
   let seenHits = new Set();
   const fresh = new Map();
 
-  setInterval(() => {
-    if (!startedAt || document.hidden) return;
-    const s = Math.max(0, Math.floor(now() - startedAt));
-    const hh = Math.floor(s / 3600);
-    const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
-    const ss = String(s % 60).padStart(2, '0');
-    setText(hud.uptime, `${hh}:${mm}:${ss}`);
-  }, 1000);
 
   function showTitle() {
     const c = clouds.get(activeKey);
@@ -947,32 +932,6 @@
 
   // ── instruments ────────────────────────────────────────────────────────
 
-  function logLine(verb, what, cls = '', when) {
-    const at = HM.format(when ? when * 1000 : Date.now());
-    const list = $('i-log-list');
-    list.prepend(el('li', { class: `${when ? '' : 'fresh '}${cls}` }, el('time', { text: at }), el('b', { text: verb }), el('span', { text: what })));
-    while (list.children.length > 18) list.lastChild.remove();
-  }
-
-  /** What a row of the activity stream reads as in the crawl log, or null when it is not worth a line. */
-  function describe(a) {
-    if (!a.ok) return ['error', `${a.method} · ${a.target}`, 'pink'];
-    if (a.kind === 'write') return ['WRITE', `${a.method} · ${a.target}`, 'pink'];
-    if (a.method === 'stored') return ['read', `${a.target} +${Number((/^(\d+)/.exec(a.detail) || [])[1] || 1)}`, ''];
-    if (a.method === 'messages.GetPeerDialogs') return ['peek', `${(/→ (\d+)/.exec(a.detail) || [])[1] ?? '?'} chats · ${a.ms ?? '?'}ms`, 'dim'];
-    if (a.method === 'messages.GetHistory' && /→ 0 messages/.test(a.detail)) return ['scan', a.target, 'dim'];
-    if (a.method === 'in the group') return ['link', cut(`${a.target} · ${a.detail}`, 60), 'cyan'];
-    if (a.method === 'news in the group') return ['flag', `HOT · ${a.target}`, 'pink'];
-    if (a.method === 'group was first') return ['flag', `FIRST · ${a.target}`, 'pink'];
-    if (a.method === 'feed failed' || a.method === 'feed back' || a.method === 'news checked') return ['feed', `${a.target} · ${a.method}`, 'cyan'];
-    if (a.method === 'connection lost' || a.method === 'connection back') return ['net', a.method, a.method === 'connection lost' ? 'pink' : ''];
-    if (a.method === 'term burst') return ['burst', cut(`${a.target} · ${(/^"([^"]+)"/.exec(a.detail) || [])[1] || ''}`, 60), 'yellow'];
-    if (a.actor === 'claude' && a.method === 'flagged') return ['flag', `CLAUDE · ${cut(a.target || 'for you', 40)}`, 'pink'];
-    if (a.kind === 'agent') return ['claude', cut(`${a.method}${a.target ? ` · ${a.target}` : ''}`, 60), 'teal'];
-    if (a.actor === 'claude') return ['claude', cut(`${a.method} · ${a.target}`, 60), 'teal'];
-    return null;
-  }
-
   /** Messages stored in the last minute (for the rate), trimmed as they come in. */
   const stored = [];
   function rate() {
@@ -983,38 +942,8 @@
   setInterval(() => {
     if (document.hidden) return;
     const r = rate();
-    setText($('i-log-rate'), `${r} msg/m`);
     setText($('i-rate'), `${r}/m`);
   }, 2000);
-
-  const removedOf = (chatId) => {
-    const x = pulse && pulse.noise ? pulse.noise.find((r) => r.chatId === chatId) : null;
-    return x ? Object.values(x.removed).reduce((a, b) => a + b, 0) : 0;
-  };
-
-  /** Each nebula: its messages of the day, the part the denoiser removed in grey. */
-  function renderGroups() {
-    if (!state) return;
-    const list = state.sources.filter((s) => s.enabled).sort((a, b) => b.messages24h - a.messages24h);
-    const max = Math.max(1, ...list.map((s) => s.messages24h));
-    setText($('i-groups-n'), `${list.length}/${state.sources.length}`);
-    const box = $('i-groups-list');
-    const sig = JSON.stringify([list.map((s) => [s.chatId, s.title, s.messages24h, removedOf(s.chatId), clouds.get(`g:${s.chatId}`)?.channel]), activeKey]);
-    if (box.__sig === sig) return;
-    box.__sig = sig;
-    box.replaceChildren(...list.slice(0, 8).map((s) => {
-      const on = `g:${s.chatId}` === activeKey;
-      const ch = clouds.get(`g:${s.chatId}`)?.channel;
-      const removed = Math.min(s.messages24h, removedOf(s.chatId));
-      const kept = el('i');
-      const cutBar = el('i', { class: 'cut' });
-      kept.style.width = `${Math.max(s.messages24h ? 2 : 0, ((s.messages24h - removed) / max) * 100)}%`;
-      cutBar.style.width = `${(removed / max) * 100}%`;
-      return el('li', { class: `${on ? 'on' : ''}${ch ? ' channel' : ''}`, title: `${s.title}: ${n(s.messages24h)} messages today, ${n(removed)} removed as noise` },
-        el('div', { class: 'row' }, el('span', { class: 'name', text: s.title }), el('span', { class: 'count', text: s.messages24h ? `${n(s.messages24h)}${removed ? ` · ${Math.round((removed / s.messages24h) * 100)}%` : ''}` : '0' })),
-        el('div', { class: 'bar' }, kept, cutBar));
-    }));
-  }
 
   /** The denoiser: what it removed over the last day, by why, across the groups. */
   function renderDenoiser() {
@@ -1042,63 +971,6 @@
   }
 
   /** The keyword detector: today's top stories (dashed: how many outlets; filled: your groups). */
-  function renderRadar() {
-    const svg = $('i-radar-svg');
-    const bars = $('i-radar-bars');
-    if (!news) return setText($('i-radar-n'), '—'); // not loaded yet
-    if (!news.enabled) {
-      setText($('i-radar-n'), 'radar off');
-      if (svg.__sig !== 'off') {
-        svg.__sig = 'off';
-        svg.replaceChildren();
-        bars.replaceChildren();
-        bars.__sig = '';
-      }
-      return;
-    }
-    const echoed = news.keywords.filter((k) => k.groups.length).length;
-    const hot = news.alerts.filter((a) => a.kind === 'hot').length;
-    const first = news.alerts.filter((a) => a.kind === 'first').length;
-    setText($('i-radar-n'), `${echoed} in your groups`);
-    const barSig = JSON.stringify([echoed, hot, first]);
-    if (bars.__sig !== barSig) {
-      bars.__sig = barSig;
-      const most = Math.max(1, echoed, hot, first);
-      bars.replaceChildren(...[['stories', echoed, 'teal'], ['hot', hot, 'pink'], ['had it first', first, 'yellow']].map(([label, v, cls]) => {
-        const bar = el('i', { class: cls });
-        bar.style.width = `${(v / most) * 100}%`;
-        return el('li', {}, el('span', { text: label }), el('span', { class: 'b' }, bar), el('b', { text: v }));
-      }));
-    }
-    const topics = news.keywords.filter((k) => k.sources.length >= 2 || k.groups.length).sort((a, b) => b.score - a.score).slice(0, 7);
-    const sig = JSON.stringify(topics.map((k) => [k.label, k.sources.length, k.groups.map((g) => g.count)]));
-    if (svg.__sig === sig) return;
-    svg.__sig = sig;
-    const NS = 'http://www.w3.org/2000/svg';
-    const mk = (tag, attrs) => {
-      const e = document.createElementNS(NS, tag);
-      for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, String(v));
-      return e;
-    };
-    svg.setAttribute('viewBox', '-100 -86 200 172');
-    svg.replaceChildren();
-    const m = Math.max(3, topics.length);
-    const pt = (i, r) => [Math.cos(-Math.PI / 2 + (i / m) * Math.PI * 2) * r, Math.sin(-Math.PI / 2 + (i / m) * Math.PI * 2) * r];
-    for (const ring of [0.33, 0.66, 1]) svg.append(mk('polygon', { points: Array.from({ length: m }, (_, i) => pt(i, ring * 62).join(',')).join(' '), class: 'ring' }));
-    for (let i = 0; i < m; i++) svg.append(mk('line', { x1: 0, y1: 0, x2: pt(i, 62)[0], y2: pt(i, 62)[1], class: 'spoke' }));
-    const maxSources = Math.max(1, ...topics.map((k) => k.sources.length));
-    const echoOf = (k) => k.groups.reduce((s, g) => s + g.count, 0);
-    const maxEcho = Math.max(1, ...topics.map(echoOf));
-    svg.append(mk('polygon', { class: 'outlets', points: Array.from({ length: m }, (_, i) => pt(i, topics[i] ? 10 + 52 * (topics[i].sources.length / maxSources) : 4).join(',')).join(' ') }));
-    svg.append(mk('polygon', { class: 'echo', points: Array.from({ length: m }, (_, i) => pt(i, topics[i] ? 4 + 58 * (Math.log1p(echoOf(topics[i])) / Math.log1p(maxEcho)) : 4).join(',')).join(' ') }));
-    topics.forEach((k, i) => {
-      const [x, y] = pt(i, 76);
-      const label = mk('text', { x, y: y + 3, 'text-anchor': Math.abs(x) < 8 ? 'middle' : x > 0 ? 'start' : 'end', class: k.groups.length ? 'hit' : '' });
-      label.textContent = Array.from(k.label.split(' · ')[0] || '').slice(0, 9).join('');
-      svg.append(label);
-    });
-  }
-
   /** Messages per hour over the last day, and the day's totals. */
   function renderHeat() {
     if (!pulse || !state) return;
@@ -1171,68 +1043,6 @@
     setText($('i-speed-note'), `median of the last ${recent.length} · fastest ${recent[0]}s`);
   }
 
-  // The reader as code: what it is doing, typed out as it happens.
-  const code = { queue: [], typing: null, timer: 0, doneAt: [] };
-  function say(line, cls = '') {
-    code.queue.push([line, cls]);
-    if (code.queue.length > 6) code.queue.splice(0, code.queue.length - 6);
-    if (!code.timer) typeNext();
-  }
-  function typeNext() {
-    code.timer = 0;
-    const pre = $('i-code-pre');
-    if (!code.typing) {
-      const next = code.queue.shift();
-      if (!next) return;
-      const line = el('div', { class: next[1] }, el('span'), el('i', { class: 'cursor' }));
-      pre.append(line);
-      while (pre.children.length > 13) pre.firstChild.remove();
-      for (const c of pre.querySelectorAll('.cursor')) if (c.parentNode !== line) c.remove();
-      code.typing = { chars: Array.from(next[0]), at: 0, node: line.firstChild };
-    }
-    const tp = code.typing;
-    const step = calm.matches || document.hidden ? tp.chars.length : Math.max(1, Math.ceil(tp.chars.length / 26));
-    tp.at = Math.min(tp.chars.length, tp.at + step);
-    tp.node.textContent = tp.chars.slice(0, tp.at).join('');
-    if (tp.at >= tp.chars.length) {
-      code.typing = null;
-      const t = Date.now();
-      code.doneAt.push(t);
-      while (code.doneAt.length && code.doneAt[0] < t - 60_000) code.doneAt.shift();
-    }
-    code.timer = setTimeout(typeNext, code.typing ? 28 : 160);
-  }
-  setInterval(() => {
-    if (document.hidden) return;
-    const since = Date.now() - 60_000;
-    while (code.doneAt.length && code.doneAt[0] < since) code.doneAt.shift();
-    setText($('i-code-rate'), `${code.doneAt.length} l/m`);
-  }, 2000);
-
-  /** Who is signed in, and how digests and notifications are set up. */
-  function renderStatus() {
-    if (!state) return;
-    const a = state.account;
-    const conn = a && a.connection;
-    const parts = a
-      ? [a.name, `ID ${a.id}`, conn ? (conn.state === 'offline' ? 'Telegram unreachable · retrying' : `connected since ${HM.format(conn.since * 1000)}`) : 'signed in', 'revoke in Telegram → Devices']
-      : [state.readerConfigured ? 'not signed in: run npm run login, then restart' : 'not signed in: set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env, then npm run login'];
-    const lw = state.activity.lastWrite;
-    if (lw) parts.push(`last write: ${lw.method} · ${lw.target} · ${HM.format(lw.at * 1000)}`);
-    parts.push(
-      state.bot ? `digests go to chat ${state.reportTo ?? '—'} through @${state.bot.username}` : 'digests stay on this page',
-      state.claude.ready ? `Claude ${state.claude.model} · ${usd(state.costs.day.costUsd)} today · ${usd(state.costs.all.costUsd)} total` : 'Claude API not set: digests come from Claude Desktop',
-      state.notifications ? 'macOS notifications on' : 'notifications off',
-      `messages kept ${state.retentionDays} days`,
-    );
-    const box = $('hud-status');
-    const sig = JSON.stringify(parts);
-    if (box.__sig === sig) return;
-    box.__sig = sig;
-    box.replaceChildren(...parts.map((p, i) => el('span', { class: i === 0 ? 'who' : p.startsWith('last write') ? 'pink' : '' }, p)));
-    setText($('hud-brand'), a ? `${a.name} · writes only on your click` : 'writes only on your click');
-  }
-
   // ── fetching what the view needs on its own ────────────────────────────
 
   async function get(path) {
@@ -1256,7 +1066,6 @@
         lagsLoaded = true;
         renderHeat();
         renderSpeed();
-        renderGroups();
         renderDenoiser();
       } catch {
         // the console is restarting; the next event tries again
@@ -1299,17 +1108,8 @@
         }
       }
       if (seed) return;
-      if (dropped.length) {
-        const kinds = [...new Set(dropped)].join(', ');
-        logLine('drop', `${dropped.length} · ${kinds}`, 'dim');
-        say(`denoise(drop=${dropped.length})  # ${kinds}`, 'dim');
-        sessionDropped += dropped.length;
-      }
-      if (tagged.length) {
-        logLine('tag', tagged.join('  '), 'cyan');
-        say(`detect(${tagged.slice(0, 3).map((w) => `"${w}"`).join(', ')})`, 'cyan');
-        sessionTagged += tagged.length;
-      }
+      sessionDropped += dropped.length;
+      sessionTagged += tagged.length;
       renderDenoiser();
       // Stored at `at`; the newest of them was posted at its date: that is how long it took.
       const newest = msgs[msgs.length - 1];
@@ -1342,7 +1142,6 @@
     setState(s) {
       const firstTime = !state;
       state = s;
-      startedAt = s.startedAt || startedAt;
       const enabled = s.sources.filter((x) => x.enabled);
       const keys = new Set(enabled.map((x) => `g:${x.chatId}`));
       for (const k of [...clouds.keys()]) if (k.startsWith('g:') && !keys.has(k)) clouds.delete(k);
@@ -1368,11 +1167,6 @@
           if (firstTime) read(newest.chatId, 4, null, true);
         }
       }
-      if (firstTime) {
-        say('# reader.py · reads your groups; writes only on your click', 'dim');
-        say(`groups = watch(${enabled.length})  # read-only`);
-        say(s.news ? `news = radar(${s.news.sources})  # first-tier feeds` : 'news = None  # PULSE_NEWS=off', s.news ? '' : 'dim');
-      }
       setText(hud.groups, `${enabled.length}/${s.sources.length}`);
       setText(hud.messages, n(s.sources.reduce((t, x) => t + x.messages24h, 0)));
       setText(hud.writes, n(s.activity.counts.write || 0));
@@ -1386,9 +1180,8 @@
       }
       showTitle();
       renderTabs();
-      renderGroups();
       renderHeat();
-      renderStatus();
+      setText($('hud-brand'), s.account ? `${s.account.name} · writes only on your click` : 'writes only on your click');
       if (!pulse) loadPulse();
       wake();
     },
@@ -1400,7 +1193,6 @@
       if (!v.enabled) {
         links.length = 0;
         seenHits = new Set();
-        renderRadar();
         return;
       }
       const channels = new Set(v.sources.filter((x) => x.kind === 'telegram').map((x) => `g:${x.id.slice(3)}`));
@@ -1410,8 +1202,6 @@
         nc.words = v.keywords.filter((k) => k.sources.length >= 2).slice(0, 3).map((k) => cut(k.label, 30));
         if (prev && prev.enabled && v.items24h > prev.items24h) {
           ping(nc.x, nc.y, C.cyan);
-          logLine('feed', `+${v.items24h - prev.items24h} news items`, 'cyan');
-          say(`news.fetch()  # +${v.items24h - prev.items24h} items`);
         }
       }
       // New matches: a message the radar matched that was not in the last view. Each becomes a flag
@@ -1431,8 +1221,6 @@
           focus(g.key);
           spawnTag(`${cut(word, 16)} → ${cut(story, 18)}`, 'news', g);
         }
-        logLine('link', `${cut(h.group, 18)} → ${cut(story, 24)}`, 'cyan');
-        say(`link("${cut(h.group, 14)}", "${cut(story, 18)}")`, 'cyan');
         sessionTagged++;
       }
       seenHits = ids;
@@ -1447,51 +1235,30 @@
       setText(hud.links, n(linkedCount()));
       setText(hud.flags, n(v.alerts.length));
       setText(hud.news, n(v.items24h));
-      renderRadar();
       renderHeat();
       wake();
     },
 
-    /** The rows the page loaded at the start: written into the log only (nothing moves for the past). */
-    history(rows) {
-      for (const a of rows.slice(-120)) {
-        const d = describe(a);
-        if (d) logLine(d[0], d[1], d[2], a.at);
-      }
-    },
-
     /** One row of the activity stream, as it happens. */
     activity(a) {
-      const d = describe(a);
-      if (d) logLine(d[0], d[1], d[2]);
-      if (!a.ok) return;
-      if (a.kind === 'write') {
-        say(`# WRITE: ${a.method}`, 'pink');
-        return;
-      }
+      if (!a.ok || a.kind === 'write') return;
       const chat = sourceByTitle(a.target);
       if (a.method === 'stored' && chat) {
         const count = Number((/^(\d+)/.exec(a.detail) || [])[1] || 1);
         stored.push([now(), count]);
         rate(); // trims what is older than a minute
-        say(`read("${cut(a.target, 16)}")  # +${count}`);
         read(chat.chatId, count, a.at);
         loadPulse(4000);
       } else if (a.method === 'messages.GetPeerDialogs') {
         if (clouds.get(activeKey)) ping(crawler.x, crawler.y);
-        say(`peek(chats=${(/→ (\d+)/.exec(a.detail) || [])[1] ?? '?'})  # ${a.ms ?? '?'}ms`, 'dim');
       } else if (a.method === 'news in the group' || a.method === 'group was first') {
         const first = a.method === 'group was first';
-        say(`flag("${cut(a.target, 16)}", ${first ? 'first' : 'hot'}=True)`, 'pink');
         if (chat) spawnTag(first ? 'had it first' : 'HOT', 'news', clouds.get(`g:${chat.chatId}`));
-      } else if (a.method === 'connection lost' || a.method === 'connection back') {
-        say(`# ${a.method}`, 'dim');
       }
     },
   };
 
   window.Crawler = api;
   renderSpeed();
-  renderRadar();
   resize();
 })();

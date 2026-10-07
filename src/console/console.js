@@ -413,13 +413,13 @@ function sourceRow(src, standing) {
   const reading = readingCell(src, standing);
   const tr = el('tr', { class: src.enabled ? '' : 'off' },
     el('td', {}, sw),
-    el('td', {}, el('div', { class: 'src-title', text: src.title, title: src.title }), el('div', { class: 'src-sub', text: [src.ref, ORIGIN[src.origin]].filter(Boolean).join(' · ') })),
+    el('td', {}, el('button', { type: 'button', class: 'src-title', text: src.title, title: `${src.title} · read its messages`, onclick: () => selectSource(src.chatId) }), el('div', { class: 'src-sub', text: [src.ref, ORIGIN[src.origin]].filter(Boolean).join(' · ') })),
     el('td', {}, accessPill(src.access)),
     el('td', {}, el('div', {}, count, ' messages'), el('div', { class: 'cell-sub' }, people, ' people · ', last)),
     el('td', {}, el('div', { text: src.perDay !== null ? `~${n(src.perDay)} / day` : '—' }), el('div', { class: 'cell-sub', text: src.members ? `${n(src.members)} members` : '' })),
     el('td', {}, guardsCell(src)),
     el('td', {}, reading),
-    el('td', {}, el('div', { class: 'row-actions' }, el('button', { class: 'btn', text: 'Messages', onclick: () => selectSource(src.chatId) }), moreButton(src.chatId, src.title))));
+    el('td', {}, el('div', { class: 'row-actions' }, moreButton(src.chatId, src.title))));
   tr.__update = (x) => {
     setText(count, n(x.messages24h));
     setText(people, n(x.people24h));
@@ -431,6 +431,7 @@ function sourceRow(src, standing) {
 
 function renderSources(s) {
   const t = $('sources');
+  setText($('groups-n'), String(s.sources.length));
   if (!t.tBodies.length) t.append(el('thead', {}, el('tr', {}, SOURCE_HEAD.map((h) => el('th', { text: h })))), el('tbody'));
   $('auto-watch').checked = Boolean(s.autoWatchNew);
   const standing = new Map(((s.privateGroups && s.privateGroups.memberships) || []).map((m) => [m.chatId, m.state]));
@@ -828,7 +829,8 @@ async function watch(button, target) {
     toast(r.message);
     if (r.ok) {
       $('probe-result').hidden = true;
-      $('add-input').value = '';
+      $('discover-input').value = '';
+      syncFindButton();
       await refresh();
       if (r.chatId) selectSource(r.chatId);
     }
@@ -839,13 +841,23 @@ async function watch(button, target) {
   }
 }
 
-$('add-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const target = $('add-input').value.trim();
-  if (!target) return;
-  const b = $('probe-btn');
-  b.disabled = true;
-  b.textContent = 'Checking…';
+/** A group by @username, t.me link, invite link or id is checked; anything else is a topic to search. */
+const looksLikeGroup = (q) => /^@[A-Za-z]|(^|\/\/)(t|telegram)\.me\/|^tg:\/\/|joinchat\/|^\+[A-Za-z0-9_-]{8,}$|^-100\d{5,}$/i.test(q.trim());
+let checking = false;
+
+/** The one box's button: Check for a group, Search for a topic. */
+function syncFindButton() {
+  const group = looksLikeGroup($('discover-input').value);
+  const b = $('discover-btn');
+  const v = discoverView;
+  setText(b, checking ? 'Checking…' : group ? 'Check' : 'Search');
+  b.title = group ? 'A read-only look at this group: nothing is joined' : 'Search Telegram for groups and channels on this topic';
+  b.disabled = checking || (group ? Boolean(v && !v.available) : !v || Boolean(v.running) || !v.available);
+}
+
+async function checkGroup(target) {
+  checking = true;
+  syncFindButton();
   try {
     const r = await api('/api/probe', { target });
     if (r.error && !r.verdict) toast(r.error);
@@ -856,10 +868,10 @@ $('add-form').addEventListener('submit', async (e) => {
   } catch (err) {
     toast(err.message);
   } finally {
-    b.disabled = false;
-    b.textContent = 'Check';
+    checking = false;
+    syncFindButton();
   }
-});
+}
 
 // ── sources controls ───────────────────────────────────────────────────────
 
@@ -1000,7 +1012,7 @@ function renderDiscover() {
   const busy = Boolean(v.running);
   const status = $('discover-status');
   status.classList.toggle('searching', busy);
-  $('discover-btn').disabled = busy || !v.available;
+  syncFindButton();
   $('discover-again').disabled = busy || !v.available;
   for (const b of $('discover-topics').children) b.disabled = busy || !v.available;
   for (const b of $('discover-kinds').children) b.disabled = busy;
@@ -1051,9 +1063,37 @@ $('discover-kinds').addEventListener('click', (e) => {
 $('discover-form').addEventListener('submit', (e) => {
   e.preventDefault();
   const q = $('discover-input').value.trim();
+  if (looksLikeGroup(q)) return void checkGroup(q);
   if (q.length >= 2) discoverKey = { topic: '', query: q, kind: discoverKey.kind };
   startDiscover();
 });
+$('discover-input').addEventListener('input', syncFindButton);
+
+// ── groups: Reading, or Find & add ─────────────────────────────────────────
+
+function showGroups(which) {
+  for (const b of $('groups-tabs').children) {
+    const on = b.dataset.g === which;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-selected', String(on));
+  }
+  $('groups-reading').hidden = which !== 'reading';
+  $('groups-find').hidden = which !== 'find';
+  try {
+    localStorage.setItem('groups-tab', which);
+  } catch {
+    // not remembered: Reading next time
+  }
+}
+$('groups-tabs').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-g]');
+  if (b) showGroups(b.dataset.g);
+});
+try {
+  showGroups(localStorage.getItem('groups-tab') === 'find' ? 'find' : 'reading');
+} catch {
+  showGroups('reading');
+}
 $('discover-again').addEventListener('click', startDiscover);
 
 // ── activity feed ──────────────────────────────────────────────────────────
@@ -1534,10 +1574,12 @@ function renderNews(v) {
   const rank = (k) => (k.groups.some((g) => g.level === 'hot') ? 3 : k.groups.some((g) => g.level === 'first') ? 2 : k.groups.length ? 1 : 0);
   const main = v.keywords.filter((k) => k.sources.length >= 2 || k.groups.length > 0).sort((a, b) => rank(b) - rank(a) || b.score - a.score);
   const single = v.keywords.filter((k) => !(k.sources.length >= 2 || k.groups.length > 0));
-  sync($('news-topics'), main, { key: (k) => k.id, sig: topicSig, render: topicItem, empty: emptyLi(v.items24h ? 'No story carried by two outlets yet today.' : 'Reading the feeds… the first keywords appear within a minute.') });
-  $('news-more').hidden = single.length === 0;
-  setText($('news-more-label'), `Single-source headlines (${single.length})`);
-  sync($('news-single'), single.slice(0, 40), { key: (k) => k.id, sig: topicSig, render: topicItem });
+  const TOP = 8;
+  sync($('news-topics'), main.slice(0, TOP), { key: (k) => k.id, sig: topicSig, render: topicItem, empty: emptyLi(v.items24h ? 'No story carried by two outlets yet today.' : 'Reading the feeds… the first keywords appear within a minute.') });
+  const rest = [...main.slice(TOP), ...single];
+  $('news-more').hidden = rest.length === 0;
+  setText($('news-more-label'), [main.length > TOP ? `${main.length - TOP} more keywords` : '', single.length ? `${single.length} single-source headlines` : ''].filter(Boolean).join(' · '));
+  sync($('news-single'), rest.slice(0, 80), { key: (k) => k.id, sig: topicSig, render: topicItem });
   // In the groups: newest first.
   sync($('news-hits'), v.hits, {
     key: (h) => `${h.chatId}:${h.messageId}:${h.topicId}`,
@@ -1704,6 +1746,26 @@ function makeFoldable() {
   open(location.hash);
 }
 
+// ── system ─────────────────────────────────────────────────────────────────
+
+const usd = (x) => `$${(x || 0).toFixed(2)}`;
+
+/** Who is signed in, the last write, and how digests and notifications go. */
+function renderSystem(s) {
+  const a = s.account;
+  const conn = a && a.connection;
+  const lw = s.activity.lastWrite;
+  const lines = [
+    [a ? `${a.name} · Telegram id ${a.id} · ${conn ? (conn.state === 'offline' ? 'Telegram unreachable, retrying' : `connected since ${fmtWhen(conn.since)}`) : 'signed in'} · end this session any time in Telegram → Settings → Devices` : s.readerConfigured ? 'Not signed in: run npm run login, then restart.' : 'Not signed in: set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env, then npm run login.', ''],
+    lw ? [`Last write: ${METHODS[lw.method] || lw.method} · ${lw.target} · ${fmtWhen(lw.at)}`, 'pink'] : null,
+    [s.bot ? `Digests go to chat ${s.reportTo ?? '—'} through @${s.bot.username}` : 'Digests stay on this page and in data/digests/ (no bot)', ''],
+    [s.claude.ready ? `Claude ${s.claude.model} · ${usd(s.costs.day.costUsd)} today · ${usd(s.costs.all.costUsd)} in all` : 'No Claude API key: digests come from Claude Desktop', ''],
+    [s.notifications ? 'macOS notifications on' : 'Notifications off', ''],
+    [`Messages are kept ${s.retentionDays} days`, ''],
+  ].filter(Boolean);
+  paint($('sys-status'), lines, () => lines.map(([text, cls]) => el('li', { class: cls, text })));
+}
+
 // ── refresh loop and live stream ───────────────────────────────────────────
 
 // While the page is hidden nothing is fetched or drawn; it catches up the moment it is shown again.
@@ -1756,6 +1818,7 @@ function refresh(first) {
       renderSources(state);
       renderInvites(state);
       renderOutbox(state);
+      renderSystem(state);
       if (discoverView) renderDiscover(); // "Reading" follows a Watch
       if ($('notify-test').hidden !== !state.notifications) $('notify-test').hidden = !state.notifications;
       if (!state.news) $('news-panel').hidden = true;
@@ -1830,7 +1893,6 @@ window.Pulse = {
     feedRows.push(a);
     lastActivityId = Math.max(lastActivityId, a.id);
   }
-  window.Crawler?.history(initial);
   renderFeed();
   connect();
   loadStorage();

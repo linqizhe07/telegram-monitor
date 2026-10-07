@@ -618,9 +618,8 @@
   function toggle(force) {
     s.open = typeof force === 'boolean' ? force : !s.open;
     pad.hidden = !s.open;
-    $('pad-tab').hidden = s.open;
     document.body.classList.toggle('pad-open', s.open);
-    for (const b of [$('pad-toggle'), $('pad-tab')]) b.setAttribute('aria-expanded', String(s.open));
+    $('pad-toggle').setAttribute('aria-expanded', String(s.open));
     try {
       localStorage.setItem('pad-open', s.open ? '1' : '0');
     } catch {
@@ -644,7 +643,6 @@
     b.addEventListener('click', () => press(b.dataset.k));
   }
   $('pad-close').addEventListener('click', () => toggle(false));
-  $('pad-tab').addEventListener('click', () => toggle(true));
   $('pad-toggle').addEventListener('click', () => toggle());
   $('pad-compose').addEventListener('submit', (e) => {
     e.preventDefault();
