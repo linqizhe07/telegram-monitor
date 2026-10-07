@@ -95,7 +95,7 @@ test('the MCP server: every tool, prompt and resource an agent uses, with what i
     assert.match(client.getInstructions() ?? '', /whats_new gives everything stored since your last look/);
 
     const tools = (await client.listTools()).tools.map((x) => x.name);
-    for (const name of ['hot_terms', 'status', 'whats_new', 'read_messages', 'get_messages', 'overview', 'search_messages', 'get_playbook', 'save_digest', 'past_digests', 'news_keywords', 'news_in_group', 'refresh_news', 'alerts', 'flag_for_owner', 'account_activity', 'check_group', 'list_account_chats', 'invite_status', 'watch_source', 'catch_up_now', 'set_monitoring', 'refresh_sources', 'audit_capture', 'list_sources']) {
+    for (const name of ['find_groups', 'hot_terms', 'status', 'whats_new', 'read_messages', 'get_messages', 'overview', 'search_messages', 'get_playbook', 'save_digest', 'past_digests', 'news_keywords', 'news_in_group', 'refresh_news', 'alerts', 'flag_for_owner', 'account_activity', 'check_group', 'list_account_chats', 'invite_status', 'watch_source', 'catch_up_now', 'set_monitoring', 'refresh_sources', 'audit_capture', 'list_sources']) {
       assert.ok(tools.includes(name), `tool ${name}`);
     }
     assert.deepEqual((await client.listPrompts()).prompts.map((p) => p.name).sort(), ['daily_digest', 'health_check', 'news_brief', 'whats_new']);
@@ -218,6 +218,12 @@ test('the MCP server: every tool, prompt and resource an agent uses, with what i
     const burst = (await call('alerts', { reader: 'test' })).structuredContent as { alerts: { kind: string; group: string | null; text: string }[] };
     assert.deepEqual(burst.alerts.map((a) => [a.kind, a.group]), [['term-burst', 'Public Group']]);
     assert.match(textOf(await call('hot_terms', { source: '#3' })), /Raised by the monitor in the last 24h[^\n]*\n  [^\n]+ · Public Group · "币安提现不了，卡了": 9 messages from 9 people/);
+
+    // Finding groups needs the reader account (this stand-in console has none).
+    const finding = await call('find_groups', { topic: 'hyperliquid' });
+    assert.equal(finding.isError, true);
+    assert.match(textOf(finding), /reader account is not signed in/);
+    assert.equal((await call('find_groups', {})).isError, true, 'a topic or a query');
 
     // A subscribed resource is announced when it changes.
     const updated: string[] = [];

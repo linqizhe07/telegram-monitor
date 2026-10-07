@@ -297,6 +297,28 @@ input[role="switch"]:disabled { opacity: 0.5; cursor: wait; }
 .lag.before { color: #12100a; background: var(--yellow); border-color: var(--yellow); }
 mark { background: var(--mark); color: inherit; padding: 0 2px; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
 
+/* ── find groups ───────────────────────────────────────────────────────────── */
+
+#discover-form { margin-top: 0; }
+#discover-status { min-height: 18px; }
+#discover-status.searching::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 8px; background: var(--cyan); vertical-align: 1px; animation: blink 1s steps(2) infinite; }
+.discover-head { display: flex; justify-content: space-between; align-items: center; gap: 8px 16px; flex-wrap: wrap; margin: 14px 0 10px; font-size: 12px; color: var(--muted); }
+.discover-head b { color: var(--ink); font-weight: 700; }
+table.discover { min-width: 1040px; }
+table.discover td { vertical-align: top; }
+.discover .src-title a { color: inherit; text-decoration: none; }
+.discover .src-title a:hover, .discover .src-title a:focus-visible { color: var(--cyan); text-decoration: underline; }
+.why { display: grid; gap: 3px; max-width: 380px; font-size: 11px; line-height: 1.45; }
+.why .plus { color: var(--teal); }
+.why .minus { color: var(--pink); }
+.why .via { color: var(--faint); }
+.score { display: block; margin-top: 4px; font-size: 10.5px; color: var(--faint); }
+.scam-list { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.scam-list li { padding: 8px 10px; border: 1px solid rgb(255 92 138 / 0.28); font-size: 11.5px; line-height: 1.5; }
+.scam-list .t { font-family: var(--sans); font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.scam-list .r { color: var(--pink); }
+.notes { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 3px; font-size: 11.5px; color: var(--muted); }
+
 /* ── tables ────────────────────────────────────────────────────────────────── */
 
 .table-wrap { overflow-x: auto; }

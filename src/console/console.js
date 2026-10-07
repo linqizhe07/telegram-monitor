@@ -195,6 +195,8 @@ const METHODS = {
   'users.GetUsers': 'read a profile',
   'users.GetFullUser': 'read a profile',
   'messages.CheckChatInvite': 'look at an invite (no join)',
+  'contacts.Search': 'search Telegram for public chats',
+  'channels.GetChannelRecommendations': 'ask for similar channels',
   'channels.GetChannels': 'read group info',
   'upload.GetFile': 'download a file',
   'channels.JoinChannel': 'JOIN a group',
@@ -765,6 +767,135 @@ $('auto-watch').addEventListener('change', async (e) => {
     box.disabled = false;
   }
 });
+
+// ── find groups ────────────────────────────────────────────────────────────
+
+const FOUND_VERDICT = { good: ['GOOD', 'ok'], ok: ['WORTH A LOOK', 'read'], low: ['LOW', 'warn'], closed: ['CLOSED', ''], scam: ['LIKELY SCAM', 'bad'] };
+const LANGS = { zh: 'Chinese', en: 'English', mixed: 'Chinese + English' };
+let discoverView = null;
+let discoverKey = { topic: 'hyperliquid', query: null };
+let discoverTimer = null;
+let discoverSignature = '';
+
+const sameSearch = (r, k) => (k.query ? (r.query || '').toLowerCase() === k.query.toLowerCase() : r.topic === k.topic && !r.query);
+
+async function loadDiscover() {
+  clearTimeout(discoverTimer);
+  try {
+    discoverView = await api('/api/discover');
+  } catch {
+    return;
+  }
+  renderDiscover();
+  if (discoverView.running) discoverTimer = setTimeout(loadDiscover, 1500);
+}
+
+async function startDiscover() {
+  try {
+    const r = await api('/api/discover', { topic: discoverKey.topic || '', query: discoverKey.query });
+    toast(r.message);
+  } catch (err) {
+    toast(err.message);
+  }
+  loadDiscover();
+}
+
+/** A topic: shows its last result when it is under 12 hours old, or searches. */
+function pickTopic(topic) {
+  discoverKey = { topic, query: null };
+  $('discover-input').value = '';
+  const last = discoverView && discoverView.latest.find((r) => sameSearch(r, discoverKey));
+  if (last && Date.now() / 1000 - last.doneAt < 12 * 3600) renderDiscover();
+  else startDiscover();
+}
+
+function discoverRow(a) {
+  const [label, cls] = FOUND_VERDICT[a.verdict];
+  const reading = state?.sources.some((src) => src.chatId === a.chatId && src.enabled);
+  const sub = [a.username ? `@${a.username}` : null, a.type, a.language ? LANGS[a.language] : null].filter(Boolean).join(' · ');
+  const act = reading
+    ? el('span', { class: 'pill ok', text: 'Reading' })
+    : a.verdict === 'closed'
+      ? (a.link ? el('a', { class: 'btn', href: a.link, target: '_blank', rel: 'noopener noreferrer', title: 'Only members can read it: join in the Telegram app if you want it, and it shows up under Sources' }, 'Open') : null)
+      : el('span', { class: 'row-actions' },
+          el('button', { type: 'button', class: 'btn', title: 'Read it from outside: the account does not join', onclick: (e) => action(e.currentTarget, '/api/watch', { target: `@${a.username}` }, `Starting to read ${a.title}…`) }, 'Watch'),
+          el('button', { type: 'button', class: 'btn', title: 'Hide it from future searches', onclick: async (e) => {
+            e.currentTarget.disabled = true;
+            try {
+              toast((await api('/api/discover/dismiss', { chatId: a.chatId })).message);
+              e.currentTarget.closest('tr').remove();
+            } catch (err) {
+              toast(err.message);
+            }
+          } }, 'Hide'));
+  return el('tr', {},
+    el('td', {}, el('span', { class: `pill ${cls}`, text: label }), a.verdict === 'closed' ? null : el('span', { class: 'score', text: `score ${a.score}` })),
+    el('td', {},
+      el('div', { class: 'src-title' }, a.link ? el('a', { href: a.link, target: '_blank', rel: 'noopener noreferrer', title: `Open ${a.title} in Telegram` }, a.title) : a.title),
+      el('div', { class: 'src-sub', text: sub })),
+    el('td', {}, el('span', { class: 'num', text: n(a.members) })),
+    el('td', {}, el('span', { class: 'num', text: a.perDay === null ? '—' : a.perDay >= 10 ? n(Math.round(a.perDay)) : a.perDay.toFixed(1) }), el('div', { class: 'cell-sub', text: a.type === 'channel' ? 'posts a day' : 'messages a day' })),
+    el('td', {}, a.speakers === null ? '—' : el('span', { class: 'num', text: String(a.speakers) }), a.speakers === null ? null : el('div', { class: 'cell-sub', text: `in the last ${a.sampled}` })),
+    el('td', {}, el('div', { class: 'why' },
+      a.good.map((x) => el('span', { class: 'plus', text: `+ ${x}` })),
+      a.bad.map((x) => el('span', { class: 'minus', text: `− ${x}` })),
+      el('span', { class: 'via', text: `found by ${a.via.join('; ')}` }))),
+    el('td', {}, act));
+}
+
+function renderDiscover() {
+  const v = discoverView;
+  if (!v) return;
+  for (const b of $('discover-topics').children) b.classList.toggle('on', !discoverKey.query && b.dataset.topic === discoverKey.topic);
+  const busy = Boolean(v.running);
+  const status = $('discover-status');
+  status.classList.toggle('searching', busy);
+  $('discover-btn').disabled = busy || !v.available;
+  $('discover-again').disabled = busy || !v.available;
+  for (const b of $('discover-topics').children) b.disabled = busy || !v.available;
+  if (!v.available) setText(status, 'Needs the reader account signed in.');
+  else if (busy) setText(status, `Searching for ${v.running.label}: ${v.running.step}${v.running.toLook ? ` · ${v.running.looked} of ${v.running.toLook} looked at` : ''}`);
+  else if (v.budget) setText(status, `${Math.max(0, v.budget.perHour - v.budget.usedHour)} of ${v.budget.perHour} searches left this hour · each sends Telegram about 40 read-only requests and takes about a minute; nothing is joined`);
+
+  const run = v.latest.find((r) => sameSearch(r, discoverKey));
+  const box = $('discover-result');
+  if (!run) {
+    box.hidden = true;
+    return;
+  }
+  const reading = (state?.sources || []).filter((x) => x.enabled).map((x) => x.chatId).join(',');
+  const signature = `${run.id}|${run.results.length}|${reading}`;
+  if (signature === discoverSignature && !box.hidden) return;
+  discoverSignature = signature;
+  box.hidden = false;
+  const count = (verdict) => run.results.filter((r) => r.verdict === verdict).length;
+  $('discover-summary').replaceChildren(
+    el('b', { text: run.label }), ` · searched `, agoEl(run.at), ` by ${run.by} · ${run.found} found, ${run.looked} looked at · `,
+    el('span', { class: 'teal', text: `${count('good')} good` }), `, ${count('ok')} worth a look, ${count('low')} low, ${count('closed')} closed, `,
+    el('span', { class: 'pink', text: `${count('scam')} likely scams` }));
+  const listed = run.results.filter((r) => r.verdict !== 'scam');
+  const t = $('discover-table');
+  t.replaceChildren(
+    el('thead', {}, el('tr', {}, ['', 'Group', 'Members', 'Activity', 'Speakers', 'Why', ''].map((h) => el('th', { text: h })))),
+    el('tbody', {}, listed.length ? listed.map(discoverRow) : el('tr', {}, el('td', { class: 'empty', colspan: '7', text: 'Nothing worth reading turned up. Try other words.' }))));
+  const scams = run.results.filter((r) => r.verdict === 'scam');
+  $('discover-scams').hidden = scams.length === 0;
+  setText($('discover-scams-label'), `${scams.length} likely scam${scams.length === 1 ? '' : 's'}, kept out of the list (no links)`);
+  $('discover-scam-list').replaceChildren(...scams.map((a) => el('li', {}, el('span', { class: 't', text: `${a.title}${a.username ? ` · @${a.username}` : ''}` }), el('br'), el('span', { class: 'r', text: a.bad.join(' · ') }))));
+  $('discover-notes').replaceChildren(...[...(run.error ? [`Stopped early: ${run.error}`] : []), ...run.notes].map((x) => el('li', { text: x })));
+}
+
+$('discover-topics').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (b && !b.disabled) pickTopic(b.dataset.topic);
+});
+$('discover-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const q = $('discover-input').value.trim();
+  if (q.length >= 2) discoverKey = { topic: '', query: q };
+  startDiscover();
+});
+$('discover-again').addEventListener('click', startDiscover);
 
 // ── activity feed ──────────────────────────────────────────────────────────
 
@@ -1378,6 +1509,7 @@ function refresh(first) {
       renderSources(state);
       renderInvites(state);
       renderOutbox(state);
+      if (discoverView) renderDiscover(); // "Reading" follows a Watch
       if ($('notify-test').hidden !== !state.notifications) $('notify-test').hidden = !state.notifications;
       if (!state.news) $('news-panel').hidden = true;
       else if (Date.now() - newsLoadedAt > 20_000) loadNews();
@@ -1442,6 +1574,7 @@ function followSections() {
   renderFeed();
   connect();
   loadStorage();
+  loadDiscover();
   setInterval(refresh, 10_000);
   setInterval(() => !document.hidden && loadStorage(), 60_000);
   setInterval(() => !document.hidden && $('msg-source').value && loadMessages(), 30_000);
