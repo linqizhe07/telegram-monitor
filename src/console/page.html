@@ -259,49 +259,39 @@
 <footer class="foot"><span>group-pulse · this computer only (127.0.0.1)</span><span id="foot-up"></span></footer>
 <div class="menu-pop" id="row-menu" role="menu" hidden></div>
 <div class="toast" id="toast" role="status" hidden></div>
-<aside class="pad" id="pad" aria-label="Controller" hidden>
-  <div class="pad-top">
-    <button type="button" class="pad-key sh" data-k="LT" title="Mark this chat read (U)"><b>LT</b><span>Mark read</span></button>
-    <button type="button" class="pad-key sh" data-k="LB" title="Switch Signal / All ([)"><b>LB</b><span>Signal / All</span></button>
-    <div class="pad-brand"><span class="pad-dot" id="pad-dot" aria-hidden="true"></span><span id="pad-device">PAD · keyboard</span></div>
-    <button type="button" class="pad-key sh" data-k="RB" title="The message's bot buttons (])"><b>RB</b><span>Buttons</span></button>
-    <button type="button" class="pad-key sh" data-k="RT" title="Mute or unmute this chat (M)"><b>RT</b><span id="pad-rt">Mute</span></button>
-    <button type="button" class="pad-close" id="pad-close" title="Put the controller away (G)" aria-label="Put the controller away">
-      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 8l5 5 5-5"/></svg>
-    </button>
-  </div>
-  <div class="pad-body">
-    <div class="dpad" role="group" aria-label="Move: messages up and down, chats left and right">
-      <button type="button" class="pad-key d up" data-k="up" title="Newer message (↑)" aria-label="Newer message">▲</button>
-      <button type="button" class="pad-key d left" data-k="left" title="Previous chat (←)" aria-label="Previous chat">◀</button>
-      <span class="d mid" aria-hidden="true"></span>
-      <button type="button" class="pad-key d right" data-k="right" title="Next chat (→)" aria-label="Next chat">▶</button>
-      <button type="button" class="pad-key d down" data-k="down" title="Older message (↓)" aria-label="Older message">▼</button>
-    </div>
-    <div class="pad-screen" id="pad-screen">
-      <div class="lcd-chat" id="pad-chat"></div>
-      <div class="lcd-msg" id="pad-msg"></div>
-      <div class="lcd-layer" id="pad-layer" hidden></div>
+<section class="pad" id="pad" role="dialog" aria-modal="true" aria-labelledby="pad-chat-title" hidden>
+  <header class="pad-head">
+    <span class="pad-brand"><span class="pad-dot" id="pad-dot" aria-hidden="true"></span>CONTROLLER<span class="pad-device" id="pad-device">keyboard</span></span>
+    <span class="pad-shoulder" aria-hidden="true">LB</span>
+    <div class="pad-groups" id="pad-groups" role="tablist" aria-label="Groups"></div>
+    <span class="pad-shoulder" aria-hidden="true">RB</span>
+    <button type="button" class="pad-x" id="pad-close" title="Close (Esc, G)" aria-label="Close the controller">✕</button>
+  </header>
+  <div class="pad-main">
+    <section class="pad-chat" aria-label="Messages">
+      <div class="pad-chat-head">
+        <h2 class="pad-chat-title" id="pad-chat-title">—</h2>
+        <div class="pad-chips" id="pad-chips"></div>
+        <div class="seg pad-view" id="pad-view" role="tablist" aria-label="View (SELECT, V)">
+          <button type="button" data-v="all" class="on" title="Every stored message">All</button>
+          <button type="button" data-v="signal" title="Noise removed, on-topic only">Signal</button>
+        </div>
+      </div>
+      <ol class="pad-list" id="pad-list" aria-label="Messages: up and down to pick one"></ol>
       <form class="pad-compose" id="pad-compose" autocomplete="off" hidden>
-        <div class="compose-head" id="pad-compose-head"></div>
-        <textarea id="pad-text" rows="2" maxlength="4096" aria-label="Message" placeholder="Type, then START (Enter) twice to post · Shift+Enter: new line · Esc: back"></textarea>
-        <div class="compose-foot"><span id="pad-count">0 / 4096</span></div>
+        <div class="pad-reply" id="pad-reply"></div>
+        <textarea id="pad-text" rows="2" maxlength="4096" aria-label="Message" placeholder="Write here. Enter arms it, Enter again sends it · Shift+Enter: a new line · Esc: back"></textarea>
+        <div class="pad-arm" id="pad-arm"><span id="pad-arm-text"></span><span class="pad-count" id="pad-count"></span><i class="pad-arm-bar" id="pad-arm-bar"></i></div>
       </form>
-      <div class="lcd-status" id="pad-status" role="status" aria-live="polite"></div>
-      <div class="arm-bar" id="pad-arm" aria-hidden="true"></div>
-    </div>
-    <div class="face" role="group" aria-label="Act on the picked message">
-      <button type="button" class="pad-key f y" data-k="Y" title="Save it to your Saved Messages (S)"><b>Y</b><span>Save</span></button>
-      <button type="button" class="pad-key f x" data-k="X" title="React (E)"><b>X</b><span>React</span></button>
-      <button type="button" class="pad-key f b" data-k="B" title="Back (Esc)"><b>B</b><span>Back</span></button>
-      <button type="button" class="pad-key f a" data-k="A" title="Reply / choose (R)"><b>A</b><span>Reply</span></button>
-    </div>
+    </section>
+    <aside class="pad-side" aria-label="The picked message and what can be done">
+      <div class="pad-sel" id="pad-sel"></div>
+      <div class="pad-layer" id="pad-layer" hidden></div>
+      <ol class="pad-actions" id="pad-actions"></ol>
+      <div class="pad-status" id="pad-status" role="status" aria-live="polite"></div>
+    </aside>
   </div>
-  <div class="pad-bottom">
-    <button type="button" class="pad-key c" data-k="select" title="Open it in the Telegram app (O)"><b>SELECT</b><span>Open in Telegram</span></button>
-    <button type="button" class="pad-key c" data-k="start" title="Write to this chat, then post (N, Enter)"><b>START</b><span id="pad-start">Write</span></button>
-    <button type="button" class="pad-key c" data-k="more" title="More: copy link, author, join, leave (.)"><b>≡</b><span>More</span></button>
-  </div>
-</aside>
+  <footer class="pad-prompts" id="pad-prompts" aria-label="Buttons"></footer>
+</section>
 </body>
 </html>
