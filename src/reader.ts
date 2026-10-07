@@ -478,7 +478,7 @@ export class Reader {
    * The groups and channels the account itself is in (its chat list, archived ones included), never
    * people. `complete` is false when the list may have been cut short, so absence proves nothing.
    */
-  async membership(): Promise<{ chats: SourceInfo[]; complete: boolean; skipped: string[] }> {
+  async membership(): Promise<{ chats: SourceInfo[]; complete: boolean; skipped: string[]; present: Set<number> }> {
     const LIMIT = 1000;
     // Not GramJS's ignoreMigrated: in 2.26.22 that test is inverted (client/dialogs.js:132 keeps only
     // entities that HAVE a migratedTo field, so every supergroup and channel is dropped). Upgraded
@@ -488,10 +488,13 @@ export class Reader {
     });
     const chats: SourceInfo[] = [];
     const skipped: string[] = [];
+    // Every chat the account is in, including ones that cannot become sources: none of them has been left.
+    const present = new Set<number>();
     for (const d of dialogs) {
       const e = d.entity;
       if (!e || (e.className !== 'Channel' && e.className !== 'Chat')) continue; // people, bots, forbidden (kicked)
       if (e.left || e.deactivated) continue;
+      present.add(chatIdOf(e));
       try {
         chats.push(this.info(e));
       } catch (err) {
@@ -499,7 +502,7 @@ export class Reader {
       }
     }
     const total = typeof dialogs.total === 'number' ? dialogs.total : dialogs.length;
-    return { chats, complete: dialogs.length < LIMIT && total <= dialogs.length, skipped };
+    return { chats, complete: dialogs.length < LIMIT && total <= dialogs.length, skipped, present };
   }
 
   async joined(): Promise<SourceInfo[]> {
@@ -594,7 +597,7 @@ export class Reader {
     const { store, activity } = this.deps;
     if (!d) return { added: [], left: [], back: [] };
     this.lastReconcile = Date.now();
-    const { chats, complete, skipped } = await this.membership();
+    const { chats, complete, skipped, present } = await this.membership();
     // The chats Telegram pushes new messages for (the account is in them); the rest are polled.
     if (complete) this.members = new Set(chats.map((c) => c.chatId));
     else for (const c of chats) this.members.add(c.chatId);
@@ -642,13 +645,21 @@ export class Reader {
       if (row.kind === 'watched' && !row.readerOrigin && !inList.has(row.chatId)) store.updateChat(row.chatId, { readerOrigin: 'manual' });
     }
     if (complete) {
-      for (const row of store.listChats(true)) {
-        if (row.kind !== 'watched' || row.readerOrigin !== 'dialog' || inList.has(row.chatId)) continue;
-        store.updateChat(row.chatId, { enabled: false, readerError: 'the account is no longer in this chat (left or removed in Telegram): reading stopped' });
-        store.setKv(`reader_off_reason:${row.chatId}`, 'left');
+      // The account is no longer in a chat it read as a member: the source goes, with the messages
+      // kept for it (on or off; if the account joins again, it comes back as a new chat). Ones switched
+      // off earlier because the account had left go too.
+      for (const row of store.listChats(false)) {
+        if (row.kind !== 'watched' || inList.has(row.chatId) || present.has(row.chatId)) continue;
+        const hadLeft = store.getKv(`reader_off_reason:${row.chatId}`) === 'left';
+        if (row.readerOrigin !== 'dialog' && !hadLeft) continue;
+        store.removeSource(row.chatId);
         this.entities.delete(row.chatId);
+        if (hadLeft) {
+          activity?.event('reader', 'source removed', row.title, 'the account is no longer in it: taken off Sources, and the messages stored for it deleted');
+          continue;
+        }
         left.push(row);
-        activity?.event('reader', 'left chat', row.title, 'the account is no longer in it: reading stopped. If it is public, switch it on to read it from outside');
+        activity?.event('reader', 'left chat', row.title, 'the account is no longer in it: taken off Sources, and the messages stored for it deleted. If the account joins again, it comes back by itself; a public one can also be added by name and read from outside');
       }
     }
     for (const note of skipped) activity?.event('reader', 'not added', note.split(':')[0], note);
@@ -853,6 +864,8 @@ export class Reader {
       const last = batch[batch.length - 1];
       if (epoch !== this.epoch) throw new ReaderError('pull abandoned: the connection was replaced while it was waiting');
       const stored: StoredMessage[] = [];
+      // Taken off Sources while this page was on its way (the account left it): nothing more is kept.
+      if (!store.getChat(chatId)) return saved;
       store.transaction(() => {
         for (const m of batch) {
           const s = toStored(m, chatId);

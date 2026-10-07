@@ -629,22 +629,22 @@ export class InviteTracker {
     this.notifyOnce(`verifying:${chatId}:${m.joinedAt ?? 0}`, 'verifying', title, 'answer it in your Telegram app.');
   }
 
-  /** The account is out of a chat: reading stops (a rejoin found by the chat-list check turns it back on). */
+  /**
+   * The account is out of a chat: its source goes, with the messages kept for it (if the account
+   * joins again, the chat-list check brings it back as a new chat). The membership row stays.
+   */
   private removed(chatId: number, self: SelfState, title: string): void {
     const { store } = this.d;
+    const gone = store.removeSource(chatId) ? 'taken off Sources' : 'reading stopped';
     const text =
       self.state === 'banned-until' && self.until
-        ? `removed from it until ${this.at(self.until)} (then you may rejoin, in your Telegram app): reading stopped`
+        ? `removed from it until ${this.at(self.until)} (then you may rejoin, in your Telegram app): ${gone}`
         : self.state === 'banned'
-          ? 'banned from it: reading stopped'
-          : 'no longer a member (left or removed): reading stopped';
+          ? `banned from it: ${gone}`
+          : `no longer a member (left or removed): ${gone}`;
     const m = store.membership(chatId);
     const long = m?.joinedAt && this.d.now() - m.joinedAt > 86_400 && !this.hints.get(chatId)?.length;
     const detail = `${text}${long ? '. Removed more than a day after joining with no check seen: looks like an inactivity clean-up or a ban-list (CAS) removal' : ''}`;
-    if (store.getChat(chatId)?.kind === 'watched') {
-      store.updateChat(chatId, { enabled: false, readerError: detail.slice(0, 300) });
-      store.setKv(`reader_off_reason:${chatId}`, 'left');
-    }
     store.setMembership(chatId, { state: self.state, untilDate: self.until, detail, checkedAt: this.d.now(), nextCheckAt: null });
     if (m?.inviteId) store.updateInvite(m.inviteId, { state: 'removed', nextCheckAt: null, doneAt: this.d.now() });
     this.watched.delete(chatId);
@@ -808,7 +808,8 @@ export class InviteTracker {
 
   private async classifyLeft(rows: ChatRow[]): Promise<void> {
     for (const row of rows) {
-      const self = await this.readSelf(row.chatId, this.peerFor(row.chatId, null), null);
+      // The chat-list check has taken the source off already: its address comes with the row.
+      const self = await this.readSelf(row.chatId, this.peerFor(row.chatId, row.readerPeer ?? null), null);
       if (self.state === 'member' || self.state === 'verifying' || self.state === 'unknown') continue;
       this.removed(row.chatId, self, row.title);
     }

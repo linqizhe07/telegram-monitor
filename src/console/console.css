@@ -93,12 +93,12 @@ a:hover { text-decoration: underline; text-underline-offset: 2px; }
 .banner-wrap { max-width: var(--page); margin: 0 auto; padding: 0 20px; }
 .banner-wrap:has(#verify-banner:not([hidden])) { padding-top: 14px; }
 .crawler { max-width: var(--page); margin: 0 auto; padding: 14px 20px 0; }
-.hud-top { display: flex; justify-content: space-between; align-items: center; gap: 8px 20px; flex-wrap: wrap; padding: 0 2px 9px; font-size: 11px; }
+.hud-top { display: flex; justify-content: flex-start; align-items: center; gap: 8px 20px; flex-wrap: wrap; padding: 0 2px 9px; font-size: 11px; }
 .hud-stats { display: flex; flex-wrap: wrap; gap: 4px 18px; min-width: 0; }
 .hud-field { display: inline-flex; gap: 7px; white-space: nowrap; }
 .hud-label { color: var(--muted); letter-spacing: 0.08em; }
 .hud-field b { font-weight: 700; color: var(--ink); }
-.hud-brand { color: var(--pink); font-weight: 600; white-space: nowrap; }
+.hud-brand { margin-left: auto; color: var(--pink); font-weight: 600; white-space: nowrap; }
 .hud-tabs { position: relative; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding-bottom: 8px; mask-image: linear-gradient(90deg, #000 92%, transparent); }
 .hud-tabs::-webkit-scrollbar { display: none; }
 .hud-tabs button { flex: 1 0 auto; min-width: 104px; max-width: 220px; height: 24px; padding: 0 12px; border: 0; background: var(--raise); color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: background-color 0.2s, color 0.2s; }
@@ -232,6 +232,15 @@ h2 .idx { color: var(--pink); }
 .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .split { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 14px; align-items: start; }
 .scroll { overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+/* Folding: a module's heading is its fold button; folded, only the heading line stays. */
+.fold { display: inline-flex; align-items: baseline; gap: 10px; min-width: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; text-align: left; }
+.fold .chev { width: 11px; height: 11px; flex: none; align-self: center; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.2s var(--ease); }
+.fold:hover .chev, .fold:focus-visible .chev { stroke: var(--cyan); }
+.folded .fold .chev { transform: rotate(-90deg); }
+.panel.folded > :not(.panel-head), .panel.folded .panel-head > :not(.titles), .crawler.folded > :not(.hud-top) { display: none; }
+.panel.folded .panel-head { margin-bottom: 0; }
+.hud-fold { gap: 8px; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink); white-space: nowrap; }
+.hud-fold .idx { color: var(--pink); }
 .col-head { margin: 0 0 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 .foot { max-width: var(--page); margin: 0 auto; padding: 0 20px 36px; display: flex; justify-content: space-between; gap: 6px 16px; flex-wrap: wrap; font-size: 11px; color: var(--faint); }
 
