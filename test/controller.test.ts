@@ -238,3 +238,67 @@ test('what a chat allows, from its own rights', () => {
   assert.deepEqual(reactionsOf({ className: 'ChatReactionsNone' }), []);
   assert.deepEqual(reactionsOf({ className: 'ChatReactionsSome', reactions: [{ className: 'ReactionEmoji', emoticon: '👍' }, { className: 'ReactionCustomEmoji' }] }), ['👍']);
 });
+
+test('the pad never sends one press twice: on its way, a moment later, or while Telegram has the account waiting', async () => {
+  const { errors } = await import('telegram');
+  const t = setup();
+  // A post that hangs at the door (a hold, a dropped line): the same press again is refused, not queued.
+  let release: (v: unknown) => void = () => undefined;
+  t.answers.set('messages.SendMessage', () => new Promise((r) => (release = r)));
+  const first = t.pad.send(CHAT, 'gm', null);
+  await new Promise((r) => setTimeout(r, 20));
+  t.clock.t += PAD_LIMITS.send.gap;
+  const again = await t.pad.send(CHAT, 'gm', null);
+  assert.equal(again.ok, false);
+  assert.match(again.message, /still on its way/);
+  release({ updates: [] });
+  assert.equal((await first).ok, true);
+  t.clock.t += PAD_LIMITS.send.gap;
+  assert.match((await t.pad.send(CHAT, 'gm', null)).message, /posted exactly this here a moment ago/, 'a double press is not a second post');
+  assert.equal(t.writes.filter((w) => w.className === 'messages.SendMessage').length, 1);
+  t.clock.t += 31;
+  t.answers.set('messages.SendMessage', () => ({ updates: [] }));
+  assert.equal((await t.pad.send(CHAT, 'gm', null)).ok, true, 'later it is a new post');
+
+  // A chat's slow mode from GramJS: said as such.
+  t.clock.t += PAD_LIMITS.send.gap;
+  t.answers.set('messages.SendMessage', (req) => {
+    throw new errors.SlowModeWaitError({ capture: 42, request: req as never });
+  });
+  assert.match((await t.pad.send(CHAT, 'later', null)).message, /slow mode on: the account can post again in 42s/);
+
+  // Telegram has the account waiting, or the line is down: nothing is even tried.
+  let held = 0;
+  let up = true;
+  const h = setup();
+  const pad = new Controller({ raw: h.gram as unknown as TelegramClient, permit: h.door.permit, store: h.store, activity: h.activity, now: h.clock.now, held: () => held, online: () => up });
+  held = Date.now() + 60_000;
+  assert.match((await pad.send(CHAT, 'hello', null)).message, /asked the account to wait until/);
+  assert.match((await pad.react(CHAT, 5, '👍')).message, /asked the account to wait until/);
+  held = 0;
+  up = false;
+  assert.match((await pad.save(CHAT, 5)).message, /not reachable/);
+  assert.equal(h.writes.length, 0);
+});
+
+test("muting keeps the chat's own sound and previews, and PEER_FLOOD holds joining as well", async () => {
+  const sound = new Api.NotificationSoundLocal({ title: 'Chime', data: 'chime' });
+  const t = setup({ full: { notifySettings: new Api.PeerNotifySettings({ showPreviews: false, otherSound: sound, storiesMuted: true }) } });
+  const r = await t.pad.mute(CHAT, true);
+  assert.equal(r.ok, true, r.message);
+  const settings = t.writes.at(-1)!.settings as Api.InputPeerNotifySettings;
+  assert.equal(settings.muteUntil, 2_147_483_647);
+  assert.equal(settings.showPreviews, false, 'previews stay off');
+  assert.equal(settings.sound, sound, 'the chime stays');
+  assert.equal(settings.storiesMuted, true);
+
+  t.answers.set('messages.SendReaction', () => {
+    throw rpc('PEER_FLOOD');
+  });
+  await t.pad.react(CHAT, 5, '👍');
+  const { OwnerActions } = await import('../src/owner-actions.ts');
+  const owner = new OwnerActions({ raw: t.gram as unknown as TelegramClient, permit: t.door.permit, store: t.store, activity: t.activity, tracker: {} as never, now: t.clock.now });
+  const budget = owner.joinBudget();
+  assert.equal(budget.ok, false);
+  assert.match(budget.message, /suspects spam/, 'the pad\'s PEER_FLOOD holds joins too');
+});

@@ -225,6 +225,8 @@ async function main(): Promise<void> {
             now,
             pullSoon: (chatId) => void setTimeout(() => void reader?.pullNow(chatId).catch(() => 0), 1500),
             listSoon: () => reader?.reconcileSoon(),
+            held: connection.pausedUntil,
+            online: () => connection.state().state === 'online',
           })
         : null,
       digestNow: (chatId) => {

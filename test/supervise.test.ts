@@ -135,3 +135,40 @@ test('an invite check is never retried by the door (a flood there pauses invite 
   await client.invoke({ className: 'messages.GetHistory' });
   assert.deepEqual(sent, ['messages.CheckChatInvite', 'messages.GetHistory', 'messages.GetHistory'], 'a history read still waits and retries once');
 });
+
+test("a chat's slow mode answers that request only: the account is not held, and nothing is retried", async () => {
+  const { errors } = await import('telegram');
+  const store = memoryStore(new Clock());
+  const { client, calls } = fakeGram(async (req) => {
+    if (req.className === 'messages.SendMessage') throw new errors.SlowModeWaitError({ capture: 900, request: req as never });
+    return { messages: [] };
+  });
+  const sup = superviseRequests(client, new Activity(store), () => null, { intervalMs: 1, burst: 10 });
+  sup.permit('messages.SendMessage', () => true);
+  await assert.rejects(client.invoke({ className: 'messages.SendMessage' }), (err: Error) => err instanceof errors.SlowModeWaitError);
+  assert.equal(sup.pausedUntil(), 0, 'a slow mode is not a FLOOD_WAIT: reads go on');
+  const started = Date.now();
+  await client.invoke({ className: 'messages.GetHistory' });
+  assert.ok(Date.now() - started < 200, 'the next read goes at once');
+  assert.equal(calls.filter((c) => c.className === 'messages.SendMessage').length, 1, 'not retried');
+  assert.ok(store.activity().some((a) => /SLOWMODE_WAIT 900s: this chat's slow mode/.test(a.detail)));
+});
+
+test("an owner's write that waited past its click, or meets a dropped connection, is not sent", async () => {
+  const store = memoryStore(new Clock());
+  const { client, calls } = fakeGram(async () => ({ messages: [] }));
+  // One request a quarter second, no burst: the write waits behind a read.
+  const sup = superviseRequests(client, new Activity(store), () => null, { intervalMs: 250, burst: 1 });
+  const read = client.invoke({ className: 'messages.GetHistory' });
+  sup.permit('messages.SendMessage', () => true, 50);
+  const late = client.invoke({ className: 'messages.SendMessage' });
+  await read;
+  await assert.rejects(late, /PERMIT_EXPIRED/);
+  assert.equal(calls.filter((c) => c.className === 'messages.SendMessage').length, 0, 'nothing sent late');
+  assert.ok(store.activity().some((a) => a.actor === 'owner' && /waited past the owner's click/.test(a.detail)));
+
+  (client as unknown as { connected: boolean }).connected = false;
+  sup.permit('messages.SendMessage', () => true);
+  await assert.rejects(client.invoke({ className: 'messages.SendMessage' }), /OFFLINE/);
+  assert.equal(calls.filter((c) => c.className === 'messages.SendMessage').length, 0, 'not queued into a dropped connection');
+});

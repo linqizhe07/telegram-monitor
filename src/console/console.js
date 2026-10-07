@@ -450,6 +450,11 @@ function renderSources(s) {
   const current = sel.value;
   paint(sel, s.sources.map((x) => [x.chatId, x.title]), () => s.sources.map((x) => el('option', { value: x.chatId, text: x.title })));
   if (current && s.sources.some((x) => String(x.chatId) === current)) sel.value = current;
+  else if (current && s.sources[0]) {
+    // The group shown is gone (left, removed): show the first one, and say so to whoever follows (the pad).
+    sel.value = String(s.sources[0].chatId);
+    sel.dispatchEvent(new Event('change'));
+  }
   // First render (nothing chosen yet): the browser has picked the first option by itself, so load it.
   if (!current && s.sources[0]) {
     sel.value = String(s.sources[0].chatId);
@@ -1194,8 +1199,8 @@ function signalStat(header) {
   setText(node, total && on ? `${n(Number(total[1]))} messages · ${n(Number(on[1]))} on-topic lines in ${n(Number(on[2]))} conversations` : header);
 }
 
-function signalLine(l) {
-  return el('li', { 'data-id': l.ids[0], 'data-author': l.author, 'data-user': l.username || null, 'data-date': l.date },
+function signalLine(l, chat) {
+  return el('li', { 'data-chat': chat, 'data-id': l.ids[0], 'data-author': l.author, 'data-user': l.username || null, 'data-date': l.date },
     el('div', { class: 'who' },
       el('b', { text: l.author }),
       el('span', { text: fmtWhen(l.date) }),
@@ -1205,8 +1210,8 @@ function signalLine(l) {
     el('div', { class: 'text', text: l.text }));
 }
 
-function plainLine(m) {
-  return el('li', { 'data-id': m.id, 'data-author': m.author, 'data-user': m.username || null, 'data-date': m.date },
+function plainLine(m, chat) {
+  return el('li', { 'data-chat': chat, 'data-id': m.id, 'data-author': m.author, 'data-user': m.username || null, 'data-date': m.date },
     el('div', { class: 'who' },
       el('b', { text: m.author }),
       el('span', { text: fmtWhen(m.date) }),
@@ -1231,14 +1236,14 @@ async function loadMessages() {
     if ($('msg-source').value !== chat || msgView !== view) return; // switched meanwhile
     setText($('msg-hint'), 'Noise removed, on-topic only: what Claude reads');
     signalStat(sig && sig.header);
-    items = (sig ? sig.lines.slice().reverse() : []).map((l) => ({ k: `s${l.ids[0]}`, s: `${l.ids.length}|${l.replies}|${l.echoes ? l.echoes.times : 0}|${l.author}|${l.text}`, make: () => signalLine(l) }));
+    items = (sig ? sig.lines.slice().reverse() : []).map((l) => ({ k: `s${l.ids[0]}`, s: `${l.ids.length}|${l.replies}|${l.echoes ? l.echoes.times : 0}|${l.author}|${l.text}`, make: () => signalLine(l, chat) }));
     empty = 'No on-topic messages in the last 24 hours.';
   } else {
     const rows = await api(`/api/messages?chat=${encodeURIComponent(chat)}&limit=150`).catch(() => []);
     if ($('msg-source').value !== chat || msgView !== view) return;
     setText($('msg-hint'), 'Every stored message, newest first');
     signalStat('');
-    items = rows.slice().reverse().map((m) => ({ k: `m${m.id}`, s: `${m.reactions}|${m.author}|${m.text}`, make: () => plainLine(m) }));
+    items = rows.slice().reverse().map((m) => ({ k: `m${m.id}`, s: `${m.reactions}|${m.author}|${m.text}`, make: () => plainLine(m, chat) }));
     empty = 'No messages stored yet.';
   }
   if (fresh) {

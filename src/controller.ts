@@ -14,7 +14,7 @@ import { Api, type TelegramClient } from 'telegram';
 import { generateRandomLong, returnBigInt } from 'telegram/Helpers.js';
 import type { Activity } from './activity.ts';
 import { keyOf, type ChallengeKey } from './invite-rules.ts';
-import { inputPeer, type SavedPeer, type PermitWrite } from './reader-client.ts';
+import { inputPeer, slowModeSeconds, type SavedPeer, type PermitWrite } from './reader-client.ts';
 import { explain, type MtMessage } from './reader.ts';
 import type { ChatRow, Store } from './store.ts';
 
@@ -28,6 +28,10 @@ export interface ControllerDeps {
   pullSoon?: (chatId: number) => void;
   /** Checks the account's chat list soon (after leaving one). */
   listSoon?: () => void;
+  /** Until when (ms epoch) Telegram has asked the account to wait (FLOOD_WAIT); 0 = not waiting. */
+  held?: () => number;
+  /** Whether the connection to Telegram is up. */
+  online?: () => boolean;
 }
 
 export type PadWrite = 'send' | 'react' | 'save' | 'read' | 'mute' | 'leave' | 'press';
@@ -42,14 +46,18 @@ export const PAD_LIMITS: Record<PadWrite, { gap: number; perHour: number; perDay
   leave: { gap: 2, perHour: 5, perDay: 10 },
   press: { gap: 2, perHour: 30, perDay: 200 },
 };
-/** What other people see: stopped for a day when Telegram says PEER_FLOOD. */
+/** What other people see: stopped for a day when Telegram says PEER_FLOOD (joining too, see owner-actions.ts). */
 const SEEN: PadWrite[] = ['send', 'react', 'press'];
+/** The day's hold after PEER_FLOOD, shared with joining (src/owner-actions.ts). */
+export const SPAM_HOLD = 'spam_hold';
 const NOUN: Record<PadWrite, string> = { send: 'posts', react: 'reactions', save: 'saves', read: 'marks', mute: 'mute changes', leave: 'leaves', press: 'button presses' };
 /** Telegram's limit for one message. */
 export const TEXT_MAX = 4096;
 const LOOK_S = 120;
 const KEYS_S = 600;
 const KV = 'pad_writes';
+/** The same post again this soon is a double press, not a second message. */
+const REPOST_S = 30;
 const FOREVER = 2_147_483_647;
 
 export interface PadChat {
@@ -92,11 +100,21 @@ interface ChatLike {
   noforwards?: boolean;
   participantsCount?: number;
 }
+/** A chat's notification settings as Telegram keeps them (muting sends them all back, changed only in muteUntil). */
+interface NotifyLike {
+  muteUntil?: number;
+  showPreviews?: boolean;
+  silent?: boolean;
+  otherSound?: Api.TypeNotificationSound;
+  storiesMuted?: boolean;
+  storiesHideSender?: boolean;
+  storiesOtherSound?: Api.TypeNotificationSound;
+}
 interface FullLike {
   availableReactions?: { className: string; reactions?: { className: string; emoticon?: string }[] };
   slowmodeSeconds?: number;
   slowmodeNextSendDate?: number;
-  notifySettings?: { muteUntil?: number };
+  notifySettings?: NotifyLike;
   unreadCount?: number;
   participantsCount?: number;
 }
@@ -143,6 +161,11 @@ export class Controller {
   private readonly looks = new Map<number, PadChat>();
   /** Messages whose buttons the owner opened (`chatId:msgId`): pressed from here, so the data stays here. */
   private readonly keys = new Map<string, { m: MtMessage; at: number }>();
+  /** Writes on their way (a press can wait at the door): the same one is never sent twice meanwhile. */
+  private readonly flying = new Set<string>();
+  /** Posts that went out, by chat and text: the same one again within REPOST_S is a double press. */
+  private readonly posted = new Map<string, number>();
+  private readonly notify = new Map<number, NotifyLike>();
 
   constructor(d: ControllerDeps) {
     this.d = d;
@@ -174,7 +197,7 @@ export class Controller {
       this.looks.set(chatId, chat);
       return { ok: true, message: '', chat };
     } catch (err) {
-      return fail(this.refused(err, 'read', t.chat.title));
+      return fail(this.refused(err, 'look', t.chat.title));
     }
   }
 
@@ -192,6 +215,7 @@ export class Controller {
 
   private padChat(t: Target, c: ChatLike | undefined, f: FullLike): PadChat {
     const now = this.d.now();
+    if (f.notifySettings) this.notify.set(t.chat.chatId, f.notifySettings);
     const slowmode = f.slowmodeSeconds ?? 0;
     return {
       chatId: t.chat.chatId,
@@ -236,7 +260,8 @@ export class Controller {
   budget(kind: PadWrite): string | null {
     const now = this.d.now();
     const r = this.ration();
-    if (SEEN.includes(kind) && r.hold.until > now) return `Nothing other people would see goes out until ${hhmm(r.hold.until)} UTC: ${r.hold.why}`;
+    const hold = this.spamHold();
+    if (SEEN.includes(kind) && hold.until > now) return `Nothing other people would see goes out until ${hhmm(hold.until)} UTC: ${hold.why}`;
     const L = PAD_LIMITS[kind];
     const at = r.at[kind] ?? [];
     if (at.length && now - at[at.length - 1] < L.gap) return 'One moment: the last one went just now.';
@@ -254,23 +279,53 @@ export class Controller {
     this.d.store.setKv(KV, JSON.stringify(r));
   }
 
+  private spamHold(): { until: number; why: string } {
+    try {
+      const v = JSON.parse(this.d.store.getKv(SPAM_HOLD) ?? '') as { until: number; why: string };
+      if (typeof v.until === 'number') return v;
+    } catch {
+      // none
+    }
+    return { until: 0, why: '' };
+  }
+
   private hold(seconds: number, why: string): void {
-    const r = this.ration();
-    r.hold = { until: Math.max(r.hold.until, this.d.now() + seconds), why };
-    this.d.store.setKv(KV, JSON.stringify(r));
+    const until = Math.max(this.spamHold().until, this.d.now() + seconds);
+    this.d.store.setKv(SPAM_HOLD, JSON.stringify({ until, why }));
+  }
+
+  /** Nothing is written while Telegram has the account waiting, or while the connection is down. */
+  private blocked(): string | null {
+    const held = this.d.held?.() ?? 0;
+    if (held > Date.now()) return `Telegram asked the account to wait until ${new Date(held).toISOString().slice(11, 19)} UTC: nothing is sent until then.`;
+    if (this.d.online && !this.d.online()) return 'Telegram is not reachable right now: nothing is sent. Try again when the connection is back.';
+    return null;
+  }
+
+  /** Runs one write at most once at a time: a press that is still on its way is not sent again. */
+  private async once<T>(key: string, run: () => Promise<T>): Promise<T | PadResult> {
+    if (this.flying.has(key)) return fail('The last press for this is still on its way (Telegram is slow, or asked the account to wait). It may still go through: it is not sent twice.');
+    this.flying.add(key);
+    try {
+      return await run();
+    } finally {
+      this.flying.delete(key);
+    }
   }
 
   /** What a refusal from Telegram means, in the owner's words (and, for PEER_FLOOD, a day's hold). */
-  private refused(err: unknown, kind: PadWrite, title: string): string {
+  private refused(err: unknown, kind: PadWrite | 'look', title: string): string {
+    const slowFor = slowModeSeconds(err);
+    if (slowFor !== null) return `«${title}» has slow mode on: the account can post again in ${slowFor}s.`;
     const e = explain(err);
     const code = e.code || (err as { errorMessage?: string }).errorMessage || '';
+    if (/PERMIT_EXPIRED/.test(code)) return 'Not sent: Telegram had the account waiting, and a press is for now, not for later. Press again if you still want it.';
+    if (/OFFLINE/.test(code)) return 'Not sent: the connection to Telegram dropped. Press again when it is back.';
     if (/PEER_FLOOD/.test(code)) {
       this.hold(86_400, 'Telegram limits this account for now (it suspects spam). Check @SpamBot in your Telegram app.');
       return 'Telegram limits this account for now (it suspects spam): nothing other people would see goes out from here for a day. Check @SpamBot in your Telegram app.';
     }
     if (e.retryAfter > 0) return `Telegram asked the account to wait ${e.retryAfter}s: every request waits until then.`;
-    const slow = /SLOWMODE_WAIT_(\d+)/.exec(code);
-    if (slow) return `«${title}» has slow mode on: the account can post again in ${slow[1]}s.`;
     if (/CHAT_WRITE_FORBIDDEN|CHAT_SEND_PLAIN_FORBIDDEN|CHAT_RESTRICTED/.test(code)) return `The account cannot post in «${title}».`;
     if (/USER_BANNED_IN_CHANNEL|CHANNEL_BANNED|USER_KICKED/.test(code)) return `The account is banned from «${title}».`;
     if (/CHAT_ADMIN_REQUIRED/.test(code)) return `Only «${title}»'s admins can do that.`;
@@ -283,7 +338,7 @@ export class Controller {
     if (/MESSAGE_TOO_LONG/.test(code)) return `Too long: Telegram takes at most ${TEXT_MAX} characters.`;
     if (/TOPIC_CLOSED/.test(code)) return 'That topic is closed.';
     if (/BOT_RESPONSE_TIMEOUT/.test(code)) return 'The bot did not answer in time; it may still have counted the press.';
-    return `Telegram refused ${kind === 'read' ? 'the look' : 'it'}: ${e.message}`;
+    return `Telegram refused ${kind === 'look' ? 'the look' : 'it'}: ${e.message}`;
   }
 
   // ── writing ──────────────────────────────────────────────────────────────
@@ -296,26 +351,35 @@ export class Controller {
     if (!message) return fail('Type the message first.');
     if (message.length > TEXT_MAX) return fail(`Too long: Telegram takes at most ${TEXT_MAX} characters (this is ${message.length}).`);
     if (replyTo !== null && !(Number.isInteger(replyTo) && replyTo > 0)) return fail('Which message? Pick it again.');
+    const key = `send|${chatId}|${message}`;
+    const before = this.posted.get(key);
+    if (before && this.d.now() - before < REPOST_S) return fail('You posted exactly this here a moment ago: it is not posted twice. Change it to post again.');
+    const off = this.blocked();
+    if (off) return fail(off);
     const look = await this.look(chatId);
     if (look.chat?.sendBlock) return fail(look.chat.sendBlock);
     if (look.chat && look.chat.nextSendAt > this.d.now()) return fail(`«${t.chat.title}» has slow mode on: the account can post again in ${look.chat.nextSendAt - this.d.now()}s.`);
     const busy = this.budget('send');
     if (busy) return fail(busy);
-    const peer = t.input;
-    this.d.permit('messages.SendMessage', (r) => r.peer === peer && r.message === message);
-    this.spend('send');
-    try {
-      await this.d.raw.invoke(
-        new Api.messages.SendMessage({ peer, message, randomId: generateRandomLong(), ...(replyTo ? { replyTo: new Api.InputReplyToMessage({ replyToMsgId: replyTo }) } : {}) }),
-      );
-    } catch (err) {
-      this.looks.delete(chatId);
-      return fail(this.refused(err, 'send', t.chat.title));
-    }
-    const chat = look.chat?.slowmode ? this.patch(chatId, { nextSendAt: this.d.now() + look.chat.slowmode }) : look.chat;
-    this.d.activity.event('owner', replyTo ? 'replied' : 'posted', t.chat.title, `${replyTo ? `to #${replyTo} · ` : ''}«${preview(message)}» · from the pad`);
-    this.d.pullSoon?.(chatId);
-    return { ok: true, message: replyTo ? `Replied to #${replyTo} in «${t.chat.title}».` : `Posted in «${t.chat.title}».`, chat };
+    return this.once(key, async () => {
+      const peer = t.input;
+      this.d.permit('messages.SendMessage', (r) => r.peer === peer && r.message === message);
+      this.spend('send');
+      try {
+        await this.d.raw.invoke(
+          new Api.messages.SendMessage({ peer, message, randomId: generateRandomLong(), ...(replyTo ? { replyTo: new Api.InputReplyToMessage({ replyToMsgId: replyTo }) } : {}) }),
+        );
+      } catch (err) {
+        this.looks.delete(chatId);
+        return fail(this.refused(err, 'send', t.chat.title));
+      }
+      this.posted.set(key, this.d.now());
+      if (this.posted.size > 100) this.posted.delete(this.posted.keys().next().value as string);
+      const chat = look.chat?.slowmode ? this.patch(chatId, { nextSendAt: this.d.now() + look.chat.slowmode }) : look.chat;
+      this.d.activity.event('owner', replyTo ? 'replied' : 'posted', t.chat.title, `${replyTo ? `to #${replyTo} · ` : ''}«${preview(message)}» · from the pad`);
+      this.d.pullSoon?.(chatId);
+      return { ok: true, message: replyTo ? `Replied to #${replyTo} in «${t.chat.title}».` : `Posted in «${t.chat.title}».`, chat };
+    });
   }
 
   /** Reacts to a message with one emoji, or takes the account's reaction back (null). */
@@ -324,26 +388,30 @@ export class Controller {
     if ('error' in t) return fail(t.error);
     if (!(Number.isInteger(msgId) && msgId > 0)) return fail('Which message? Pick it again.');
     if (emoji !== null && !EMOJI.test(emoji)) return fail('A reaction is one emoji.');
+    const off = this.blocked();
+    if (off) return fail(off);
     const look = await this.look(chatId);
     const allowed = look.chat?.reactions;
     if (emoji && allowed && allowed.length === 0) return fail(`«${t.chat.title}» allows no reactions.`);
     if (emoji && allowed && !allowed.includes(emoji)) return fail(`«${t.chat.title}» allows only these reactions: ${allowed.join(' ')}`);
     const busy = this.budget('react');
     if (busy) return fail(busy);
-    const peer = t.input;
-    const same = (r: Record<string, unknown>) => {
-      const list = (r.reaction as { emoticon?: string }[] | undefined) ?? [];
-      return emoji === null ? list.length === 0 : list.length === 1 && list[0].emoticon === emoji;
-    };
-    this.d.permit('messages.SendReaction', (r) => r.peer === peer && Number(r.msgId) === msgId && same(r));
-    this.spend('react');
-    try {
-      await this.d.raw.invoke(new Api.messages.SendReaction({ peer, msgId, reaction: emoji ? [new Api.ReactionEmoji({ emoticon: emoji })] : [], addToRecent: Boolean(emoji) }));
-    } catch (err) {
-      return fail(this.refused(err, 'react', t.chat.title));
-    }
-    this.d.activity.event('owner', emoji ? 'reacted' : 'took a reaction back', t.chat.title, `${emoji ?? ''} on #${msgId} · from the pad`.trim());
-    return { ok: true, message: emoji ? `Reacted ${emoji} to #${msgId}.` : `Took the reaction on #${msgId} back.`, chat: look.chat };
+    return this.once(`react|${chatId}|${msgId}`, async () => {
+      const peer = t.input;
+      const same = (r: Record<string, unknown>) => {
+        const list = (r.reaction as { emoticon?: string }[] | undefined) ?? [];
+        return emoji === null ? list.length === 0 : list.length === 1 && list[0].emoticon === emoji;
+      };
+      this.d.permit('messages.SendReaction', (r) => r.peer === peer && Number(r.msgId) === msgId && same(r));
+      this.spend('react');
+      try {
+        await this.d.raw.invoke(new Api.messages.SendReaction({ peer, msgId, reaction: emoji ? [new Api.ReactionEmoji({ emoticon: emoji })] : [], addToRecent: Boolean(emoji) }));
+      } catch (err) {
+        return fail(this.refused(err, 'react', t.chat.title));
+      }
+      this.d.activity.event('owner', emoji ? 'reacted' : 'took a reaction back', t.chat.title, `${emoji ?? ''} on #${msgId} · from the pad`.trim());
+      return { ok: true, message: emoji ? `Reacted ${emoji} to #${msgId}.` : `Took the reaction on #${msgId} back.`, chat: look.chat };
+    });
   }
 
   /** Forwards a message to the account's own Saved Messages (only the owner sees it there). */
@@ -351,21 +419,25 @@ export class Controller {
     const t = this.target(chatId);
     if ('error' in t) return fail(t.error);
     if (!(Number.isInteger(msgId) && msgId > 0)) return fail('Which message? Pick it again.');
+    const off = this.blocked();
+    if (off) return fail(off);
     const look = await this.look(chatId);
     if (look.chat?.noforwards) return fail(`«${t.chat.title}» protects its content: nothing can be forwarded or saved from it.`);
     const busy = this.budget('save');
     if (busy) return fail(busy);
-    const from = t.input;
-    const self = new Api.InputPeerSelf();
-    this.d.permit('messages.ForwardMessages', (r) => r.fromPeer === from && r.toPeer === self && Array.isArray(r.id) && r.id.length === 1 && Number(r.id[0]) === msgId);
-    this.spend('save');
-    try {
-      await this.d.raw.invoke(new Api.messages.ForwardMessages({ fromPeer: from, id: [msgId], randomId: [generateRandomLong()], toPeer: self }));
-    } catch (err) {
-      return fail(this.refused(err, 'save', t.chat.title));
-    }
-    this.d.activity.event('owner', 'saved to Saved Messages', t.chat.title, `#${msgId} · from the pad`);
-    return { ok: true, message: `Saved #${msgId} to your Saved Messages.`, chat: look.chat };
+    return this.once(`save|${chatId}|${msgId}`, async () => {
+      const from = t.input;
+      const self = new Api.InputPeerSelf();
+      this.d.permit('messages.ForwardMessages', (r) => r.fromPeer === from && r.toPeer === self && Array.isArray(r.id) && r.id.length === 1 && Number(r.id[0]) === msgId);
+      this.spend('save');
+      try {
+        await this.d.raw.invoke(new Api.messages.ForwardMessages({ fromPeer: from, id: [msgId], randomId: [generateRandomLong()], toPeer: self }));
+      } catch (err) {
+        return fail(this.refused(err, 'save', t.chat.title));
+      }
+      this.d.activity.event('owner', 'saved to Saved Messages', t.chat.title, `#${msgId} · from the pad`);
+      return { ok: true, message: `Saved #${msgId} to your Saved Messages.`, chat: look.chat };
+    });
   }
 
   /** Marks a chat read up to its newest stored message (clears the unread count on every device). */
@@ -374,72 +446,102 @@ export class Controller {
     if ('error' in t) return fail(t.error);
     const maxId = this.d.store.newestMessageId(chatId);
     if (!maxId) return fail(`Nothing stored for «${t.chat.title}» yet.`);
+    const off = this.blocked();
+    if (off) return fail(off);
     const look = await this.look(chatId);
     if (look.chat && !look.chat.member) return fail(`The account is not in «${t.chat.title}»: there is nothing to mark.`);
     const busy = this.budget('read');
     if (busy) return fail(busy);
-    const peer = t.input;
-    this.spend('read');
-    try {
-      if (t.saved.type === 'channel') {
-        this.d.permit('channels.ReadHistory', (r) => r.channel === peer && Number(r.maxId) === maxId);
-        await this.d.raw.invoke(new Api.channels.ReadHistory({ channel: peer, maxId }));
-      } else {
-        this.d.permit('messages.ReadHistory', (r) => r.peer === peer && Number(r.maxId) === maxId);
-        await this.d.raw.invoke(new Api.messages.ReadHistory({ peer, maxId }));
+    return this.once(`read|${chatId}`, async () => {
+      const peer = t.input;
+      this.spend('read');
+      try {
+        if (t.saved.type === 'channel') {
+          this.d.permit('channels.ReadHistory', (r) => r.channel === peer && Number(r.maxId) === maxId);
+          await this.d.raw.invoke(new Api.channels.ReadHistory({ channel: peer, maxId }));
+        } else {
+          this.d.permit('messages.ReadHistory', (r) => r.peer === peer && Number(r.maxId) === maxId);
+          await this.d.raw.invoke(new Api.messages.ReadHistory({ peer, maxId }));
+        }
+      } catch (err) {
+        return fail(this.refused(err, 'read', t.chat.title));
       }
-    } catch (err) {
-      return fail(this.refused(err, 'read', t.chat.title));
-    }
-    this.d.activity.event('owner', 'marked read', t.chat.title, `up to #${maxId} · from the pad`);
-    return { ok: true, message: `Marked «${t.chat.title}» read, up to #${maxId}.`, chat: this.patch(chatId, { unread: 0 }) };
+      this.d.activity.event('owner', 'marked read', t.chat.title, `up to #${maxId} · from the pad`);
+      return { ok: true, message: `Marked «${t.chat.title}» read, up to #${maxId}.`, chat: this.patch(chatId, { unread: 0 }) };
+    });
   }
 
-  /** Mutes a chat's notifications for good, or turns them back on (on every device). */
+  /**
+   * Mutes a chat's notifications for good, or turns them back on (on every device). Telegram keeps
+   * what is sent as the whole setting, so the chat's sound, previews and stories go back as they were.
+   */
   async mute(chatId: number, on: boolean): Promise<PadResult> {
     const t = this.target(chatId);
     if ('error' in t) return fail(t.error);
+    const off = this.blocked();
+    if (off) return fail(off);
+    if (!this.notify.has(chatId)) {
+      const look = await this.look(chatId, true);
+      if (!look.ok) return fail(look.message);
+    }
     const busy = this.budget('mute');
     if (busy) return fail(busy);
-    const peer = t.input;
-    const until = on ? FOREVER : 0;
-    this.d.permit('account.UpdateNotifySettings', (r) => (r.peer as { peer?: unknown } | undefined)?.peer === peer && Number((r.settings as { muteUntil?: number } | undefined)?.muteUntil) === until);
-    this.spend('mute');
-    try {
-      await this.d.raw.invoke(new Api.account.UpdateNotifySettings({ peer: new Api.InputNotifyPeer({ peer }), settings: new Api.InputPeerNotifySettings({ muteUntil: until }) }));
-    } catch (err) {
-      return fail(this.refused(err, 'mute', t.chat.title));
-    }
-    this.d.activity.event('owner', on ? 'muted' : 'unmuted', t.chat.title, 'notifications, on every device · from the pad');
-    return { ok: true, message: on ? `Muted «${t.chat.title}».` : `Notifications for «${t.chat.title}» are back on.`, chat: this.patch(chatId, { muted: on }) };
+    return this.once(`mute|${chatId}`, async () => {
+      const peer = t.input;
+      const until = on ? FOREVER : 0;
+      const was = this.notify.get(chatId) ?? {};
+      const settings = new Api.InputPeerNotifySettings({
+        muteUntil: until,
+        ...(was.showPreviews !== undefined ? { showPreviews: was.showPreviews } : {}),
+        ...(was.silent !== undefined ? { silent: was.silent } : {}),
+        ...(was.otherSound ? { sound: was.otherSound } : {}),
+        ...(was.storiesMuted !== undefined ? { storiesMuted: was.storiesMuted } : {}),
+        ...(was.storiesHideSender !== undefined ? { storiesHideSender: was.storiesHideSender } : {}),
+        ...(was.storiesOtherSound ? { storiesSound: was.storiesOtherSound } : {}),
+      });
+      this.d.permit('account.UpdateNotifySettings', (r) => (r.peer as { peer?: unknown } | undefined)?.peer === peer && r.settings === settings);
+      this.spend('mute');
+      try {
+        await this.d.raw.invoke(new Api.account.UpdateNotifySettings({ peer: new Api.InputNotifyPeer({ peer }), settings }));
+      } catch (err) {
+        return fail(this.refused(err, 'mute', t.chat.title));
+      }
+      this.notify.set(chatId, { ...was, muteUntil: until });
+      this.d.activity.event('owner', on ? 'muted' : 'unmuted', t.chat.title, 'notifications, on every device · from the pad');
+      return { ok: true, message: on ? `Muted «${t.chat.title}».` : `Notifications for «${t.chat.title}» are back on.`, chat: this.patch(chatId, { muted: on }) };
+    });
   }
 
   /** Leaves a group or channel. The chat-list check then takes it off Sources, with its stored messages. */
   async leave(chatId: number): Promise<PadResult> {
     const t = this.target(chatId);
     if ('error' in t) return fail(t.error);
+    const off = this.blocked();
+    if (off) return fail(off);
     const look = await this.look(chatId, true);
     if (look.chat && !look.chat.member) return fail(`The account is not in «${t.chat.title}».`);
     const busy = this.budget('leave');
     if (busy) return fail(busy);
-    const peer = t.input;
-    this.spend('leave');
-    try {
-      if (t.saved.type === 'channel') {
-        this.d.permit('channels.LeaveChannel', (r) => r.channel === peer);
-        await this.d.raw.invoke(new Api.channels.LeaveChannel({ channel: peer }));
-      } else {
-        const self = new Api.InputUserSelf();
-        this.d.permit('messages.DeleteChatUser', (r) => String(r.chatId) === t.saved.id && r.userId === self);
-        await this.d.raw.invoke(new Api.messages.DeleteChatUser({ chatId: returnBigInt(t.saved.id), userId: self }));
+    return this.once(`leave|${chatId}`, async () => {
+      const peer = t.input;
+      this.spend('leave');
+      try {
+        if (t.saved.type === 'channel') {
+          this.d.permit('channels.LeaveChannel', (r) => r.channel === peer);
+          await this.d.raw.invoke(new Api.channels.LeaveChannel({ channel: peer }));
+        } else {
+          const self = new Api.InputUserSelf();
+          this.d.permit('messages.DeleteChatUser', (r) => String(r.chatId) === t.saved.id && r.userId === self);
+          await this.d.raw.invoke(new Api.messages.DeleteChatUser({ chatId: returnBigInt(t.saved.id), userId: self }));
+        }
+      } catch (err) {
+        return fail(this.refused(err, 'leave', t.chat.title));
       }
-    } catch (err) {
-      return fail(this.refused(err, 'leave', t.chat.title));
-    }
-    this.looks.delete(chatId);
-    this.d.activity.event('owner', 'left', t.chat.title, 'from the pad, on the owner\'s click');
-    this.d.listSoon?.();
-    return { ok: true, message: `Left «${t.chat.title}». It goes off Sources, with its stored messages, at the next chat-list check (within a minute).` };
+      this.looks.delete(chatId);
+      this.d.activity.event('owner', 'left', t.chat.title, 'from the pad, on the owner\'s click');
+      this.d.listSoon?.();
+      return { ok: true, message: `Left «${t.chat.title}». It goes off Sources, with its stored messages, at the next chat-list check (within a minute).` };
+    });
   }
 
   // ── a bot's buttons ──────────────────────────────────────────────────────
@@ -455,7 +557,7 @@ export class Controller {
       const res = (await this.d.raw.invoke(t.saved.type === 'channel' ? new Api.channels.GetMessages({ channel: t.input, id }) : new Api.messages.GetMessages({ id }))) as unknown as { messages?: MtMessage[] };
       m = res.messages?.find((x) => x.id === msgId);
     } catch (err) {
-      return fail(this.refused(err, 'read', t.chat.title));
+      return fail(this.refused(err, 'look', t.chat.title));
     }
     if (!m || m.className === 'MessageEmpty') return fail('That message is gone (deleted, or out of reach).');
     const rows = m.replyMarkup?.className === 'ReplyInlineMarkup' ? (m.replyMarkup.rows ?? []).map((r, i) => r.buttons.map((b, j) => keyOf(b, i, j))) : [];
@@ -476,8 +578,14 @@ export class Controller {
     const key = b ? keyOf(b, row, col) : null;
     if (!b || !key) return fail('That button is not there any more.');
     if (key.kind !== 'press') return fail(key.kind === 'telegram' ? 'That button opens Telegram: use its link.' : 'That button cannot be pressed from here: use your Telegram app.');
+    const off = this.blocked();
+    if (off) return fail(off);
     const busy = this.budget('press');
     if (busy) return fail(busy);
+    return this.once(`press|${chatId}|${msgId}|${row}|${col}`, () => this.pressNow(t, msgId, b, key));
+  }
+
+  private async pressNow(t: Target, msgId: number, b: NonNullable<MtMessage['replyMarkup']>['rows'] extends (infer R)[] | undefined ? R extends { buttons: (infer B)[] } ? B : never : never, key: ChallengeKey): Promise<PadResult> {
     const peer = t.input;
     this.d.permit('messages.GetBotCallbackAnswer', (r) => r.peer === peer && Number(r.msgId) === msgId);
     this.spend('press');

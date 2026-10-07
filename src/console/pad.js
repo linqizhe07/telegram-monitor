@@ -58,10 +58,12 @@
 
   const sourceSelect = () => $('msg-source');
   const source = () => (P.getState()?.sources || []).find((x) => String(x.chatId) === s.chatId) || null;
-  const title = () => s.look?.title || source()?.title || 'this chat';
+  /** What the pad knows of the chat on it now: never a look that came back for another chat. */
+  const L = () => (s.look && s.lookFor === s.chatId && String(s.look.chatId) === s.chatId ? s.look : null);
+  const title = () => L()?.title || source()?.title || 'this chat';
   const username = () => {
     const ref = source()?.ref || '';
-    const name = s.look?.username || (ref.startsWith('@') ? ref.slice(1) : '');
+    const name = L()?.username || (ref.startsWith('@') ? ref.slice(1) : '');
     return NAME.test(name) ? name : '';
   };
   /** The -100… id without its prefix, for t.me/c/… and tg://privatepost links (supergroups and channels only). */
@@ -76,10 +78,11 @@
     return { app: null, web: null };
   }
 
-  const rows = () => [...document.querySelectorAll('#msgs > li[data-id]')];
+  const rows = () => [...document.querySelectorAll('#msgs > li[data-id]')].filter((li) => li.dataset.chat === s.chatId);
 
   function readPick(li) {
     return {
+      chat: li.dataset.chat || '',
       id: Number(li.dataset.id),
       author: li.dataset.author || '',
       user: NAME.test(li.dataset.user || '') ? li.dataset.user : '',
@@ -106,8 +109,11 @@
   }
 
   function pickRow(li) {
+    if (li.dataset.chat !== s.chatId) return; // the list still shows the chat before
     s.pick = readPick(li);
-    if (s.mode !== 'compose') s.mode = 'idle';
+    // Writing a reply: it now answers this message, as its heading says.
+    if (s.mode === 'compose' && s.replyTo !== null) s.replyTo = s.pick.id;
+    else if (s.mode !== 'compose') s.mode = 'idle';
     disarm();
     reveal(mark());
     render();
@@ -189,10 +195,11 @@
   /** What others see goes on the second press: the first arms it for a few seconds. */
   function arm(what, label, run) {
     if (s.armed && s.armed.what === what && Date.now() < s.armed.until) {
+      if (!s.armed.released || Date.now() - s.armed.at < 400) return; // the same press, held or bounced
       disarm();
       return run();
     }
-    s.armed = { what, until: Date.now() + ARM_MS };
+    s.armed = { what, until: Date.now() + ARM_MS, at: Date.now(), released: false };
     const bar = $('pad-arm');
     bar.classList.remove('run');
     void bar.offsetWidth;
@@ -223,9 +230,9 @@
     render();
     try {
       const r = await P.api(path, body);
-      if (r.chat) {
+      if (r.chat && String(r.chat.chatId) === s.chatId) {
         s.look = r.chat;
-        s.lookFor = String(r.chat.chatId);
+        s.lookFor = s.chatId;
       }
       if (!(quiet && r.ok)) say(r.message || (r.ok ? 'Done.' : 'Not done.'), r.ok ? 'ok' : 'bad');
       return r;
@@ -240,6 +247,7 @@
   }
 
   const needPick = () => {
+    if (s.pick && s.pick.chat !== s.chatId) s.pick = null; // picked in the chat before
     if (s.pick) return true;
     say('Pick a message first: ▲▼, or click one in Messages.', 'bad');
     return false;
@@ -254,7 +262,7 @@
 
   function write(replyTo) {
     if (!needChat()) return;
-    if (s.look?.sendBlock) return say(s.look.sendBlock, 'bad');
+    if (L()?.sendBlock) return say(L().sendBlock, 'bad');
     s.mode = 'compose';
     s.replyTo = replyTo;
     disarm();
@@ -267,7 +275,7 @@
     const text = $('pad-text').value.trim();
     if (!text) return say('Type the message first.', 'bad');
     const where = title();
-    const many = s.look?.members ? ` (${fmt.format(s.look.members)} members)` : '';
+    const many = L()?.members ? ` (${fmt.format(L().members)} members)` : '';
     const replyTo = s.replyTo;
     const chatId = s.chatId;
     arm(`send|${chatId}|${replyTo}|${text}`, `Press START (Enter) again to ${replyTo ? `reply to #${replyTo}` : 'post'} in «${where}»: everyone there sees it${many}.`, async () => {
@@ -285,7 +293,7 @@
 
   function save() {
     if (!needPick()) return;
-    if (s.look?.noforwards) return say(`«${title()}» protects its content: nothing can be saved from it.`, 'bad');
+    if (L()?.noforwards) return say(`«${title()}» protects its content: nothing can be saved from it.`, 'bad');
     call('/api/pad/save', { chatId: s.chatId, msgId: s.pick.id });
   }
 
@@ -296,12 +304,13 @@
 
   function mute() {
     if (!needChat()) return;
-    call('/api/pad/mute', { chatId: s.chatId, on: !s.look?.muted });
+    if (!L()) return say('Reading this chat\'s state first: press again in a moment.', 'bad'), void look(true);
+    call('/api/pad/mute', { chatId: s.chatId, on: !L().muted });
   }
 
   function openReact() {
     if (!needPick()) return;
-    const allowed = s.look?.reactions;
+    const allowed = L()?.reactions;
     if (allowed && allowed.length === 0) return say(`«${title()}» allows no reactions.`, 'bad');
     s.react = { list: [...(allowed ? allowed.slice(0, 8) : QUICK), '✕'], i: 0 };
     s.mode = 'react';
@@ -321,8 +330,9 @@
   async function openKeys() {
     if (!needPick()) return;
     const msgId = s.pick.id;
-    const r = await call('/api/pad/buttons', { chatId: s.chatId, msgId }, true);
-    if (!r?.ok || !r.rows) return;
+    const chatId = s.chatId;
+    const r = await call('/api/pad/buttons', { chatId, msgId }, true);
+    if (!r?.ok || !r.rows || s.chatId !== chatId || s.pick?.id !== msgId) return;
     s.keys = { rows: r.rows, r: 0, c: 0, msgId };
     s.mode = 'keys';
     say(`${r.rows.flat().length} buttons under #${msgId}: ◀▲▼▶ to choose, A to press (twice: the bot sees it).`);
@@ -358,8 +368,8 @@
     if (l.web) items.push({ label: 'Open it in the browser (t.me)', run: () => window.open(l.web, '_blank', 'noopener,noreferrer') });
     if (s.pick?.user) items.push({ label: `Open ${s.pick.author} (@${s.pick.user}) in Telegram`, run: () => open(`tg://resolve?domain=${s.pick.user}`, `Opened @${s.pick.user} in Telegram.`) });
     items.push({ label: 'Read this chat\'s state again', run: () => look(true).then(() => say('Read again.', 'ok')) });
-    if (s.look && !s.look.member && username()) items.push({ label: `Join «${title()}»`, run: join });
-    if (s.look?.member) items.push({ label: `Leave «${title()}»…`, danger: true, run: leave });
+    if (L() && !L().member && username()) items.push({ label: `Join «${title()}»`, run: join });
+    if (L()?.member) items.push({ label: `Leave «${title()}»…`, danger: true, run: leave });
     s.more = { items, i: 0 };
     s.mode = 'more';
     disarm();
@@ -640,8 +650,17 @@
 
   for (const b of pad.querySelectorAll('.pad-key')) {
     b.dataset.tip = b.title;
-    b.addEventListener('click', () => press(b.dataset.k));
+    b.addEventListener('click', (e) => {
+      if (e.detail > 1) return; // the second click of a double-click is not a second press
+      press(b.dataset.k);
+    });
   }
+  // A key or a button let go: the next press is a new one (what arms needs one before it fires).
+  const released = () => {
+    if (s.armed) s.armed.released = true;
+  };
+  document.addEventListener('keyup', released);
+  document.addEventListener('pointerup', released);
   $('pad-close').addEventListener('click', () => toggle(false));
   $('pad-toggle').addEventListener('click', () => toggle());
   $('pad-compose').addEventListener('submit', (e) => {
@@ -655,6 +674,7 @@
   });
   $('pad-text').addEventListener('keydown', (e) => {
     if (e.isComposing || e.keyCode === 229) return; // an input method is still composing (Chinese, Japanese…)
+    if (e.repeat) return e.key === 'Enter' && !e.shiftKey ? e.preventDefault() : undefined; // a held key is one press
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       flashKey('start');
@@ -685,6 +705,7 @@
   };
   document.addEventListener('keydown', (e) => {
     if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.repeat && !['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return; // held: one press (moving may repeat)
     const t = e.target;
     const typing = t instanceof HTMLElement && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
     if (typing) return;
@@ -739,7 +760,7 @@
     const tick = (t) => {
       if (gp === null) return;
       const g = navigator.getGamepads?.()[gp];
-      if (g && !document.hidden) {
+      if (g && !document.hidden && document.hasFocus()) {
         const ax = g.axes || [];
         const stick = { up: (ax[1] ?? 0) < -0.6, down: (ax[1] ?? 0) > 0.6, left: (ax[0] ?? 0) < -0.6, right: (ax[0] ?? 0) > 0.6 };
         const down = new Set();
@@ -755,7 +776,11 @@
             press(k);
           }
         }
-        for (const k of [...held.keys()]) if (!down.has(k)) held.delete(k);
+        for (const k of [...held.keys()]) {
+          if (down.has(k)) continue;
+          held.delete(k);
+          released();
+        }
       }
       raf = requestAnimationFrame(tick);
     };

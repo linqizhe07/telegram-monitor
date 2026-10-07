@@ -328,7 +328,7 @@ export class ConsoleServer {
         case '/api/pad/leave':
         case '/api/pad/buttons':
         case '/api/pad/press':
-          return this.json(res, 200, this.deps.pad ? await withTimeout(this.padCall(this.deps.pad, url.pathname.slice(9), body), 60_000, 'the pad').catch((err) => ({ ok: false, message: (err as Error).message })) : NOT_SIGNED_IN);
+          return this.json(res, 200, this.deps.pad ? await withTimeout(this.padCall(this.deps.pad, url.pathname.slice(9), body), 60_000, 'the pad').catch(() => ({ ok: false, message: 'No answer from Telegram within a minute. It may still go through (the account may have been asked to wait); pressing again does not send it twice.' })) : NOT_SIGNED_IN);
         case '/api/verify/photo': {
           const img = owner ? await withTimeout(owner.photo(Number(body.chatId), Number(body.msgId)), 60_000, 'the picture').catch(() => null) : null;
           if (!img) return this.json(res, 404, { ok: false, message: 'No picture for that check.' });
