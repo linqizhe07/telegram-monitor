@@ -816,6 +816,11 @@ export class Store {
     };
   }
 
+  /** Messages stored with a date in [from, to), across every chat. */
+  countBetween(from: number, to: number): number {
+    return num(this.get('SELECT COUNT(*) AS n FROM messages WHERE date >= ? AND date < ?', from, to)?.n ?? 0);
+  }
+
   messages(chatId: number, from: number, to: number): StoredMessage[] {
     return this.all('SELECT * FROM messages WHERE chat_id = ? AND date >= ? AND date < ? ORDER BY date, message_id', chatId, from, to).map((r) => this.toMessage(r));
   }

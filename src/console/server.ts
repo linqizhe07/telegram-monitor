@@ -17,6 +17,7 @@ import type { Config } from '../config.ts';
 import { denoise, formatSignal } from '../denoise.ts';
 import { digestFileHeading, digestFolders } from '../digest-folders.ts';
 import type { Discovery } from '../discover.ts';
+import { dayMap, lastDays, type DayMap } from '../constellation.ts';
 import type { Controller } from '../controller.ts';
 import type { OwnerActions } from '../owner-actions.ts';
 import { inviteHash } from '../invite-rules.ts';
@@ -253,6 +254,8 @@ export class ConsoleServer {
           return this.json(res, 200, this.deps.news && this.deps.config.news ? this.deps.news.view() : { enabled: false, sources: [], keywords: [], hits: [], alerts: [], items24h: 0 });
         case '/api/pulse':
           return this.json(res, 200, this.pulse());
+        case '/api/map':
+          return this.json(res, 200, this.map(url.searchParams.get('day') ?? ''));
         case '/api/live':
           return this.json(res, 200, this.live());
         case '/api/discover':
@@ -599,6 +602,30 @@ export class ConsoleServer {
         .slice(-300)
         .map((l) => ({ ids: l.ids, date: l.date, author: name(l.userId), username: users.get(l.userId)?.username ?? null, text: l.text, replies: l.replies, echoes: l.echoes, score: l.score })),
     };
+  }
+
+  /** Day maps, by day: a past day is fixed once read; today is read again after five minutes. */
+  private readonly maps = new Map<string, { at: number; map: DayMap }>();
+
+  /**
+   * Which groups talk about the same things on a day (src/constellation.ts): the live view lays
+   * the nebulae out by it. Today (so far) unless another of the kept days is asked for.
+   */
+  private map(day: string) {
+    const { store, config, now } = this.deps;
+    const days = lastDays(now(), config.timezone, Math.min(7, config.retentionDays));
+    const d = days.find((x) => x.day === day) ?? days[0];
+    const today = d === days[0];
+    const kept = this.maps.get(d.day);
+    let map = kept && (!today || now() - kept.at < 300) ? kept.map : null;
+    if (!map) {
+      const chats = store.listChats(false).filter((c) => c.kind === 'watched');
+      map = dayMap(chats.map((c) => ({ chatId: c.chatId, channel: c.type === 'channel', messages: store.messages(c.chatId, d.from, d.to) })), d.day, d.from, d.to);
+      this.maps.set(d.day, { at: now(), map });
+      // Days that fell out of the window go.
+      for (const k of this.maps.keys()) if (!days.some((x) => x.day === k)) this.maps.delete(k);
+    }
+    return { today: days[0].day, days: days.map((x) => ({ day: x.day, messages: store.countBetween(x.from, x.to) })), map };
   }
 
   private joinedAt = 0;

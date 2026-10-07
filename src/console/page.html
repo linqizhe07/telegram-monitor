@@ -44,15 +44,22 @@
     <div class="hud-brand" id="hud-brand">writes only on your click</div>
   </div>
   <div class="hud-tabs" id="hud-tabs" role="tablist" aria-label="Groups"></div>
-  <div class="stage" id="stage">
+  <div class="stage" id="stage" tabindex="0" aria-label="The groups as nebulae, placed by what they talk about: hover for what links them, click one for its messages, pinch or ⌘/Ctrl + scroll to zoom, drag to move, 0 to see everything">
     <canvas id="stage-canvas" aria-hidden="true"></canvas>
     <div class="stage-title">
       <div class="stage-name"><span class="stage-index" id="stage-index">00</span><span id="stage-group">Waiting for the reader</span></div>
       <div class="stage-sub" id="stage-sub"></div>
     </div>
     <div class="stage-legend" aria-label="Tags">
-      <span class="news">⚑ news</span><span class="ticker">ticker</span><span class="number">number</span><span class="link">link</span><span class="ask">ask</span><span class="noise">noise</span>
+      <span class="news">⚑ news</span><span class="ticker">ticker</span><span class="number">number</span><span class="link">link</span><span class="ask">ask</span><span class="noise">noise</span><span class="route" title="Two groups that talked about the same topics that day: the more they share, the closer they sit and the brighter the route">⟷ same topics</span>
     </div>
+    <div class="stage-days" id="stage-days" role="group" aria-label="Day: the nebulae placed by that day's topics"></div>
+    <div class="stage-zoom" id="stage-zoom" role="group" aria-label="Zoom">
+      <button type="button" data-z="out" title="Zoom out (−)" aria-label="Zoom out">−</button>
+      <button type="button" data-z="fit" title="Everything in view (0)" aria-label="Everything in view">⌂</button>
+      <button type="button" data-z="in" title="Zoom in (+). Also: pinch, ⌘/Ctrl + scroll, double-click" aria-label="Zoom in">+</button>
+    </div>
+    <div class="stage-card" id="stage-card" role="tooltip" hidden></div>
   </div>
   <div class="instruments">
     <section class="inst" aria-label="Denoiser" title="The crawler's second hand: the same rules the digest uses drop stickers, one-word chatter, bot commands, repeats and scams before anything is read. Last 24 hours, all groups.">

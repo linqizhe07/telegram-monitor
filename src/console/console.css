@@ -120,6 +120,24 @@ a:hover { text-decoration: underline; text-underline-offset: 2px; }
 .stage-legend .link { color: var(--teal); }
 .stage-legend .ask { color: var(--pink); }
 .stage-legend .noise { color: var(--muted); text-decoration: line-through; }
+.stage-legend .route { color: var(--teal); }
+.stage:focus-visible { outline: 1px solid var(--cyan); outline-offset: -1px; }
+.stage.pointing { cursor: pointer; }
+.stage.panning { cursor: grabbing; }
+.stage-days { position: absolute; top: 12px; right: 12px; z-index: 2; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 2px; max-width: calc(100% - 24px); padding: 3px; border: 1px solid var(--line-2); background: rgb(4 5 7 / 0.78); }
+.stage-days button { min-width: 44px; padding: 3px 8px; border: 0; background: transparent; color: var(--muted); font-size: 10.5px; }
+.stage-days button:hover { color: var(--ink); background: var(--hover); }
+.stage-days button.on { color: #04110d; background: var(--teal); font-weight: 700; }
+.stage-days button.play { min-width: 28px; color: var(--teal); }
+.stage-days button.play.on { color: var(--pink); background: transparent; }
+.stage-zoom { position: absolute; right: 10px; bottom: 10px; z-index: 2; display: flex; border: 1px solid var(--line-2); background: rgb(4 5 7 / 0.78); }
+.stage-zoom button { width: 28px; height: 26px; padding: 0; border: 0; background: transparent; color: var(--ink-2); font-size: 14px; }
+.stage-zoom button:hover { color: var(--white); background: var(--hover); }
+.stage-card { position: absolute; z-index: 3; max-width: 340px; padding: 8px 10px; border: 1px solid rgb(79 209 176 / 0.45); background: rgb(4 6 9 / 0.94); box-shadow: var(--pop); font-size: 11px; line-height: 1.5; color: var(--ink-2); pointer-events: none; }
+.stage-card .h { font: 600 12.5px/1.4 var(--sans); color: var(--white); }
+.stage-card .t { color: var(--teal); }
+.stage-card .d { color: var(--muted); }
+.stage-card .k { margin-top: 3px; font-size: 10px; color: var(--faint); }
 
 .instruments { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
 .inst { display: flex; flex-direction: column; min-width: 0; height: 244px; padding: 10px 12px; overflow: hidden; border: 1px solid var(--line); background: var(--panel); }
@@ -635,6 +653,7 @@ body.pad-open .toast { bottom: 262px; }
   .crawler, .banner-wrap { padding-left: 12px; padding-right: 12px; }
   .stage { height: 360px; }
   .stage-legend { display: none; }
+  .stage-days { top: auto; right: auto; bottom: 10px; left: 10px; max-width: calc(100% - 110px); }
   main { padding: 16px 12px 24px; gap: 12px; }
   .panel { padding: 16px 14px 18px; }
   .add { flex-direction: column; }
