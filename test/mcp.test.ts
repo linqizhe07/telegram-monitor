@@ -224,6 +224,7 @@ test('the MCP server: every tool, prompt and resource an agent uses, with what i
     assert.equal(finding.isError, true);
     assert.match(textOf(finding), /reader account is not signed in/);
     assert.equal((await call('find_groups', {})).isError, true, 'a topic or a query');
+    assert.match(textOf(await call('find_groups', { query: 'ondo finance', kind: 'channels' })), /reader account is not signed in/, 'channels, or both, may be asked for');
 
     // A subscribed resource is announced when it changes.
     const updated: string[] = [];

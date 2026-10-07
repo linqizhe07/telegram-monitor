@@ -299,7 +299,7 @@ export class ConsoleServer {
         case '/api/flag':
           return this.json(res, 200, this.flag(body, asker));
         case '/api/discover':
-          return this.json(res, 200, this.deps.discovery?.start(String(body.topic ?? ''), typeof body.query === 'string' ? body.query.slice(0, 64) : null, asker) ?? { ok: false, message: 'The reader account is not signed in.' });
+          return this.json(res, 200, this.deps.discovery?.start(String(body.topic ?? ''), typeof body.query === 'string' ? body.query.slice(0, 64) : null, asker, typeof body.kind === 'string' ? body.kind : 'groups') ?? { ok: false, message: 'The reader account is not signed in.' });
         case '/api/discover/dismiss':
           return this.json(res, 200, this.deps.discovery?.dismiss(Number(body.chatId)) ?? { ok: false, message: 'The reader account is not signed in.' });
         case '/api/refresh':

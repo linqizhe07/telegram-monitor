@@ -164,9 +164,14 @@
     <div class="panel-head">
       <div class="titles">
         <h2 id="discover-h"><span class="idx">04</span>Find groups</h2>
-        <p class="sub" title="Telegram's own search, the channels Telegram calls similar to ones you read, and the public groups people in your groups link to. Each promising one gets a read-only look: the account does not join and the group is not told.">Telegram search, similar channels, and the groups your groups link to · looked at without joining · scams set apart</p>
+        <p class="sub" title="Telegram's own search, the channels Telegram calls similar to ones you read, the discussion groups Telegram links to on-topic channels, the groups and invite links people in your groups share, and the groups those chats point to. Each promising one gets a read-only look: the account does not join and the group is not told.">Telegram search, similar channels, discussion groups, and what your groups link to · looked at without joining · scams set apart</p>
       </div>
       <div class="controls">
+        <div class="seg" id="discover-kinds" role="group" aria-label="What to find">
+          <button type="button" data-kind="groups" title="Chats where people talk">Groups</button>
+          <button type="button" data-kind="channels" title="One voice posting">Channels</button>
+          <button type="button" data-kind="both">Both</button>
+        </div>
         <div class="seg" id="discover-topics" role="group" aria-label="Find groups about">
           <button type="button" data-topic="hyperliquid">Hyperliquid</button>
           <button type="button" data-topic="crypto">Crypto</button>

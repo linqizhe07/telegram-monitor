@@ -3,8 +3,8 @@
 // It never joins, posts, reacts, or marks anything read.
 
 import { Api, type TelegramClient } from 'telegram';
-import { explain, FOLDER_LINK, parseRef, toStored, type MtMessage } from './reader.ts';
-import type { StoredMessage } from './store.ts';
+import { perDayOf } from './discover-rules.ts';
+import { explain, FOLDER_LINK, parseRef } from './reader.ts';
 
 export type Verdict = 'read-from-outside' | 'member' | 'join-needed' | 'request-needed' | 'unsafe' | 'not-found' | 'folder-link';
 
@@ -41,8 +41,6 @@ export interface ProbeResult {
   about?: string;
   history?: { readable: boolean; error?: string; sampled: number; newest: number | null; people: number; botMessages: number; perDay: number | null };
   invite?: { requestNeeded: boolean; previewUntil?: number; paid?: boolean };
-  /** The sampled messages themselves (people's, not bots'), when asked for: to judge what is said. Never stored. */
-  sample?: StoredMessage[];
 }
 
 const big = (x: unknown) => Number(String(x));
@@ -51,7 +49,7 @@ const on = (o: object, names: string[]) => names.filter((n) => Boolean((o as Rec
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** What the account can see of a group or channel it has the object of (the probe's details). */
-export async function probeChannel(client: TelegramClient, target: string, e: Api.Channel, now: number, opts: { sample?: boolean; gapMs?: number } = {}): Promise<ProbeResult> {
+export async function probeChannel(client: TelegramClient, target: string, e: Api.Channel, now: number): Promise<ProbeResult> {
   const r: ProbeResult = {
     target,
     verdict: 'join-needed',
@@ -96,10 +94,11 @@ export async function probeChannel(client: TelegramClient, target: string, e: Ap
   } catch {
     // full info can be refused; the rest still says enough
   }
-  await sleep(opts.gapMs ?? 800);
+  await sleep(800);
 
   try {
-    const msgs = (await client.getMessages(e, { limit: 100 })).filter(Boolean);
+    const page = (await client.getMessages(e, { limit: 100 })).filter(Boolean);
+    const msgs = page.filter((m) => Number.isFinite(m.date)); // deleted ones come back without a date
     const plain = msgs.filter((m) => m instanceof Api.Message) as Api.Message[];
     const people = new Set<string>();
     let botMessages = 0;
@@ -108,15 +107,10 @@ export async function probeChannel(client: TelegramClient, target: string, e: Ap
       if (s instanceof Api.User && s.bot) botMessages++;
       else people.add(String(m.senderId));
     }
-    let perDay: number | null = null;
-    if (msgs.length > 0) {
-      await sleep(opts.gapMs ?? 500);
-      const newest = Math.max(...msgs.map((m) => m.id));
-      const [dayAgo] = await client.getMessages(e, { limit: 1, offsetDate: now - 86_400 });
-      perDay = dayAgo ? newest - dayAgo.id : null; // message ids, so deleted messages are counted too
-    }
+    // The last week's average, or the rate over the time the 100 cover (not "since the last message
+    // before yesterday", which made a quiet group look busy).
+    const perDay = msgs.length > 0 ? perDayOf(page, now) : null;
     r.history = { readable: true, sampled: msgs.length, newest: msgs.length ? Math.max(...msgs.map((m) => m.date)) : null, people: people.size, botMessages, perDay };
-    if (opts.sample) r.sample = plain.map((m) => toStored(m as unknown as MtMessage, r.chatId!)?.message).filter((m): m is StoredMessage => Boolean(m));
   } catch (err) {
     r.history = { readable: false, error: explain(err).message, sampled: 0, newest: null, people: 0, botMessages: 0, perDay: null };
   }

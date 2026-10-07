@@ -772,12 +772,24 @@ $('auto-watch').addEventListener('change', async (e) => {
 
 const FOUND_VERDICT = { good: ['GOOD', 'ok'], ok: ['WORTH A LOOK', 'read'], low: ['LOW', 'warn'], closed: ['CLOSED', ''], scam: ['LIKELY SCAM', 'bad'] };
 const LANGS = { zh: 'Chinese', en: 'English', mixed: 'Chinese + English' };
+const KIND_LABEL = { groups: 'groups', channels: 'channels', both: 'groups and channels' };
 let discoverView = null;
-let discoverKey = { topic: 'hyperliquid', query: null };
+let discoverKey = { topic: 'hyperliquid', query: null, kind: savedKind() };
 let discoverTimer = null;
 let discoverSignature = '';
 
-const sameSearch = (r, k) => (k.query ? (r.query || '').toLowerCase() === k.query.toLowerCase() : r.topic === k.topic && !r.query);
+function savedKind() {
+  try {
+    const k = localStorage.getItem('discover-kind');
+    return k && KIND_LABEL[k] ? k : 'groups';
+  } catch {
+    return 'groups';
+  }
+}
+
+// Searches from before groups/channels was asked judged both.
+const sameSearch = (r, k) => (k.query ? (r.query || '').toLowerCase() === k.query.toLowerCase() : r.topic === k.topic && !r.query) && (r.kind || 'both') === k.kind;
+const recentRun = (k) => discoverView && discoverView.latest.find((r) => sameSearch(r, k) && Date.now() / 1000 - r.doneAt < 12 * 3600);
 
 async function loadDiscover() {
   clearTimeout(discoverTimer);
@@ -792,7 +804,7 @@ async function loadDiscover() {
 
 async function startDiscover() {
   try {
-    const r = await api('/api/discover', { topic: discoverKey.topic || '', query: discoverKey.query });
+    const r = await api('/api/discover', { topic: discoverKey.topic || '', query: discoverKey.query, kind: discoverKey.kind });
     toast(r.message);
   } catch (err) {
     toast(err.message);
@@ -802,39 +814,59 @@ async function startDiscover() {
 
 /** A topic: shows its last result when it is under 12 hours old, or searches. */
 function pickTopic(topic) {
-  discoverKey = { topic, query: null };
+  discoverKey = { topic, query: null, kind: discoverKey.kind };
   $('discover-input').value = '';
-  const last = discoverView && discoverView.latest.find((r) => sameSearch(r, discoverKey));
-  if (last && Date.now() / 1000 - last.doneAt < 12 * 3600) renderDiscover();
+  if (recentRun(discoverKey)) renderDiscover();
   else startDiscover();
+}
+
+/** Groups, channels or both: shows the last result of that kind, if any; searching stays a click away. */
+function pickKind(kind) {
+  discoverKey = { ...discoverKey, kind };
+  try {
+    localStorage.setItem('discover-kind', kind);
+  } catch {
+    // a remembered choice is only a convenience
+  }
+  renderDiscover();
 }
 
 function discoverRow(a) {
   const [label, cls] = FOUND_VERDICT[a.verdict];
   const reading = state?.sources.some((src) => src.chatId === a.chatId && src.enabled);
-  const sub = [a.username ? `@${a.username}` : null, a.type, a.language ? LANGS[a.language] : null].filter(Boolean).join(' · ');
+  const sub = [a.private ? `private ${a.type}` : a.username ? `@${a.username}` : null, a.private ? null : a.type, a.language ? LANGS[a.language] : null].filter(Boolean).join(' · ');
+  const hide = el('button', { type: 'button', class: 'btn', title: 'Hide it from future searches', onclick: async (e) => {
+    e.currentTarget.disabled = true;
+    try {
+      toast((await api('/api/discover/dismiss', { chatId: a.chatId })).message);
+      e.currentTarget.closest('tr').remove();
+    } catch (err) {
+      toast(err.message);
+    }
+  } }, 'Hide');
+  const open = (title) => (a.link ? el('a', { class: 'btn', href: a.link, target: '_blank', rel: 'noopener noreferrer', title }, 'Open') : null);
   const act = reading
     ? el('span', { class: 'pill ok', text: 'Reading' })
-    : a.verdict === 'closed'
-      ? (a.link ? el('a', { class: 'btn', href: a.link, target: '_blank', rel: 'noopener noreferrer', title: 'Only members can read it: join in the Telegram app if you want it, and it shows up under Sources' }, 'Open') : null)
-      : el('span', { class: 'row-actions' },
-          el('button', { type: 'button', class: 'btn', title: 'Read it from outside: the account does not join', onclick: (e) => action(e.currentTarget, '/api/watch', { target: `@${a.username}` }, `Starting to read ${a.title}…`) }, 'Watch'),
-          el('button', { type: 'button', class: 'btn', title: 'Hide it from future searches', onclick: async (e) => {
-            e.currentTarget.disabled = true;
-            try {
-              toast((await api('/api/discover/dismiss', { chatId: a.chatId })).message);
-              e.currentTarget.closest('tr').remove();
-            } catch (err) {
-              toast(err.message);
-            }
-          } }, 'Hide'));
+    : a.private
+      ? el('span', { class: 'row-actions' }, open('Private: only members can read it. Join in the Telegram app if you want it, and it shows up under Sources'), hide)
+      : a.verdict === 'closed'
+        ? el('span', { class: 'row-actions' }, open('Only members can read it: join in the Telegram app if you want it, and it shows up under Sources'), hide)
+        : el('span', { class: 'row-actions' },
+            el('button', { type: 'button', class: 'btn', title: 'Read it from outside: the account does not join', onclick: (e) => action(e.currentTarget, '/api/watch', { target: `@${a.username}` }, `Starting to read ${a.title}…`) }, 'Watch'),
+            hide);
+  const online = a.online === null || a.online === undefined ? null : el('div', { class: 'cell-sub', text: `${n(a.online)} online` });
+  const views = a.views === null || a.views === undefined ? null : el('div', { class: 'cell-sub', text: `~${n(a.views)} views a post` });
   return el('tr', {},
-    el('td', {}, el('span', { class: `pill ${cls}`, text: label }), a.verdict === 'closed' ? null : el('span', { class: 'score', text: `score ${a.score}` })),
     el('td', {},
-      el('div', { class: 'src-title' }, a.link ? el('a', { href: a.link, target: '_blank', rel: 'noopener noreferrer', title: `Open ${a.title} in Telegram` }, a.title) : a.title),
+      a.isNew ? el('span', { class: 'pill first', text: 'NEW', title: 'Not in the previous result of this search' }) : null,
+      el('span', { class: `pill ${cls}`, text: label }),
+      a.was ? el('span', { class: 'score', text: `was ${FOUND_VERDICT[a.was][0].toLowerCase()}` }) : null,
+      a.verdict === 'closed' ? null : el('span', { class: 'score', text: `score ${a.score}` })),
+    el('td', {},
+      el('div', { class: 'src-title' }, a.link && !a.private ? el('a', { href: a.link, target: '_blank', rel: 'noopener noreferrer', title: `Open ${a.title} in Telegram` }, a.title) : a.title),
       el('div', { class: 'src-sub', text: sub })),
-    el('td', {}, el('span', { class: 'num', text: n(a.members) })),
-    el('td', {}, el('span', { class: 'num', text: a.perDay === null ? '—' : a.perDay >= 10 ? n(Math.round(a.perDay)) : a.perDay.toFixed(1) }), el('div', { class: 'cell-sub', text: a.type === 'channel' ? 'posts a day' : 'messages a day' })),
+    el('td', {}, el('span', { class: 'num', text: n(a.members) }), online),
+    el('td', {}, el('span', { class: 'num', text: a.perDay === null ? '—' : a.perDay >= 10 ? n(Math.round(a.perDay)) : a.perDay.toFixed(1) }), el('div', { class: 'cell-sub', text: a.perDay === null ? '' : a.type === 'channel' ? 'posts a day' : 'messages a day' }), views),
     el('td', {}, a.speakers === null ? '—' : el('span', { class: 'num', text: String(a.speakers) }), a.speakers === null ? null : el('div', { class: 'cell-sub', text: `in the last ${a.sampled}` })),
     el('td', {}, el('div', { class: 'why' },
       a.good.map((x) => el('span', { class: 'plus', text: `+ ${x}` })),
@@ -847,32 +879,38 @@ function renderDiscover() {
   const v = discoverView;
   if (!v) return;
   for (const b of $('discover-topics').children) b.classList.toggle('on', !discoverKey.query && b.dataset.topic === discoverKey.topic);
+  for (const b of $('discover-kinds').children) b.classList.toggle('on', b.dataset.kind === discoverKey.kind);
   const busy = Boolean(v.running);
   const status = $('discover-status');
   status.classList.toggle('searching', busy);
   $('discover-btn').disabled = busy || !v.available;
   $('discover-again').disabled = busy || !v.available;
   for (const b of $('discover-topics').children) b.disabled = busy || !v.available;
+  for (const b of $('discover-kinds').children) b.disabled = busy;
   if (!v.available) setText(status, 'Needs the reader account signed in.');
-  else if (busy) setText(status, `Searching for ${v.running.label}: ${v.running.step}${v.running.toLook ? ` · ${v.running.looked} of ${v.running.toLook} looked at` : ''}`);
-  else if (v.budget) setText(status, `${Math.max(0, v.budget.perHour - v.budget.usedHour)} of ${v.budget.perHour} searches left this hour · each sends Telegram about 40 read-only requests and takes about a minute; nothing is joined`);
+  else if (busy) setText(status, `Searching for ${v.running.label} ${KIND_LABEL[v.running.kind || 'both']}: ${v.running.step}${v.running.toLook ? ` · ${v.running.looked} of ${v.running.toLook} looked at` : ''} · ${v.running.requests || 0} requests`);
+  else if (v.budget) setText(status, `${Math.max(0, v.budget.perHour - v.budget.usedHour)} of ${v.budget.perHour} searches left this hour · each sends Telegram up to 45 read-only requests and takes about a minute; nothing is joined`);
 
   const run = v.latest.find((r) => sameSearch(r, discoverKey));
   const box = $('discover-result');
   if (!run) {
     box.hidden = true;
+    const name = discoverKey.query || [...$('discover-topics').children].find((b) => b.dataset.topic === discoverKey.topic)?.textContent || discoverKey.topic;
+    if (!busy && v.available) setText(status, `${status.textContent} · no search for ${name} ${KIND_LABEL[discoverKey.kind]} yet: click the topic, or Search, to run one`);
     return;
   }
   const reading = (state?.sources || []).filter((x) => x.enabled).map((x) => x.chatId).join(',');
-  const signature = `${run.id}|${run.results.length}|${reading}`;
+  const signature = `${run.id}|${run.results.length}|${run.doneAt}|${reading}`;
   if (signature === discoverSignature && !box.hidden) return;
   discoverSignature = signature;
   box.hidden = false;
   const count = (verdict) => run.results.filter((r) => r.verdict === verdict).length;
+  const fresh = run.results.filter((r) => r.isNew).length;
   $('discover-summary').replaceChildren(
-    el('b', { text: run.label }), ` · searched `, agoEl(run.at), ` by ${run.by} · ${run.found} found, ${run.looked} looked at · `,
+    el('b', { text: `${run.label} ${KIND_LABEL[run.kind || 'both']}` }), ` · searched `, agoEl(run.at), ` by ${run.by} · ${run.found} found, ${run.looked} looked at${run.requests ? `, ${run.requests} requests` : ''} · `,
     el('span', { class: 'teal', text: `${count('good')} good` }), `, ${count('ok')} worth a look, ${count('low')} low, ${count('closed')} closed, `,
-    el('span', { class: 'pink', text: `${count('scam')} likely scams` }));
+    el('span', { class: 'pink', text: `${count('scam')} likely scams` }),
+    run.previousAt ? ` · ${fresh ? `${fresh} new` : 'nothing new'} since the same search ${ago(run.previousAt)}` : run.previousAt === null ? ' · the first such search' : '');
   const listed = run.results.filter((r) => r.verdict !== 'scam');
   const t = $('discover-table');
   t.replaceChildren(
@@ -881,7 +919,7 @@ function renderDiscover() {
   const scams = run.results.filter((r) => r.verdict === 'scam');
   $('discover-scams').hidden = scams.length === 0;
   setText($('discover-scams-label'), `${scams.length} likely scam${scams.length === 1 ? '' : 's'}, kept out of the list (no links)`);
-  $('discover-scam-list').replaceChildren(...scams.map((a) => el('li', {}, el('span', { class: 't', text: `${a.title}${a.username ? ` · @${a.username}` : ''}` }), el('br'), el('span', { class: 'r', text: a.bad.join(' · ') }))));
+  $('discover-scam-list').replaceChildren(...scams.map((a) => el('li', {}, el('span', { class: 't', text: `${a.isNew ? 'NEW · ' : ''}${a.title}${a.username ? ` · @${a.username}` : a.private ? ' · private' : ''}` }), el('br'), el('span', { class: 'r', text: a.bad.join(' · ') }))));
   $('discover-notes').replaceChildren(...[...(run.error ? [`Stopped early: ${run.error}`] : []), ...run.notes].map((x) => el('li', { text: x })));
 }
 
@@ -889,10 +927,14 @@ $('discover-topics').addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (b && !b.disabled) pickTopic(b.dataset.topic);
 });
+$('discover-kinds').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (b && !b.disabled) pickKind(b.dataset.kind);
+});
 $('discover-form').addEventListener('submit', (e) => {
   e.preventDefault();
   const q = $('discover-input').value.trim();
-  if (q.length >= 2) discoverKey = { topic: '', query: q };
+  if (q.length >= 2) discoverKey = { topic: '', query: q, kind: discoverKey.kind };
   startDiscover();
 });
 $('discover-again').addEventListener('click', startDiscover);

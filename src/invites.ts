@@ -59,7 +59,7 @@ export interface TrackerDeps {
   self: { id: string; username: string | null };
   defaults: ChatDefaults;
   now: () => number;
-  /** The probe's details for a chat the account can see (default: probeChannel, three reads). */
+  /** The probe's details for a chat the account can see (default: probeChannel, two reads). */
   probe?: (target: string, chat: MtEntity, now: number) => Promise<ProbeResult | null>;
   /** Waits (tests advance a fake clock instead). */
   sleep?: (ms: number) => Promise<void>;
