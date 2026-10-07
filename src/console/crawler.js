@@ -73,6 +73,10 @@
   const ctx = canvas.getContext('2d', { alpha: false });
   const view = { w: 0, h: 0, dpr: 1, s: 1 };
   const cam = { x: 0, y: 0, z: 1, tx: 0, ty: 0, tz: 1 };
+  /** Gas colours for the nebulae (each group keeps its own), the news, and the group being read. */
+  const HUES = ['92,200,236', '112,128,255', '170,112,255', '79,209,176', '90,160,255'];
+  const NEWS_RGB = '92,200,236';
+  const PINK_RGB = '255,92,138';
 
   /** A nebula: one group, or the news. */
   const clouds = new Map();
@@ -83,6 +87,14 @@
     let c = clouds.get(key);
     if (!c) {
       c = { key, kind, title, chatId: kind === 'group' ? Number(key.slice(2)) : null, seed: hash(key), count: 0, sub: '', x: 0, y: 0, tx: 0, ty: 0, r: 40, n: 0, pts: null, sprite: null, tint: null, tintColor: '', glow: 0, channel: false };
+      // Its gas colour, spin and orbit come from a second seed: the points' shape stays as it was.
+      const R2 = rng(hash(`${key}·look`));
+      c.hue = kind === 'news' ? NEWS_RGB : HUES[Math.floor(R2() * HUES.length)];
+      c.spin = (0.01 + R2() * 0.018) * (R2() < 0.5 ? -1 : 1);
+      c.tilt = (R2() - 0.5) * 0.9;
+      c.orbitDir = R2() < 0.5 ? -1 : 1;
+      c.heat = 0;
+      c.base = 0;
       clouds.set(key, c);
     }
     c.title = title;
@@ -105,6 +117,8 @@
     const arms = 3 + Math.floor(R() * 3);
     const armA = Array.from({ length: arms }, () => R() * Math.PI * 2);
     const curl = (R() - 0.5) * 2.4;
+    c.arms = armA;
+    c.curl = curl;
     for (let i = 0; i < c.n; i++) {
       const k = R();
       let x;
@@ -198,6 +212,7 @@
     g.fillRect(-c.r, -c.r, c.r * 2, c.r * 2);
     c.sprite = { canvas: cv, size };
     c.tint = null;
+    c.gasCache = null;
   }
 
   /** The same sprite in one colour (its alpha kept), for the group being read and for the news. */
@@ -328,6 +343,7 @@
     const s = Math.max(0.42, Math.min(1.15, Math.min(w / 1200, h / 540)));
     const scaleChanged = Math.abs(s - view.s) > 0.04;
     view.s = s;
+    buildSky();
     rebuildClouds(dprChanged || scaleChanged);
     if (calm.matches && shouldRun()) draw(performance.now());
     wake();
@@ -348,7 +364,7 @@
 
   // ── the crawler ────────────────────────────────────────────────────────
 
-  const crawler = { x: 0, y: 0, vx: 0, vy: 0, heading: 0, legs: [], placed: false };
+  const crawler = { x: 0, y: 0, vx: 0, vy: 0, heading: 0, legs: [], placed: false, feedUntil: 0 };
   for (let i = 0; i < 16; i++) crawler.legs.push({ ax: 0, ay: 0, fx: 0, fy: 0, next: 0, from: 0, key: null });
 
   /** What the detector's hand holds: the words of the messages just read. */
@@ -356,6 +372,16 @@
   const pings = [];
   /** One per group and story in today's radar view; drawn bright for a while after a new match. */
   const links = [];
+  /** Groups that talked about the same story today: a route between them, by how many stories. */
+  const bridges = [];
+  /** How hard the news nebula's jets burn: 1 when news just came in, fading. */
+  let newsFlare = 0;
+  /** When the crawler locked on to its group (the lock closes in), and the jump that took it there. */
+  let lockAt = 0;
+  let warp = null;
+  /** Plasma behind the crawler as it moves, and the data it draws in from a nebula as it reads. */
+  const trail = [];
+  const streams = [];
   const KIND = {
     news: { color: C.pink, filled: true, label: 'news' },
     ticker: { color: C.cyan, label: 'ticker' },
@@ -414,6 +440,10 @@
 
   function focus(key) {
     if (!clouds.has(key) || key === activeKey) return;
+    const to = clouds.get(key);
+    // A long way to the next group: the crawler jumps, and leaves a streak behind.
+    if (crawler.placed && Math.hypot(to.x - crawler.x, to.y - crawler.y) > 160) warp = { x: crawler.x, y: crawler.y, at: performance.now() };
+    lockAt = performance.now();
     activeKey = key;
     if (compact()) placeLabels();
     showTitle();
@@ -469,6 +499,10 @@
     const still = calm.matches;
     const active = clouds.get(activeKey);
     const newsCloud = clouds.get('news');
+    // What just happened fades: a group's burst of messages, the news' flare.
+    const cool = Math.exp(-dt / 90);
+    for (const c of clouds.values()) c.heat *= cool;
+    newsFlare *= Math.exp(-dt / 2.5);
 
     // Nebulae glide to their places; the camera leans toward the group being read.
     const k = still ? 1 : 1 - Math.exp(-dt * 2.2);
@@ -520,6 +554,7 @@
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = C.bg;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+    drawSky(time, still);
     const z = cam.z;
     ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * (W / 2 - cam.x * z), dpr * (H / 2 - cam.y * z));
 
@@ -527,6 +562,22 @@
     for (const c of clouds.values()) {
       if (!c.sprite) continue;
       const s = c.sprite.size * (1 + (still ? 0 : c.glow * 0.012 * Math.sin(time * 1.3)));
+      if (c.kind === 'group') drawOrbit(c, time, still, false);
+      // The gas, turning slowly, in the group's own colour (pink while it is read).
+      const gas = gasOf(c, c.hue);
+      if (gas) {
+        ctx.save();
+        ctx.translate(c.x, c.y);
+        ctx.rotate(still ? 0 : time * c.spin);
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = c.kind === 'news' ? 0.85 : 0.5 * (1 - c.glow * 0.6) + 0.15;
+        ctx.drawImage(gas.canvas, -s / 2, -s / 2, s, s);
+        if (c.glow > 0.02 && c.kind !== 'news') {
+          ctx.globalAlpha = c.glow * 0.75;
+          ctx.drawImage(gasOf(c, PINK_RGB).canvas, -s / 2, -s / 2, s, s);
+        }
+        ctx.restore();
+      }
       ctx.globalAlpha = c.kind === 'news' ? 0.45 : 0.5 + c.glow * 0.2;
       ctx.drawImage(c.sprite.canvas, c.x - s / 2, c.y - s / 2, s, s);
       const tint = c.kind === 'news' ? 0.85 : c.channel ? 0.35 * (1 - c.glow) + c.glow : c.glow;
@@ -544,8 +595,83 @@
           ctx.fillRect(c.x + c.pts[p.i * 3] - 0.9, c.y + c.pts[p.i * 3 + 1] - 0.9, 1.8, 1.8);
         }
       }
+      // The core: a star with spikes, brighter the busier the group is.
+      const core = c.r * (c.kind === 'news' ? 0.95 : 0.55 + 0.05 * (c.base + c.heat));
+      ctx.save();
+      ctx.translate(c.x, c.y);
+      ctx.rotate(still ? 0 : time * 0.03 + c.tilt);
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = Math.min(0.95, (c.kind === 'news' ? 0.55 + newsFlare * 0.4 : 0.35 + c.glow * 0.35) * (still ? 1 : 0.9 + 0.1 * Math.sin(time * 2 + c.tilt * 7)));
+      ctx.drawImage(spikeSprite(), -core, -core, core * 2, core * 2);
+      ctx.restore();
+      if (c.kind === 'group') drawOrbit(c, time, still, true);
     }
     ctx.globalAlpha = 1;
+
+    // Routes: groups that talked about the same story, with a packet running between them.
+    for (const br of bridges) {
+      const A = clouds.get(`g:${br.a}`);
+      const B = clouds.get(`g:${br.b}`);
+      if (!A || !B) continue;
+      const mx = (A.x + B.x) / 2 + br.bend * (B.y - A.y) * 0.5;
+      const my = (A.y + B.y) / 2 - br.bend * (B.x - A.x) * 0.5;
+      ctx.strokeStyle = C.teal;
+      ctx.globalAlpha = Math.min(0.34, 0.08 + br.w * 0.05);
+      ctx.lineWidth = 0.7;
+      ctx.beginPath();
+      ctx.moveTo(A.x, A.y);
+      ctx.quadraticCurveTo(mx, my, B.x, B.y);
+      ctx.stroke();
+      if (!still) {
+        for (const off of br.w > 2 ? [0, 0.5] : [0]) {
+          const u = (time * 0.08 + br.ph + off) % 1;
+          const px = (1 - u) * (1 - u) * A.x + 2 * (1 - u) * u * mx + u * u * B.x;
+          const py = (1 - u) * (1 - u) * A.y + 2 * (1 - u) * u * my + u * u * B.y;
+          ctx.globalAlpha = 0.9;
+          ctx.fillStyle = C.teal;
+          ctx.fillRect(px - 1.4, py - 1.4, 2.8, 2.8);
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // The news as a quasar: twin jets that flare when news comes in, and its accretion rings.
+    if (newsCloud && newsCloud.sprite) {
+      const q = newsCloud;
+      ctx.save();
+      ctx.translate(q.x, q.y);
+      ctx.rotate(-0.32);
+      ctx.globalCompositeOperation = 'lighter';
+      const len = q.r * (1.2 + newsFlare * 0.9) * (still ? 1 : 0.96 + 0.04 * Math.sin(time * 6));
+      for (const dir of [-1, 1]) {
+        const jet = ctx.createLinearGradient(0, 0, 0, dir * len);
+        jet.addColorStop(0, `rgba(${NEWS_RGB},${0.4 + newsFlare * 0.45})`);
+        jet.addColorStop(0.6, `rgba(${NEWS_RGB},${0.08 + newsFlare * 0.15})`);
+        jet.addColorStop(1, `rgba(${NEWS_RGB},0)`);
+        ctx.fillStyle = jet;
+        const w = 1.8 + newsFlare * 2.6;
+        ctx.beginPath();
+        ctx.moveTo(-w, 0);
+        ctx.lineTo(w, 0);
+        ctx.lineTo(0.5, dir * len);
+        ctx.lineTo(-0.5, dir * len);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.strokeStyle = C.cyan;
+      ctx.lineWidth = 0.8;
+      for (const [rx, ry, a, sp] of [[q.r * 0.6, q.r * 0.15, 0.45, 26], [q.r * 0.86, q.r * 0.22, 0.22, -14], [q.r * 1.1, q.r * 0.28, 0.1, 8]]) {
+        ctx.globalAlpha = Math.min(0.85, a + newsFlare * 0.3);
+        ctx.setLineDash([5, 9]);
+        ctx.lineDashOffset = still ? 0 : time * sp;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
 
     // Links: a group that talked about one of today's stories, to the news nebula.
     if (newsCloud) {
@@ -597,6 +723,8 @@
     }
     ctx.globalAlpha = 1;
 
+    if (active) drawLock(active, t, time, still);
+
     // Pings.
     for (let i = pings.length - 1; i >= 0; i--) {
       const p = pings[i];
@@ -612,6 +740,83 @@
       ctx.ellipse(p.x, p.y, 18 + age * 210 * view.s, (18 + age * 210 * view.s) * 0.72, 0, 0, Math.PI * 2);
       ctx.stroke();
     }
+    ctx.globalAlpha = 1;
+
+    if (active && !still) {
+      const sz = Math.max(0.8, view.s) * 1.2;
+      const speed = Math.hypot(crawler.vx, crawler.vy);
+      if (speed > 14) {
+        const back = crawler.heading + Math.PI;
+        for (let k = 0; k < 2; k++) {
+          trail.push({ x: crawler.x + Math.cos(back) * 20 * sz + (Math.random() - 0.5) * 8, y: crawler.y + Math.sin(back) * 14 * sz + (Math.random() - 0.5) * 8, vx: Math.cos(back) * 24 + (Math.random() - 0.5) * 30, vy: Math.sin(back) * 24 + (Math.random() - 0.5) * 30, born: t, life: 450 + Math.random() * 550 });
+        }
+        while (trail.length > 140) trail.shift();
+      }
+    }
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = trail.length - 1; i >= 0; i--) {
+      const p = trail[i];
+      const age = (t - p.born) / p.life;
+      if (age >= 1 || still) {
+        trail.splice(i, 1);
+        continue;
+      }
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      ctx.globalAlpha = 0.7 * (1 - age);
+      ctx.fillStyle = age < 0.3 ? C.white : C.cyan;
+      const z = 2.2 * (1 - age) + 0.6;
+      ctx.fillRect(p.x - z / 2, p.y - z / 2, z, z);
+    }
+    if (warp && !still) {
+      const age = (t - warp.at) / 650;
+      if (age >= 1) warp = null;
+      else {
+        const grad = ctx.createLinearGradient(warp.x, warp.y, crawler.x, crawler.y);
+        grad.addColorStop(0, `rgba(${NEWS_RGB},0)`);
+        grad.addColorStop(1, `rgba(${NEWS_RGB},${0.55 * (1 - age)})`);
+        ctx.strokeStyle = grad;
+        ctx.lineWidth = 2.2 * (1 - age) + 0.4;
+        ctx.beginPath();
+        ctx.moveTo(warp.x, warp.y);
+        ctx.lineTo(crawler.x, crawler.y);
+        ctx.stroke();
+        ctx.strokeStyle = C.cyan;
+        ctx.lineWidth = 0.8;
+        for (let k = 1; k <= 4; k++) {
+          const f = k / 5;
+          ctx.globalAlpha = 0.32 * (1 - age) * f;
+          ctx.beginPath();
+          ctx.ellipse(warp.x + (crawler.x - warp.x) * f, warp.y + (crawler.y - warp.y) * f, 24 * f + 8, (24 * f + 8) * 0.68, crawler.heading, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      }
+    }
+    for (let i = streams.length - 1; i >= 0; i--) {
+      const p = streams[i];
+      const u = (t - p.born) / p.dur;
+      if (u >= 1 || still) {
+        streams.splice(i, 1);
+        continue;
+      }
+      if (u < 0) continue;
+      const e = u * u;
+      const mx = (p.sx + crawler.x) / 2 + p.bend * (crawler.y - p.sy);
+      const my = (p.sy + crawler.y) / 2 - p.bend * (crawler.x - p.sx);
+      const at = (v) => [(1 - v) * (1 - v) * p.sx + 2 * (1 - v) * v * mx + v * v * crawler.x, (1 - v) * (1 - v) * p.sy + 2 * (1 - v) * v * my + v * v * crawler.y];
+      const [x1, y1] = at(e);
+      const [x0, y0] = at(Math.max(0, e - 0.08));
+      ctx.globalAlpha = 0.85 * Math.min(1, u * 4);
+      ctx.strokeStyle = p.color;
+      ctx.lineWidth = 0.9;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+      ctx.fillStyle = p.color;
+      ctx.fillRect(x1 - 1.2, y1 - 1.2, 2.4, 2.4);
+    }
+    ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
 
     if (active) drawCrawler(t, time, active, still);
@@ -706,13 +911,87 @@
     if (still && (tags.length || noise.length)) wake();
   }
 
+  /** The lock on the group being read: brackets that close in when the crawler arrives, a turning scale, a radar sweep. */
+  function drawLock(a, t, time, still) {
+    const u = still ? 1 : Math.min(1, (t - lockAt) / 520);
+    const e = 1 - Math.pow(1 - u, 3);
+    const sc = 1 + (1 - e) * 0.7;
+    const hw = a.r * 1.08 * sc;
+    const hh = a.r * 0.86 * sc;
+    const L = Math.max(8, Math.min(18, a.r * 0.22));
+    ctx.save();
+    ctx.translate(a.x, a.y);
+    ctx.strokeStyle = C.pink;
+    ctx.lineWidth = 1.1;
+    ctx.globalAlpha = 0.2 + 0.5 * e;
+    for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+      ctx.beginPath();
+      ctx.moveTo(sx * hw, sy * (hh - L));
+      ctx.lineTo(sx * hw, sy * hh);
+      ctx.lineTo(sx * (hw - L), sy * hh);
+      ctx.stroke();
+    }
+    // Hairlines from the brackets toward the edges of the stage, very faint.
+    ctx.globalAlpha = 0.06 * e;
+    ctx.beginPath();
+    ctx.moveTo(-hw - 6, 0);
+    ctx.lineTo(-hw - a.r * 1.6, 0);
+    ctx.moveTo(hw + 6, 0);
+    ctx.lineTo(hw + a.r * 1.6, 0);
+    ctx.stroke();
+    // The radar sweep.
+    if (!still) {
+      ctx.save();
+      ctx.scale(1, 0.74);
+      const rr = a.r * 1.22;
+      const th = time * 1.15;
+      const sweep = ctx.createRadialGradient(0, 0, a.r * 0.2, 0, 0, rr);
+      sweep.addColorStop(0, 'rgba(255,92,138,0)');
+      sweep.addColorStop(1, 'rgba(255,92,138,0.16)');
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = e;
+      ctx.fillStyle = sweep;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, rr, th - 0.55, th);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+    // A turning scale.
+    ctx.rotate(still ? 0 : time * 0.12);
+    ctx.globalAlpha = 0.18 * e;
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    const rr = a.r * 1.24;
+    for (let i = 0; i < 72; i++) {
+      const ang = (i / 72) * Math.PI * 2;
+      const len = i % 9 === 0 ? 7 : 3;
+      ctx.moveTo(Math.cos(ang) * rr, Math.sin(ang) * rr * 0.74);
+      ctx.lineTo(Math.cos(ang) * (rr + len), Math.sin(ang) * (rr + len) * 0.74);
+    }
+    ctx.stroke();
+    ctx.restore();
+    // Above the top-left bracket: labels sit to the right of a nebula, so this corner stays free.
+    ctx.font = `10px ${MONO}`;
+    ctx.fillStyle = C.pink;
+    ctx.globalAlpha = 0.8 * e;
+    ctx.fillText(`◢ LOCK${a.heat > 0.6 ? ' · LIVE' : ''}`, a.x - hw, a.y - hh - 6);
+    ctx.globalAlpha = 1;
+  }
+
+  /** A point along two straight segments (foot → knee → hip), 0 at the foot. */
+  const alongLeg = (ex, ey, kx, ky, bx, by, q) => (q < 0.5 ? [ex + (kx - ex) * q * 2, ey + (ky - ey) * q * 2] : [kx + (bx - kx) * (q - 0.5) * 2, ky + (by - ky) * (q - 0.5) * 2]);
+
   function drawCrawler(t, time, cloud, still) {
     const cx = crawler.x;
     const cy = crawler.y;
     const s = Math.max(0.8, view.s) * 1.2;
+    const feeding = !still && t < crawler.feedUntil;
     // Legs: each holds a point of the nebula and steps to a new one now and then (in still mode,
-    // only when the crawler moves to another group).
-    ctx.lineWidth = 0.8;
+    // only when the crawler moves to another group). Jointed: hip, knee, foot; data runs up them
+    // while it reads.
+    ctx.lineCap = 'round';
     crawler.legs.forEach((leg, i) => {
       if (!leg.placed || leg.key !== cloud.key || (!still && t > leg.next)) {
         const j = Math.floor(Math.random() * cloud.n);
@@ -740,34 +1019,95 @@
       const bx = cx + Math.cos(a) * 22 * s;
       const by = cy + Math.sin(a) * 15 * s;
       const sway = still ? 0 : Math.sin(time * 3 + i) * 6;
-      const kx = (bx + ex) / 2 + Math.cos(a + 1.2) * (10 + sway) * s;
-      const ky = (by + ey) / 2 + Math.sin(a + 1.2) * (10 + sway) * s;
+      const kx = (bx + ex) / 2 + Math.cos(a + 1.2) * (12 + sway) * s;
+      const ky = (by + ey) / 2 + Math.sin(a + 1.2) * (12 + sway) * s;
       ctx.strokeStyle = C.cyan;
-      ctx.globalAlpha = 0.62;
+      ctx.globalAlpha = 0.78;
+      ctx.lineWidth = 1.3;
       ctx.beginPath();
       ctx.moveTo(bx, by);
-      ctx.quadraticCurveTo(kx, ky, ex, ey);
+      ctx.lineTo(kx, ky);
+      ctx.stroke();
+      ctx.globalAlpha = 0.55;
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.moveTo(kx, ky);
+      ctx.lineTo(ex, ey);
       ctx.stroke();
       ctx.globalAlpha = 0.9;
-      ctx.fillStyle = C.cyan;
-      for (const q of [0.35, 0.65]) {
-        const px = (1 - q) * (1 - q) * bx + 2 * (1 - q) * q * kx + q * q * ex;
-        const py = (1 - q) * (1 - q) * by + 2 * (1 - q) * q * ky + q * q * ey;
-        ctx.fillRect(px - 1, py - 1, 2, 2);
-      }
+      ctx.beginPath();
+      ctx.arc(kx, ky, 1.7 * s, 0, Math.PI * 2);
+      ctx.stroke();
       ctx.fillStyle = C.white;
-      ctx.fillRect(ex - 1.5, ey - 1.5, 3, 3);
+      ctx.fillRect(ex - 1.4, ey - 1.4, 2.8, 2.8);
+      if (!still && u < 1) {
+        // A foot landing: a small ring.
+        ctx.globalAlpha = 0.6 * (1 - u);
+        ctx.beginPath();
+        ctx.arc(ex, ey, 2 + u * 8, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      if (feeding) {
+        const q = (t / 420 + i * 0.137) % 1;
+        const [px, py] = alongLeg(ex, ey, kx, ky, bx, by, q);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = i % 3 === 0 ? C.pink : C.white;
+        ctx.fillRect(px - 1.3, py - 1.3, 2.6, 2.6);
+      }
     });
+    ctx.lineCap = 'butt';
     ctx.globalAlpha = 1;
-    // Body: a glow, a ring of cilia, the shell and the core.
+
     ctx.save();
     ctx.translate(cx, cy);
+    // The glow, and the scanner: a cone of light ahead, sweeping.
     ctx.globalCompositeOperation = 'lighter';
-    ctx.drawImage(glowSprite(), -70 * s, -70 * s, 140 * s, 140 * s);
+    ctx.drawImage(glowSprite(), -80 * s, -80 * s, 160 * s, 160 * s);
+    const sweep = crawler.heading + (still ? 0 : Math.sin(time * 1.6) * 0.38);
+    const reach = 125 * s;
+    const cone = ctx.createRadialGradient(0, 0, 10 * s, 0, 0, reach);
+    cone.addColorStop(0, 'rgba(92,200,236,0.24)');
+    cone.addColorStop(1, 'rgba(92,200,236,0)');
+    ctx.fillStyle = cone;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.arc(0, 0, reach, sweep - 0.27, sweep + 0.27);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(92,200,236,0.3)';
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    for (const edge of [-0.27, 0.27]) {
+      ctx.moveTo(Math.cos(sweep + edge) * 12 * s, Math.sin(sweep + edge) * 12 * s);
+      ctx.lineTo(Math.cos(sweep + edge) * reach, Math.sin(sweep + edge) * reach);
+    }
+    ctx.stroke();
     ctx.globalCompositeOperation = 'source-over';
-    ctx.rotate(crawler.heading);
+    // Two rings turning against each other: a dashed one outside, a segmented one inside.
     ctx.strokeStyle = C.cyan;
-    ctx.globalAlpha = 0.65;
+    ctx.globalAlpha = 0.5;
+    ctx.lineWidth = 0.7;
+    ctx.setLineDash([3, 5]);
+    ctx.lineDashOffset = still ? 0 : -time * 18;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 40 * s, 27 * s, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.save();
+    ctx.scale(1, 0.68);
+    ctx.rotate(still ? 0 : -time * 0.7);
+    ctx.globalAlpha = 0.75;
+    ctx.lineWidth = 2 * s;
+    for (let i = 0; i < 8; i++) {
+      const a0 = (i / 8) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, 31 * s, a0, a0 + 0.42);
+      ctx.stroke();
+    }
+    ctx.restore();
+    // The shell turns to where it goes: cilia, a hexagon with a lattice, an inner hexagon, antennae.
+    ctx.rotate(crawler.heading);
+    ctx.globalAlpha = 0.55;
     ctx.lineWidth = 0.7;
     ctx.beginPath();
     for (let i = 0; i < 44; i++) {
@@ -778,27 +1118,65 @@
       ctx.lineTo(Math.cos(a) * r2, Math.sin(a) * r2 * 0.68);
     }
     ctx.stroke();
+    const hex = (r) => {
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2;
+        const x = Math.cos(a) * r;
+        const y = Math.sin(a) * r * 0.68;
+        if (i) ctx.lineTo(x, y);
+        else ctx.moveTo(x, y);
+      }
+      ctx.closePath();
+    };
     ctx.globalAlpha = 1;
-    ctx.fillStyle = 'rgba(8, 26, 34, 0.92)';
-    ctx.beginPath();
-    ctx.ellipse(0, 0, 24 * s, 16 * s, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(8, 26, 34, 0.94)';
+    hex(25 * s);
     ctx.fill();
     ctx.lineWidth = 1.4;
     ctx.stroke();
     ctx.save();
     ctx.clip();
-    ctx.globalAlpha = 0.35;
+    ctx.globalAlpha = 0.26;
     ctx.lineWidth = 0.6;
     ctx.beginPath();
-    for (let x = -30; x <= 30; x += 4.5) {
-      ctx.moveTo(x * s, -18 * s);
-      ctx.lineTo((x + 10) * s, 18 * s);
+    for (const ang of [0, Math.PI / 3, (2 * Math.PI) / 3]) {
+      const dx = Math.cos(ang);
+      const dy = Math.sin(ang);
+      for (let k = -30; k <= 30; k += 6) {
+        const ox = -dy * k * s;
+        const oy = dx * k * s;
+        ctx.moveTo(ox - dx * 40 * s, oy - dy * 40 * s);
+        ctx.lineTo(ox + dx * 40 * s, oy + dy * 40 * s);
+      }
     }
     ctx.stroke();
     ctx.restore();
+    ctx.globalAlpha = 0.6;
+    ctx.lineWidth = 0.8;
+    hex(13 * s);
+    ctx.stroke();
+    ctx.globalAlpha = 0.85;
+    for (const side of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(19 * s, side * 6 * s);
+      ctx.lineTo(37 * s, side * 13 * s);
+      ctx.stroke();
+      ctx.fillStyle = still || Math.sin(time * 5 + side) > 0 ? C.pink : C.cyan;
+      ctx.fillRect(37 * s - 1.6, side * 13 * s - 1.6, 3.2, 3.2);
+    }
+    // The heart: pink, pulsing (harder while it reads), turning.
+    ctx.globalCompositeOperation = 'lighter';
+    const beat = still ? 0.6 : 0.5 + 0.5 * Math.sin(time * (feeding ? 9 : 4));
+    ctx.globalAlpha = Math.min(1, 0.3 + beat * 0.35 + (feeding ? 0.3 : 0));
+    ctx.drawImage(heartSprite(), -17 * s, -17 * s, 34 * s, 34 * s);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
     ctx.rotate(still ? 0.6 : time * 0.9);
     ctx.fillStyle = C.pink;
     ctx.fillRect(-5 * s, -5 * s, 10 * s, 10 * s);
+    ctx.fillStyle = C.white;
+    ctx.fillRect(-1.5 * s, -1.5 * s, 3 * s, 3 * s);
     ctx.restore();
   }
 
@@ -815,6 +1193,213 @@
     g.fillStyle = grad;
     g.fillRect(0, 0, 128, 128);
     return glow;
+  }
+
+  // ── deep space: what the nebulae float in ──────────────────────────────
+
+  /** Two layers of stars and a galactic band, drawn once per size; a few bright stars breathe. */
+  const sky = { layers: [], bright: [], w: 0, h: 0 };
+  const SKY_PAD = 140;
+  function buildSky() {
+    const W = Math.ceil(view.w + SKY_PAD * 2);
+    const H = Math.ceil(view.h + SKY_PAD * 2);
+    if (!view.w || (sky.w === W && sky.h === H)) return;
+    const R = rng(0x5eed51);
+    const layer = () => {
+      const cv = document.createElement('canvas');
+      cv.width = W;
+      cv.height = H;
+      return [cv, cv.getContext('2d')];
+    };
+    const [far, g0] = layer();
+    // Far clouds of colour, very faint.
+    for (const [fx, fy, fr, rgb, a] of [[0.2, 0.72, 0.42, '70,110,210', 0.08], [0.8, 0.26, 0.48, '125,80,200', 0.07], [0.56, 0.52, 0.36, '40,150,170', 0.05], [0.93, 0.85, 0.3, '200,70,130', 0.035]]) {
+      const x = W * fx;
+      const y = H * fy;
+      const r = Math.max(W, H) * fr;
+      const grad = g0.createRadialGradient(x, y, 0, x, y, r);
+      grad.addColorStop(0, `rgba(${rgb},${a})`);
+      grad.addColorStop(1, `rgba(${rgb},0)`);
+      g0.fillStyle = grad;
+      g0.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    // The galactic band: a river of dust across the stage.
+    const band = (x) => H * 0.66 - (x - W / 2) * 0.32;
+    for (let i = 0; i < 3200; i++) {
+      const x = R() * W;
+      const y = band(x) + gauss(R) * H * 0.085;
+      g0.fillStyle = `rgba(205,218,236,${0.03 + R() * 0.12})`;
+      g0.fillRect(x, y, R() < 0.9 ? 0.8 : 1.3, R() < 0.9 ? 0.8 : 1.3);
+    }
+    for (let i = 0; i < 900; i++) {
+      g0.fillStyle = `rgba(220,230,242,${0.1 + R() * 0.22})`;
+      g0.fillRect(R() * W, R() * H, 0.8, 0.8);
+    }
+    const [mid, g1] = layer();
+    for (let i = 0; i < 260; i++) {
+      const tint = R();
+      g1.fillStyle = tint < 0.08 ? 'rgba(150,200,255,0.6)' : tint < 0.12 ? 'rgba(255,200,170,0.55)' : `rgba(232,238,246,${0.25 + R() * 0.4})`;
+      const z = 0.9 + R() * 0.9;
+      g1.fillRect(R() * W, R() * H, z, z);
+    }
+    sky.layers = [far, mid];
+    sky.bright = Array.from({ length: 36 }, () => ({ x: R() * W, y: R() * H, z: 0.9 + R() * 1.5, ph: R() * 6.283, sp: 0.35 + R() * 1.1, color: R() < 0.18 ? C.cyan : R() < 0.1 ? '#ffd1de' : C.white }));
+    sky.w = W;
+    sky.h = H;
+  }
+
+  /** The sky, in screen space, sliding a little against the camera (parallax). */
+  function drawSky(time, still) {
+    if (!sky.layers.length) return;
+    const dpr = view.dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    [0.035, 0.09].forEach((f, i) => ctx.drawImage(sky.layers[i], -SKY_PAD - cam.x * f, -SKY_PAD - cam.y * f, sky.w, sky.h));
+    for (const b of sky.bright) {
+      const a = still ? 0.6 : 0.3 + 0.4 * (0.5 + 0.5 * Math.sin(time * b.sp + b.ph));
+      const x = b.x - SKY_PAD - cam.x * 0.16;
+      const y = b.y - SKY_PAD - cam.y * 0.16;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = b.color;
+      ctx.fillRect(x - b.z / 2, y - b.z / 2, b.z, b.z);
+      ctx.globalAlpha = a * 0.32;
+      ctx.fillRect(x - b.z * 3.2, y - 0.25, b.z * 6.4, 0.5);
+      ctx.fillRect(x - 0.25, y - b.z * 3.2, 0.5, b.z * 6.4);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ── a nebula's body: gas, core, orbit ──────────────────────────────────
+
+  /** The nebula's gas in one colour: soft clouds along its arms, with dark lanes. Half resolution (it is soft). */
+  function gasOf(c, rgb) {
+    if (!c.sprite) return null;
+    c.gasCache ??= new Map();
+    const kept = c.gasCache.get(rgb);
+    if (kept) return kept;
+    const size = c.sprite.size;
+    const res = Math.max(0.5, view.dpr * 0.5);
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = Math.ceil(size * res);
+    const g = cv.getContext('2d');
+    g.setTransform(res, 0, 0, res, (size / 2) * res, (size / 2) * res);
+    g.globalCompositeOperation = 'lighter';
+    const R = rng(c.seed ^ 0x2545f491);
+    const r = c.r;
+    const blob = (x, y, rad, a) => {
+      const grad = g.createRadialGradient(x, y, 0, x, y, rad);
+      grad.addColorStop(0, `rgba(${rgb},${a})`);
+      grad.addColorStop(0.45, `rgba(${rgb},${a * 0.4})`);
+      grad.addColorStop(1, `rgba(${rgb},0)`);
+      g.fillStyle = grad;
+      g.fillRect(x - rad, y - rad, rad * 2, rad * 2);
+    };
+    blob(0, 0, r * 0.78, 0.13);
+    blob(0, 0, r * 0.3, 0.2);
+    const curl = c.curl ?? 1;
+    for (const a0 of c.arms ?? [0, 2.1, 4.2]) {
+      for (let i = 0; i < 22; i++) {
+        const t = Math.pow(R(), 0.75);
+        const a = a0 + curl * t;
+        blob(Math.cos(a) * t * r + gauss(R) * r * 0.05, Math.sin(a) * t * r * 0.78 + gauss(R) * r * 0.05, r * (0.1 + R() * 0.16) * (1.15 - t * 0.55), 0.03 + R() * 0.045);
+      }
+    }
+    g.globalCompositeOperation = 'destination-out';
+    for (let i = 0; i < 6; i++) {
+      const a = R() * Math.PI * 2;
+      const d = r * (0.22 + R() * 0.5);
+      const rad = r * (0.07 + R() * 0.1);
+      const x = Math.cos(a) * d;
+      const y = Math.sin(a) * d * 0.78;
+      const grad = g.createRadialGradient(x, y, 0, x, y, rad);
+      grad.addColorStop(0, 'rgba(0,0,0,0.55)');
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = grad;
+      g.fillRect(x - rad, y - rad, rad * 2, rad * 2);
+    }
+    const out = { canvas: cv, size };
+    c.gasCache.set(rgb, out);
+    return out;
+  }
+
+  /** A star with diffraction spikes, drawn once: the core of every nebula. */
+  let spikes = null;
+  function spikeSprite() {
+    if (spikes) return spikes;
+    const S = 160;
+    spikes = document.createElement('canvas');
+    spikes.width = spikes.height = S;
+    const g = spikes.getContext('2d');
+    g.translate(S / 2, S / 2);
+    const core = g.createRadialGradient(0, 0, 0, 0, 0, S * 0.18);
+    core.addColorStop(0, 'rgba(255,255,255,0.95)');
+    core.addColorStop(0.25, 'rgba(225,238,255,0.5)');
+    core.addColorStop(1, 'rgba(200,220,255,0)');
+    g.fillStyle = core;
+    g.fillRect(-S / 2, -S / 2, S, S);
+    for (const [rot, len, w] of [[0, 0.5, 1.1], [Math.PI / 2, 0.5, 1.1], [Math.PI / 4, 0.28, 0.6], [-Math.PI / 4, 0.28, 0.6]]) {
+      g.save();
+      g.rotate(rot);
+      const lg = g.createLinearGradient(-S * len, 0, S * len, 0);
+      lg.addColorStop(0, 'rgba(220,235,255,0)');
+      lg.addColorStop(0.5, 'rgba(240,248,255,0.85)');
+      lg.addColorStop(1, 'rgba(220,235,255,0)');
+      g.fillStyle = lg;
+      g.fillRect(-S * len, -w / 2, S * len * 2, w);
+      g.restore();
+    }
+    return spikes;
+  }
+
+  /** The crawler's heart: a pink glow, drawn once. */
+  let heart = null;
+  function heartSprite() {
+    if (heart) return heart;
+    heart = document.createElement('canvas');
+    heart.width = heart.height = 64;
+    const g = heart.getContext('2d');
+    const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, 'rgba(255,92,138,0.9)');
+    grad.addColorStop(0.4, 'rgba(255,92,138,0.35)');
+    grad.addColorStop(1, 'rgba(255,92,138,0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 64, 64);
+    return heart;
+  }
+
+  /**
+   * A group's orbit: a tilted ring, and one satellite for each step of how busy it is right now (its
+   * day's messages, plus what just arrived). Drawn in two halves, so the nebula stands between them.
+   */
+  function drawOrbit(c, time, still, front) {
+    const busy = Math.min(9, Math.round(c.base + c.heat));
+    const rx = c.r * 1.12;
+    const ry = c.r * 0.34;
+    const pink = c.glow > 0.5;
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.rotate(c.tilt);
+    ctx.strokeStyle = pink ? C.pink : `rgb(${c.hue})`;
+    ctx.globalAlpha = (front ? 0.16 : 0.08) + c.glow * (front ? 0.28 : 0.14);
+    ctx.lineWidth = 0.6;
+    ctx.setLineDash([2, 7]);
+    ctx.lineDashOffset = still ? 0 : -time * 6 * c.orbitDir;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, rx, ry, 0, front ? 0 : Math.PI, front ? Math.PI : Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const w = (0.16 + c.heat * 0.06) * c.orbitDir;
+    for (let i = 0; i < busy; i++) {
+      const a = (still ? 0.4 : time * w) + (i / busy) * Math.PI * 2;
+      if (Math.sin(a) >= 0 !== front) continue;
+      for (let k = 3; k >= 0; k--) {
+        const ak = a - k * 0.045 * Math.sign(w || 1);
+        ctx.globalAlpha = (k === 0 ? 0.95 : 0.34 / k) * (front ? 1 : 0.45);
+        ctx.fillStyle = k === 0 ? (pink ? '#ffd1de' : C.white) : pink ? C.pink : `rgb(${c.hue})`;
+        const z = k === 0 ? 2.3 : 1.5;
+        ctx.fillRect(Math.cos(ak) * rx - z / 2, Math.sin(ak) * ry - z / 2, z, z);
+      }
+    }
+    ctx.restore();
   }
 
   // ── words: what the detector tags a kept message with ──────────────────
@@ -1096,6 +1681,16 @@
       let spawned = 0;
       const dropped = [];
       const tagged = [];
+      // What it reads streams in from the nebula: cyan what is kept, grey what the denoiser drops.
+      const t0 = performance.now();
+      msgs.slice(-6).forEach((m, k) => {
+        for (let q = 0; q < 3; q++) {
+          const j = Math.floor(Math.random() * c.n);
+          streams.push({ sx: c.x + c.pts[j * 3], sy: c.y + c.pts[j * 3 + 1], born: t0 + k * 120 + q * 60, dur: 620 + Math.random() * 420, color: m.noise ? '#8994a0' : C.cyan, bend: (Math.random() - 0.5) * 0.7 });
+        }
+      });
+      while (streams.length > 160) streams.shift();
+      crawler.feedUntil = t0 + 1600;
       for (const m of msgs.slice(-6)) {
         if (m.noise) {
           dropped.push(m.noise);
@@ -1149,6 +1744,7 @@
       for (const src of enabled) {
         const c = cloudFor(`g:${src.chatId}`, 'group', src.title);
         c.count = src.messages24h;
+        c.base = Math.min(4, Math.log10(1 + src.messages24h) * 1.1);
         c.sub = `${n(src.messages24h)} today · ${src.error ? 'error' : src.behind ? 'catching up' : src.peeked || src.pushed ? 'live' : `every ~${src.everyS >= 60 ? `${Math.round(src.everyS / 60)}m` : `${src.everyS}s`}`}`;
       }
       if (s.news && !clouds.has('news')) cloudFor('news', 'news', 'first-tier news');
@@ -1202,6 +1798,7 @@
         nc.words = v.keywords.filter((k) => k.sources.length >= 2).slice(0, 3).map((k) => cut(k.label, 30));
         if (prev && prev.enabled && v.items24h > prev.items24h) {
           ping(nc.x, nc.y, C.cyan);
+          newsFlare = 1;
         }
       }
       // New matches: a message the radar matched that was not in the last view. Each becomes a flag
@@ -1232,6 +1829,16 @@
           links.push({ chatId: g.chatId, level: g.level, bend: ((hash(`${g.chatId}:${k.label}`) % 100) / 100 - 0.5) * 1.2, born: fresh.get(`${g.chatId}:${k.id}`) ?? -1e9 });
         }
       }
+      const pairs = new Map();
+      for (const k of v.keywords) {
+        const ids = [...new Set(k.groups.map((g) => g.chatId))].sort((a, b) => a - b);
+        for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) pairs.set(`${ids[i]}:${ids[j]}`, (pairs.get(`${ids[i]}:${ids[j]}`) || 0) + 1);
+      }
+      bridges.length = 0;
+      for (const [key, w] of [...pairs].sort((p, q) => q[1] - p[1]).slice(0, 24)) {
+        const [a, b] = key.split(':').map(Number);
+        bridges.push({ a, b, w, bend: ((hash(key) % 100) / 100 - 0.5) * 0.8, ph: (hash(key) % 1000) / 1000 });
+      }
       setText(hud.links, n(linkedCount()));
       setText(hud.flags, n(v.alerts.length));
       setText(hud.news, n(v.items24h));
@@ -1241,11 +1848,18 @@
 
     /** One row of the activity stream, as it happens. */
     activity(a) {
-      if (!a.ok || a.kind === 'write') return;
+      if (!a.ok) return;
+      if (a.kind === 'write') {
+        ping(crawler.x, crawler.y, C.pink);
+        setTimeout(() => ping(crawler.x, crawler.y, C.pink), 180);
+        return;
+      }
       const chat = sourceByTitle(a.target);
       if (a.method === 'stored' && chat) {
         const count = Number((/^(\d+)/.exec(a.detail) || [])[1] || 1);
         stored.push([now(), count]);
+        const g = clouds.get(`g:${chat.chatId}`);
+        if (g) g.heat = Math.min(8, g.heat + 1 + Math.log2(count));
         rate(); // trims what is older than a minute
         read(chat.chatId, count, a.at);
         loadPulse(4000);
