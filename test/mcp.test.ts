@@ -95,7 +95,7 @@ test('the MCP server: every tool, prompt and resource an agent uses, with what i
     assert.match(client.getInstructions() ?? '', /whats_new gives everything stored since your last look/);
 
     const tools = (await client.listTools()).tools.map((x) => x.name);
-    for (const name of ['status', 'whats_new', 'read_messages', 'get_messages', 'overview', 'search_messages', 'get_playbook', 'save_digest', 'past_digests', 'news_keywords', 'news_in_group', 'refresh_news', 'alerts', 'flag_for_owner', 'account_activity', 'check_group', 'list_account_chats', 'invite_status', 'watch_source', 'catch_up_now', 'set_monitoring', 'refresh_sources', 'audit_capture', 'list_sources']) {
+    for (const name of ['hot_terms', 'status', 'whats_new', 'read_messages', 'get_messages', 'overview', 'search_messages', 'get_playbook', 'save_digest', 'past_digests', 'news_keywords', 'news_in_group', 'refresh_news', 'alerts', 'flag_for_owner', 'account_activity', 'check_group', 'list_account_chats', 'invite_status', 'watch_source', 'catch_up_now', 'set_monitoring', 'refresh_sources', 'audit_capture', 'list_sources']) {
       assert.ok(tools.includes(name), `tool ${name}`);
     }
     assert.deepEqual((await client.listPrompts()).prompts.map((p) => p.name).sort(), ['daily_digest', 'health_check', 'news_brief', 'whats_new']);
@@ -207,6 +207,17 @@ test('the MCP server: every tool, prompt and resource an agent uses, with what i
     assert.match(textOf(await call('past_digests', { id })), /BTC at 100k \[#1\]\(https:\/\/t\.me\/public_group\/1\)/);
     const digestResource = await client.readResource({ uri: `telegram-monitor://digest/${id}` });
     assert.match(String((digestResource.contents[0] as { text: string }).text), /BTC at 100k/);
+
+    // Short-term high-frequency terms: found in the messages, nobody names them in advance.
+    for (let i = 0; i < 9; i++) store.upsertUser(PUBLIC, 10 + i, `Trader ${i}`, null);
+    for (let i = 0; i < 9; i++) save(PUBLIC, 100 + i, now - 1200 + i * 60, `币安提现不了，卡了${i}分钟`, { userId: 10 + i });
+    const hot = textOf(await call('hot_terms', { minutes: 30 }));
+    assert.match(hot, /^币安提现不了，卡了 · Public Group · 9 messages from 9 people in 30 min \(almost never, ×10\.0\) · since [^·]+ · #100 #101 #102 #103 #104 · https:\/\/t\.me\/public_group\/100$/m);
+    const { TermWatch } = await import('../src/term-watch.ts');
+    assert.equal(new TermWatch({ store, activity, now: () => now }).check().length, 1);
+    const burst = (await call('alerts', { reader: 'test' })).structuredContent as { alerts: { kind: string; group: string | null; text: string }[] };
+    assert.deepEqual(burst.alerts.map((a) => [a.kind, a.group]), [['term-burst', 'Public Group']]);
+    assert.match(textOf(await call('hot_terms', { source: '#3' })), /Raised by the monitor in the last 24h[^\n]*\n  [^\n]+ · Public Group · "币安提现不了，卡了": 9 messages from 9 people/);
 
     // A subscribed resource is announced when it changes.
     const updated: string[] = [];

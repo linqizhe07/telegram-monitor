@@ -10,9 +10,10 @@ Follow the Telegram groups that matter to you, including big public groups you d
 - **Seconds, not minutes.** The chats you are in are checked every 10 seconds with a single request. Anything missed while the computer slept is caught up in order.
 - **News radar.** Keywords of the day from Bloomberg, The New York Times, a16z, Y Combinator, The Block, CoinDesk, Odaily and your news channels, matched against every message, group slang included (大饼 = BTC). When a group reacts to a story, or talks about it before the first report, you get a notification.
 - **Denoiser.** Stickers, one-word chatter, bot commands, repeats and scams are removed before anything is read.
+- **Short-term high-frequency terms.** No keywords to set: when many people in a group suddenly say the same thing ("can't withdraw", a ticker), the monitor finds it in the messages, joins the pieces back into what was said, and raises it for Claude to judge.
 - **Live console** at `127.0.0.1:4830`. Each group is a nebula; the reader is a crawler whose two hands are a keyword detector and a denoiser. Live instruments below, and every request the account sends.
 - **Digests by Claude.** Claude Desktop writes them through MCP, no API key needed. With an API key and a bot, the service writes and sends them itself, and the digest's playbook improves itself from blind tests and your votes.
-- **Built for agents.** The MCP server gives Claude (or any MCP client) 24 tools: health in one call, everything new since its last look, search across groups, messages with their thread, alerts, past digests, and a way to flag something for you. It also has prompts for the daily jobs and resources a client can subscribe to. What Claude reads and changes shows in the console as Claude's.
+- **Built for agents.** The MCP server gives Claude (or any MCP client) 25 tools: health in one call, everything new since its last look, search across groups, messages with their thread, alerts, past digests, and a way to flag something for you. It also has prompts for the daily jobs and resources a client can subscribe to. What Claude reads and changes shows in the console as Claude's.
 - **Local.** Messages are kept in a local SQLite file for 7 days.
 
 ## Quick start

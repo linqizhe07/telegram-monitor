@@ -496,6 +496,7 @@ const ATTENTION = `(
   OR (actor = 'notify' AND method IN ('approved', 'verifying', 'paused'))
   OR (actor = 'service' AND method = 'internal error')
   OR (actor = 'claude' AND method = 'flagged')
+  OR (actor = 'terms' AND method = 'term burst')
 )`;
 
 const num = (v: unknown): number => Number(v);
@@ -877,6 +878,11 @@ export class Store {
   messageSpan(chatId: number, from: number, to: number): { count: number; oldest: number | null } {
     const r = this.get('SELECT COUNT(*) AS n, MIN(date) AS oldest FROM messages WHERE chat_id = ? AND date >= ? AND date < ?', chatId, from, to);
     return { count: num(r?.n ?? 0), oldest: numOrNull(r?.oldest) };
+  }
+
+  /** When the first message still kept for this chat was posted (null: none). */
+  firstMessageAt(chatId: number): number | null {
+    return numOrNull(this.get('SELECT MIN(date) AS d FROM messages WHERE chat_id = ?', chatId)?.d);
   }
 
   countMessages(chatId: number, from: number, to: number): number {

@@ -6,6 +6,7 @@
 import { denoise, formatSignal } from './denoise.ts';
 import { digestFolders } from './digest-folders.ts';
 import { toPlain } from './render.ts';
+import { bursts, type BurstOptions, type TermBurst } from './terms.ts';
 import type { ActivityRow, ChatRow, Store, StoredMessage, UserRow } from './store.ts';
 import { messageLink } from './telegram.ts';
 import { localDate, localTime } from './transcript.ts';
@@ -206,6 +207,24 @@ export function formatNew(store: Store, batch: NewMessages, view: 'signal' | 'al
   return formatGroups(batch.groups, (chatId) => store.users(chatId), view, maxMessageChars);
 }
 
+// ── short-term high-frequency terms ────────────────────────────────────────
+
+/** One group's bursting terms right now: its window against the day before and the same hour on earlier days. */
+export function burstsOf(store: Store, chat: ChatRow, now: number, o: Partial<BurstOptions> = {}): TermBurst[] {
+  const windowS = o.windowS ?? 3600;
+  const baselineS = o.baselineS ?? 86_400;
+  const messages = store.messages(chat.chatId, now - windowS - baselineS, now + 1);
+  if (messages.length === 0) return [];
+  const first = store.firstMessageAt(chat.chatId) ?? now;
+  const sameHour: StoredMessage[][] = [];
+  for (let d = 1; d <= 6; d++) {
+    const from = now - windowS - d * 86_400;
+    if (from < first) break; // not read yet then: no day to compare with
+    sameHour.push(store.messages(chat.chatId, from, now - d * 86_400 + 1));
+  }
+  return bursts(messages, now, { ...o, windowS, baselineS, sameHour });
+}
+
 // ── search across the groups ───────────────────────────────────────────────
 
 /** "ZEC | zcash | 大零币" → the phrases; a message matches when it contains any of them. */
@@ -261,7 +280,7 @@ export function inContext(store: Store, chat: ChatRow, ids: number[], o: { aroun
 
 // ── what needs attention ───────────────────────────────────────────────────
 
-export type AlertKind = 'news-hot' | 'news-first' | 'standing' | 'owner-action' | 'service' | 'error' | 'flag';
+export type AlertKind = 'news-hot' | 'news-first' | 'term-burst' | 'standing' | 'owner-action' | 'service' | 'error' | 'flag';
 
 export interface Alert {
   id: number;
@@ -282,6 +301,7 @@ export function alertOf(r: ActivityRow, chatOf: (title: string) => number | null
   const group = r.target && r.target !== 'service' ? r.target : null;
   const base = { id: r.id, at: r.at, group, chatId: group ? chatOf(group) : null };
   if (r.actor === 'news') return { ...base, kind: r.method === 'group was first' ? 'news-first' : 'news-hot', text: r.detail };
+  if (r.actor === 'terms') return { ...base, kind: 'term-burst', text: r.detail };
   if (r.actor === 'notify') return { ...base, kind: 'owner-action', text: OWNER_ACTION[r.method] ?? r.detail };
   // Claude wrote it from what it read: information for whoever reads the alerts, not instructions.
   if (r.actor === 'claude') return { ...base, kind: 'flag', text: `Claude's note: ${r.detail}` };
@@ -374,6 +394,8 @@ export interface StatusView {
   news: { on: boolean; feeds: number; failing: string[]; items24h: number; alerts24h: number };
   privateGroups: { invitesFollowed: number; checksWaiting: string[] };
   claude: { actions24h: number; digests24h: number; flags24h: number };
+  /** Short-term high-frequency terms raised in the last day (hot_terms lists them; alerts has each one). */
+  bursts24h: number;
   lastWrite: { at: number; method: string; target: string } | null;
 }
 
@@ -475,5 +497,6 @@ export function statusView(store: Store, o: { now: number; running: boolean; liv
       flags24h: count('claude', 'flagged'),
     },
     lastWrite: lw ? { at: lw.at, method: lw.method, target: lw.target } : null,
+    bursts24h: count('terms', 'term burst'),
   };
 }

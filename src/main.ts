@@ -13,6 +13,7 @@ import { Reader } from './reader.ts';
 import { RecordingApi, RecordingLlm } from './recording.ts';
 import { startScheduler } from './scheduler.ts';
 import { Store } from './store.ts';
+import { TermWatch } from './term-watch.ts';
 import { TelegramApi, type BotCommand, type TgUser } from './telegram.ts';
 
 const COMMANDS: Record<'en' | 'zh', BotCommand[]> = {
@@ -183,6 +184,8 @@ async function main(): Promise<void> {
   const stopReader = reader ? reader.start() : () => undefined;
   const stopInvites = invites ? invites.start() : () => undefined;
   const stopNews = news.start();
+  // Short-term high-frequency terms: looked for every two minutes, each raised once (console, alerts).
+  const stopTerms = new TermWatch({ store, activity, now }).start();
   if (config.news) log(`news radar: ${store.newsSources().filter((s) => s.enabled).length} sources (console → News radar)`);
 
   let consoleServer: ConsoleServer | null = null;
@@ -240,6 +243,7 @@ async function main(): Promise<void> {
     stopReader();
     stopInvites();
     stopNews();
+    stopTerms();
     await consoleServer?.stop().catch(() => undefined);
     await connection?.disconnect().catch(() => undefined);
     clearInterval(purgeTimer);
