@@ -3,6 +3,7 @@
 // It never joins, posts, reacts, or marks anything read.
 
 import { Api, type TelegramClient } from 'telegram';
+import { perDayOf } from './discover-rules.ts';
 import { explain, FOLDER_LINK, parseRef } from './reader.ts';
 
 export type Verdict = 'read-from-outside' | 'member' | 'join-needed' | 'request-needed' | 'unsafe' | 'not-found' | 'folder-link';
@@ -96,7 +97,8 @@ export async function probeChannel(client: TelegramClient, target: string, e: Ap
   await sleep(800);
 
   try {
-    const msgs = (await client.getMessages(e, { limit: 100 })).filter(Boolean);
+    const page = (await client.getMessages(e, { limit: 100 })).filter(Boolean);
+    const msgs = page.filter((m) => Number.isFinite(m.date)); // deleted ones come back without a date
     const plain = msgs.filter((m) => m instanceof Api.Message) as Api.Message[];
     const people = new Set<string>();
     let botMessages = 0;
@@ -105,13 +107,9 @@ export async function probeChannel(client: TelegramClient, target: string, e: Ap
       if (s instanceof Api.User && s.bot) botMessages++;
       else people.add(String(m.senderId));
     }
-    let perDay: number | null = null;
-    if (msgs.length > 0) {
-      await sleep(500);
-      const newest = Math.max(...msgs.map((m) => m.id));
-      const [dayAgo] = await client.getMessages(e, { limit: 1, offsetDate: now - 86_400 });
-      perDay = dayAgo ? newest - dayAgo.id : null; // message ids, so deleted messages are counted too
-    }
+    // The last week's average, or the rate over the time the 100 cover (not "since the last message
+    // before yesterday", which made a quiet group look busy).
+    const perDay = msgs.length > 0 ? perDayOf(page, now) : null;
     r.history = { readable: true, sampled: msgs.length, newest: msgs.length ? Math.max(...msgs.map((m) => m.date)) : null, people: people.size, botMessages, perDay };
   } catch (err) {
     r.history = { readable: false, error: explain(err).message, sampled: 0, newest: null, people: 0, botMessages: 0, perDay: null };

@@ -475,6 +475,13 @@ CREATE TABLE IF NOT EXISTS news_items (
   UNIQUE (source_id, guid)
 );
 CREATE INDEX IF NOT EXISTS news_items_by_time ON news_items (published_at);
+-- Searches for groups worth reading (discover.ts): what each found and how it judged them.
+CREATE TABLE IF NOT EXISTS discoveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at INTEGER NOT NULL,
+  topic TEXT NOT NULL,
+  json TEXT NOT NULL
+);
 -- One row per escalation (a notification), so it fires once.
 CREATE TABLE IF NOT EXISTS news_alerts (
   chat_id INTEGER NOT NULL,
@@ -1774,6 +1781,30 @@ export class Store {
     const a = this.run('DELETE FROM news_items WHERE published_at < ?', before).changes;
     const b = this.run('DELETE FROM news_alerts WHERE at < ?', before).changes;
     return a + b;
+  }
+
+  // ── searches for groups (discover.ts) ────────────────────────────────────
+
+  /** Saves a search (new when its id is 0) and returns its id; keeps the latest 50. */
+  saveDiscovery(id: number, at: number, topic: string, data: unknown): number {
+    const json = JSON.stringify(data);
+    if (id > 0) {
+      this.run('UPDATE discoveries SET json = ? WHERE id = ?', json, id);
+      return id;
+    }
+    const newId = this.run('INSERT INTO discoveries (at, topic, json) VALUES (?, ?, ?)', at, topic, json).lastId;
+    this.run('DELETE FROM discoveries WHERE id <= ?', newId - 50);
+    return newId;
+  }
+
+  /** The latest searches, newest first. */
+  discoveries(limit = 20): { id: number; at: number; topic: string; data: unknown }[] {
+    return this.all('SELECT * FROM discoveries ORDER BY id DESC LIMIT ?', limit).map((r) => ({ id: num(r.id), at: num(r.at), topic: str(r.topic), data: JSON.parse(str(r.json)) as unknown }));
+  }
+
+  /** How many searches started since `since`. */
+  discoveriesSince(since: number): number {
+    return num(this.get('SELECT COUNT(*) AS n FROM discoveries WHERE at > ?', since)?.n ?? 0);
   }
 
   // ── key/value ────────────────────────────────────────────────────────────

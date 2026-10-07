@@ -16,6 +16,7 @@ import { clientLabel } from '../agent-views.ts';
 import type { Config } from '../config.ts';
 import { denoise, formatSignal } from '../denoise.ts';
 import { digestFolders } from '../digest-folders.ts';
+import type { Discovery } from '../discover.ts';
 import { inviteHash } from '../invite-rules.ts';
 import type { InviteTracker } from '../invites.ts';
 import type { NewsRadar } from '../news.ts';
@@ -52,10 +53,12 @@ export interface ConsoleDeps {
   news?: NewsRadar | null;
   /** How often rows other processes add to the activity log are looked for (tests shorten it). */
   tailMs?: number;
+  /** Finding groups worth reading (null: not signed in). */
+  discovery?: Discovery | null;
 }
 
 /** The only actions local tools (Claude's MCP server) may take: the ones its tools call. */
-const TOOL_ALLOWED = new Set(['/api/probe', '/api/watch', '/api/pull', '/api/audit', '/api/toggle', '/api/refresh', '/api/flag', '/api/news/refresh']);
+const TOOL_ALLOWED = new Set(['/api/probe', '/api/watch', '/api/pull', '/api/audit', '/api/toggle', '/api/refresh', '/api/flag', '/api/news/refresh', '/api/discover']);
 
 /** Who asked: the owner's page, or Claude through the tools' token (and which app it runs in). */
 export interface Asker {
@@ -243,6 +246,8 @@ export class ConsoleServer {
           return this.json(res, 200, this.pulse());
         case '/api/live':
           return this.json(res, 200, this.live());
+        case '/api/discover':
+          return this.json(res, 200, this.deps.discovery?.view() ?? { available: false, running: null, latest: [], budget: null });
         case '/api/events':
           res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
           res.write(': connected\n\n');
@@ -293,6 +298,10 @@ export class ConsoleServer {
           return this.json(res, 200, this.toggle(Number(body.chatId), body.on === true, asker));
         case '/api/flag':
           return this.json(res, 200, this.flag(body, asker));
+        case '/api/discover':
+          return this.json(res, 200, this.deps.discovery?.start(String(body.topic ?? ''), typeof body.query === 'string' ? body.query.slice(0, 64) : null, asker, typeof body.kind === 'string' ? body.kind : 'groups') ?? { ok: false, message: 'The reader account is not signed in.' });
+        case '/api/discover/dismiss':
+          return this.json(res, 200, this.deps.discovery?.dismiss(Number(body.chatId)) ?? { ok: false, message: 'The reader account is not signed in.' });
         case '/api/refresh':
           return this.json(res, 200, await this.refreshList(asker));
         case '/api/settings':

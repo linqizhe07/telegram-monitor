@@ -21,6 +21,7 @@
       <a href="#crawler">Live</a>
       <a href="#news-panel">Radar</a>
       <a href="#sources-panel">Sources</a>
+      <a href="#discover-panel">Find</a>
       <a href="#activity-panel">Activity</a>
       <a href="#messages-panel">Messages</a>
       <a href="#digests-panel">Digests</a>
@@ -159,11 +160,50 @@
     </div>
   </section>
 
+  <section class="panel" id="discover-panel" aria-labelledby="discover-h">
+    <div class="panel-head">
+      <div class="titles">
+        <h2 id="discover-h"><span class="idx">04</span>Find groups</h2>
+        <p class="sub" title="Telegram's own search, the channels Telegram calls similar to ones you read, the discussion groups Telegram links to on-topic channels, the groups and invite links people in your groups share, and the groups those chats point to. Each promising one gets a read-only look: the account does not join and the group is not told.">Telegram search, similar channels, discussion groups, and what your groups link to · looked at without joining · scams set apart</p>
+      </div>
+      <div class="controls">
+        <div class="seg" id="discover-kinds" role="group" aria-label="What to find">
+          <button type="button" data-kind="groups" title="Chats where people talk">Groups</button>
+          <button type="button" data-kind="channels" title="One voice posting">Channels</button>
+          <button type="button" data-kind="both">Both</button>
+        </div>
+        <div class="seg" id="discover-topics" role="group" aria-label="Find groups about">
+          <button type="button" data-topic="hyperliquid">Hyperliquid</button>
+          <button type="button" data-topic="crypto">Crypto</button>
+          <button type="button" data-topic="rwa">RWA</button>
+          <button type="button" data-topic="stocks">Stocks</button>
+        </div>
+      </div>
+    </div>
+    <form class="add" id="discover-form" autocomplete="off">
+      <input id="discover-input" placeholder="Or your own words: ondo finance, 美股 期权, perp dex…" aria-label="Find groups about">
+      <button type="submit" class="btn primary" id="discover-btn">Search</button>
+    </form>
+    <p class="fine" id="discover-status" aria-live="polite"></p>
+    <div id="discover-result" hidden>
+      <div class="discover-head">
+        <span id="discover-summary"></span>
+        <button type="button" class="btn" id="discover-again">Search again</button>
+      </div>
+      <div class="table-wrap"><table class="grid discover" id="discover-table"></table></div>
+      <details class="disclosure" id="discover-scams" hidden>
+        <summary id="discover-scams-label"></summary>
+        <ol class="scam-list" id="discover-scam-list"></ol>
+      </details>
+      <ul class="notes" id="discover-notes"></ul>
+    </div>
+  </section>
+
   <div class="split">
     <section class="panel" id="activity-panel" aria-labelledby="activity-h">
       <div class="panel-head">
         <div class="titles">
-          <h2 id="activity-h"><span class="idx">04</span>Activity</h2>
+          <h2 id="activity-h"><span class="idx">05</span>Activity</h2>
           <p class="sub" title="Every request the reader account sends to Telegram, as it happens. A write is anything other people could notice or that changes the account (join, send, mark as read, press a button).">every request to Telegram, live</p>
         </div>
         <div class="seg" id="filters" role="tablist" aria-label="Filter activity">
@@ -181,7 +221,7 @@
     <section class="panel" id="messages-panel" aria-labelledby="side-h">
       <div class="panel-head">
         <div class="titles">
-          <h2 id="side-h"><span class="idx">05</span>Messages</h2>
+          <h2 id="side-h"><span class="idx">06</span>Messages</h2>
           <p class="sub" id="msg-hint">what Claude reads for the digest</p>
         </div>
         <div class="seg" id="msg-view" role="tablist" aria-label="Messages view">
@@ -200,7 +240,7 @@
   <section class="panel" id="digests-panel" aria-labelledby="out-h">
     <div class="panel-head">
       <div class="titles">
-        <h2 id="out-h"><span class="idx">06</span>Digests &amp; outgoing messages</h2>
+        <h2 id="out-h"><span class="idx">07</span>Digests &amp; outgoing messages</h2>
         <p class="sub" id="out-hint"></p>
       </div>
     </div>
@@ -210,7 +250,7 @@
   <section class="panel quiet" id="storage-panel" aria-labelledby="storage-h">
     <div class="panel-head">
       <div class="titles">
-        <h2 id="storage-h"><span class="idx">07</span>Storage</h2>
+        <h2 id="storage-h"><span class="idx">08</span>Storage</h2>
         <p class="sub" id="storage-now">…</p>
       </div>
     </div>

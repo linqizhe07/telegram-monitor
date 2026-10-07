@@ -3,6 +3,7 @@ import { Activity } from './activity.ts';
 import { PulseBot } from './bot.ts';
 import { loadConfig } from './config.ts';
 import { ConsoleServer } from './console/server.ts';
+import { Discovery } from './discover.ts';
 import { Engine } from './engine.ts';
 import { InviteTracker, type Invoker } from './invites.ts';
 import { AnthropicLlm } from './llm.ts';
@@ -207,6 +208,8 @@ async function main(): Promise<void> {
       invites,
       notifier,
       news,
+      // Finding groups worth reading: through the same supervised client as the reading.
+      discovery: connection ? new Discovery({ store, activity, now, log, client: () => connection.raw }) : null,
       digestNow: (chatId) => {
         const chat = store.getChat(chatId);
         return engine.digest(chatId, { kind: 'manual', to: chat?.kind === 'watched' ? (chat.reportChatId ?? undefined) : undefined });
