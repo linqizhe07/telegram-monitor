@@ -1,3 +1,4 @@
+import { dirname, join } from 'node:path';
 import { Activity } from './activity.ts';
 import { PulseBot } from './bot.ts';
 import { loadConfig } from './config.ts';
@@ -12,6 +13,7 @@ import { Reader } from './reader.ts';
 import { RecordingApi, RecordingLlm } from './recording.ts';
 import { startScheduler } from './scheduler.ts';
 import { Store } from './store.ts';
+import { TermWatch } from './term-watch.ts';
 import { TelegramApi, type BotCommand, type TgUser } from './telegram.ts';
 
 const COMMANDS: Record<'en' | 'zh', BotCommand[]> = {
@@ -90,8 +92,9 @@ async function main(): Promise<void> {
   // The news radar: first-tier news, turned into keywords of the day and matched against every
   // group message as it is stored. It needs no Telegram request of its own.
   const news = new NewsRadar({ store, config, now, log, activity, notifier, live: true });
-  // The last thing recorded before this start: read before connecting, which records requests itself.
-  const [lastSeen] = store.activity({ limit: 1 });
+  // The last thing this service recorded before this start (read before connecting, which records
+  // requests itself). Claude's MCP server writes rows while the service is off: those do not count.
+  const lastSeen = store.lastServiceActivity();
   const connection: ReaderConnection | null = config.telegramApiId
     ? await connectReader(config, log, { activity, titleOf: (id) => store.getChat(id)?.title ?? null }).catch((err) => {
         log(`reader: could not connect: ${(err as Error).message}`);
@@ -181,6 +184,8 @@ async function main(): Promise<void> {
   const stopReader = reader ? reader.start() : () => undefined;
   const stopInvites = invites ? invites.start() : () => undefined;
   const stopNews = news.start();
+  // Short-term high-frequency terms: looked for every two minutes, each raised once (console, alerts).
+  const stopTerms = new TermWatch({ store, activity, now }).start();
   if (config.news) log(`news radar: ${store.newsSources().filter((s) => s.enabled).length} sources (console → News radar)`);
 
   let consoleServer: ConsoleServer | null = null;
@@ -197,7 +202,8 @@ async function main(): Promise<void> {
       reader,
       bot: me?.username ? { username: me.username } : null,
       claude: { ready: claudeReady, model: config.model },
-      handoffFile: './data/console.json',
+      // Next to the database, where the MCP server looks for it (data/console.json).
+      handoffFile: join(dirname(config.dbPath), 'console.json'),
       invites,
       notifier,
       news,
@@ -237,6 +243,7 @@ async function main(): Promise<void> {
     stopReader();
     stopInvites();
     stopNews();
+    stopTerms();
     await consoleServer?.stop().catch(() => undefined);
     await connection?.disconnect().catch(() => undefined);
     clearInterval(purgeTimer);
@@ -251,6 +258,8 @@ async function main(): Promise<void> {
   });
   process.on('SIGINT', () => void stop('SIGINT'));
   process.on('SIGTERM', () => void stop('SIGTERM'));
+  // Closing its terminal tab: stop cleanly too, so the session lock is released.
+  process.on('SIGHUP', () => void stop('SIGHUP'));
 
   if (!telegram || !bot) {
     await new Promise<void>((resolve) => abort.signal.addEventListener('abort', () => resolve()));

@@ -77,7 +77,7 @@ npm install
 cp .env.example .env
 ```
 
-检查点：`npm test` 全部通过（目前 132 个）。
+检查点：`npm test` 全部通过（目前 146 个）。
 
 ---
 
@@ -327,6 +327,20 @@ Claude 那边：
 - `PULSE_NEWS_NOTIFY=off` 只关通知；
 - `PULSE_READER_PEEK_SECONDS`（默认 10）和 `PULSE_READER_LIVE_SECONDS`（默认 30）调读群的节奏。
 
+### 短期高频词：不用设关键词
+
+群里突然有很多人同时说同一件事，比如「提现不了」「跑路」「中奖」，往往比任何关键词都早。这类词不用你提前设，服务自己从消息里找（`src/terms.ts`）：
+
+1. **切词**：英文单词和 $ticker 统一转小写；中文没有空格，按 2–4 个字切片。去掉停用词、问候语（早上好、哈哈）和去噪器判定的噪音。
+2. **比基线**：最近一段时间（工具里默认 60 分钟）里含这个词的消息数，和它在前 24 小时的平均水平比，也和前几天同一时段比。每天早上都有人说的「早上好」「开盘了」就不算。至少要有几个人说过，一个人刷屏不算。
+3. **拼回原话**：同一批消息里一起冒出来的片段（「币安提现」「提现不了」「卡了」）合成一句原话，比如「币安提现不了，卡了」。
+
+服务每 2 分钟看一次。最近 30 分钟里，至少 5 个人发了 8 条以上、是平时 6 倍以上的词，记成一条提醒（TERM BURST）。提醒会出现在控制台的活动日志里，爬虫日志里标黄色，同时进入 Claude 的 `alerts`；同一个词 6 小时内只记一次。它不单独弹通知，这个词到底说明了什么，交给 Claude 去读消息、去判断。
+
+在 Claude 里用 `hot_terms`：现在有哪些词突然高频、在哪个群、几个人说、平时是多少，带消息 id 和链接，并标出哪些也在今天的一线新闻里。工具还会列出过去 24 小时服务记下的高频词。每日摘要里专门有一节「突然高频的词」。
+
+2026-10-07 用过去 24 小时的真实消息回放：一天记下 4–6 条，比如币安中文群的「跑路」（5 人 8 条）、BNB Chain 群的「ETH」（11 人 12 条）、凌晨的「中奖」（7 人 11 条）。每个群检查一次约 4 毫秒。
+
 ### 去噪
 
 大群一天几千条，大部分是贴纸、「哈哈」、碎句、刷屏和拉人私聊的骗子。读之前先用代码过一遍（`src/denoise.ts`，规则固定，不靠模型）：
@@ -341,21 +355,52 @@ Claude 那边：
 
 ### 接入 Claude 桌面端
 
-`src/mcp.ts` 是一个 MCP 服务，Claude 通过它读数据、写摘要。注册一次：
+`src/mcp.ts` 是一个 MCP 服务，Claude 通过它读数据、写摘要、盯着群。注册一次：
 
 ```bash
 claude mcp add --scope user telegram-monitor -- /opt/homebrew/bin/node --no-experimental-webstorage --env-file-if-exists=/path/to/tg-pulse/.env /path/to/tg-pulse/src/mcp.ts
 ```
 
-这条命令是给 Claude Code 和定时任务用的。桌面端的聊天要在 `~/Library/Application Support/Claude/claude_desktop_config.json` 的 `mcpServers` 里加同样的 command 和 args，然后重启 Claude。
+这条命令是给 Claude Code 和定时任务用的。桌面端的聊天要在 `~/Library/Application Support/Claude/claude_desktop_config.json` 的 `mcpServers` 里加同样的 command 和 args，然后重启 Claude。改了 `src/mcp.ts` 之后也要重启 Claude，新工具才会出现。
 
-工具：`list_sources`、`read_messages`（默认是去噪后的信号，可切 `off-topic` 或 `all`，分页）、`overview`、`search_messages`、`get_playbook`、`save_digest`、`account_activity`、`catch_up_now`、`audit_capture`、`check_group`（只读查看一个群；邀请链接会给出预览和提醒）、`watch_source`（开始读，从不加群）、`set_monitoring`（开关某个群）、`refresh_sources`（立刻核对群列表）、`invite_status`（私密群的跟踪状态，只读）、`news_keywords`（今天一线新闻的关键词，以及各自在群里的反应）、`news_in_group`（某个群里提到新闻的消息，带 #id）。
+**工具**，按用途分：
+
+| 用途 | 工具 |
+|---|---|
+| 先看全局 | `status`：一次看完健康状况。服务和 Telegram 连接是否正常，每个群编号 #n（关掉的也编号）、开关、读取频率、24 小时消息量、错误，现在有什么问题，新闻雷达，私密群里等你处理的验证，Claude 最近做了什么。另外返回一份结构化 JSON，程序可以直接用。`list_sources` 是它的简版。 |
+| 读消息 | `whats_new`：上次看完之后新进来的所有消息，跨群、按群分组、已去噪。<br>`read_messages`：某个群一段时间窗口，默认是去噪后的信号，可切 `off-topic` 或 `all`，分页。<br>`get_messages`：按 #id 取消息，带它回复的上文、别人对它的回复和前后几条，适合核对引用。<br>`search_messages`：跨所有群搜，用 `\|` 分隔多个词（`ZEC \| zcash \| 大零币`），可以按发言人筛。<br>`overview`：某个群一段时间的统计。 |
+| 新闻、高频词 | `news_keywords`：今天一线新闻的关键词，以及各自在群里的反应。<br>`news_in_group`：某个群里提到新闻的消息。<br>`hot_terms`：群里突然高频出现的词（见上面「短期高频词」）。<br>`refresh_news`：立刻重读新闻源。 |
+| 需要注意的事 | `alerts`：上次看完之后发生的、需要有人知道的事。包括群里在聊刚出的新闻（HOT）或比第一篇报道还早、群里突然高频出现的词（TERM BURST）、账号在某个群被移出或禁言、App 里有验证等你答、服务停过、内部错误，以及 Claude 标记的事。会自己恢复的断线和新闻源抽风不算，`status` 里有计数。 |
+| 摘要 | `get_playbook` → `save_digest`。<br>`past_digests`：列出或读出以前的摘要，新摘要接着讲之前的故事，不重复。 |
+| 找你 | `flag_for_owner`：Claude 把一两句话的说明记进控制台的活动日志，同时弹一个 macOS 通知。通知里只写「Claude 给你留了一条说明」，不显示说明本身，所以群里的文字到不了你的屏幕。每小时最多弹 4 个通知，超出的只记录、不弹。 |
+| 管群 | `watch_source`（开始读，从不加群）、`set_monitoring`（开关某个群）、`refresh_sources`（立刻核对群列表）、`list_account_chats`（账号所在的所有群和频道，以及哪些在读）、`check_group`（只读查看一个群；邀请链接会给出预览和提醒）、`invite_status`（私密群的跟踪状态，只读）、`catch_up_now`、`audit_capture`、`account_activity`。 |
+
+所有工具里的 `source` 参数都可以写 `#3`、群名或 @用户名。编号和 `status`、`list_sources` 里的一致：关掉的群也算在内，按加入的先后编号，新加的群排在最后，已有的编号不会变。输出里带消息链接（公开群是 `t.me/用户名/id`，私密超级群是 `t.me/c/…/id`，群成员才能打开），摘要里的引用写成 `[#id](链接)`，在控制台点开就能跳到原消息。控制台里只有指向本群那条消息的引用可以点；别的链接，比如邀请链接、机器人链接，一律只显示成文字，免得群里的文字借 Claude 之手变成一点就加群的链接。
+
+**每个任务各记各的进度**：`whats_new` 和 `alerts` 都有一个 `reader` 参数，用来给当前任务起名字，比如定时摘要用 `daily-digest`，平时聊天用默认的 `default`。每个名字单独记自己读到哪了，一个任务读过的，不影响另一个任务。
+
+「新」按入库的先后算，不按消息的发送时间：断网后补回来的几小时前的消息，也算新消息。每次能给多少，按去噪后实际显示出来的内容算。2026-10-07 实测：一天的 8,817 条新消息分 13 次读完，每次约 30 毫秒；每小时看一次的话，一次就够。要从头到尾读一整天，用 `read_messages` 按群读更快。
+
+- **第一次看**（这个名字还没有进度时）：只给最近 `first_hours` 小时里最新的一批，并说明一共多少条、没给的有多少（那些可以用 `read_messages` 按群读）。之后从这里开始记进度。
+- **之后**：从上次的位置接着读，一次放不下会提示「More is waiting」，并估计还要几次。再调一次就接着读，不会跳过。
+- `peek: true` 只看、不移动进度；`mark_read: true` 把进度直接移到现在，跳过积压的消息。
+
+**Prompts**：`daily_digest`（写当天摘要：追平 → 概览 → 读完所有页 → 新闻和高频词 → 看之前的摘要 → playbook → 保存）、`whats_new`（简报上次之后的新消息和提醒）、`news_brief`（今天的新闻和各群的反应）、`health_check`（检查采集是否完整、实时）。支持 MCP prompts 的客户端里可以直接选用；在 Claude Code 里是 `/mcp__telegram-monitor__daily_digest` 这样的斜杠命令。
+
+**Resources**：`telegram-monitor://status`、`telegram-monitor://alerts`、`telegram-monitor://sources`（JSON），`telegram-monitor://playbook/{群 id}`，`telegram-monitor://digest/{id}`。支持订阅的客户端订阅前三个后，开关、错误或新提醒有变化时会收到推送（只有这几类变化会推送，每条新消息不会）。
 
 需要动用 Telegram 的工具，会通过正在运行的服务去请求，**不会**另开一个连接：同一个会话在两处同时使用，可能被 Telegram 判定冲突而作废（AUTH_KEY_DUPLICATED）。
 
-Claude 拿到的令牌（`data/console.json`）只能调用它的工具本来就用的那几个接口：查看、开始读、追平、对账、开关、刷新群列表。确认入群、清空存储、改设置这些，只有控制台页面能做。这样 Claude 读到的群消息里就算藏了指令，也碰不到这些操作。
+Claude 拿到的令牌（`data/console.json`）只能调用它的工具本来就用的那几个接口：查看、开始读、追平、对账、开关、刷新群列表、重读新闻源、给你留言。确认入群、清空存储、改设置、增删新闻源，只有控制台页面能做。这样 Claude 读到的群消息里就算藏了指令，也碰不到这些操作。
 
-每天的摘要用 Claude 桌面端的定时任务跑（侧边栏 Scheduled → 「Telegram 群每日摘要（去噪）」，每天 9:03）：先追平，读完所有去噪后的信号页，按 话题 / 痛点 / 新想法 / 机会 / 待解问题 / 群里聊到的新闻 写成摘要，每条都标上引用的消息 #id，最后存进控制台（Digests 里这个群的文件夹）和 `data/digests/<群名>/`。第一次请在侧边栏点 **Run now**，把它要用的工具批准一次，之后自动运行。注意定时任务只在桌面端开着时运行；错过的会在下次打开时补跑。
+**Claude 做了什么都看得到**：控制台的活动日志里，Claude 的每次读取都记成一行，标为 CLAUDE，比如「read_messages · 币安官方中文群 · 24h · via Claude Desktop」。它开关群、开始读、追平、对账，也都记在 claude 名下，并写明来自哪个应用，不会记成你的操作。关群的原因会显示「switched off by Claude」。Activity 的 **Claude** 筛选只显示 Claude 做的事。
+
+每天的摘要用 Claude 桌面端的定时任务跑（侧边栏 Scheduled → 「Telegram 群每日摘要（去噪）」，每天 9:03）。步骤和 `daily_digest` prompt 是同一套：
+
+1. 先看 `status`，追平，读完所有去噪后的信号页，再看新闻、高频词和之前的摘要。
+2. 按 话题 / 痛点 / 新想法 / 机会 / 待解问题 / 群里聊到的新闻 / 突然高频的词 写成摘要，每条都用 `[#id](链接)` 标上引用的消息。
+3. 存进控制台（Digests 里这个群的文件夹）和 `data/digests/<群名>/`。
+4. 最后看一遍 `alerts`，当天就要处理的事用 `flag_for_owner` 告诉你。第一次请在侧边栏点 **Run now**，把它要用的工具批准一次，之后自动运行。注意定时任务只在桌面端开着时运行；错过的会在下次打开时补跑。
 
 ---
 
@@ -442,6 +487,12 @@ Claude 拿到的令牌（`data/console.json`）只能调用它的工具本来就
 
   ```bash
   caffeinate -is npm start
+  ```
+
+  更新代码后重启：在**新的**终端标签页里运行下面这条。它会让正在跑的服务停下（和在它那个标签页按 Ctrl-C 一样），等会话空出来，再在当前标签页启动新服务。中间断开约一秒，期间的消息会补回来。它只会停掉本目录里、拿着会话锁的那个服务进程；装了开机自启（下一条）的话，它改由 launchd 来重启。
+
+  ```bash
+  caffeinate -is npm run restart
   ```
 
 - 自动（推荐）：装成 macOS 的 LaunchAgent。登录时自动启动、意外退出时自动重启，日志写到 `data/monitor.log`。会在 `~/Library/LaunchAgents/` 里加一个文件，`off` 会删掉它。

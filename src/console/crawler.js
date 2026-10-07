@@ -966,6 +966,10 @@
     if (a.method === 'group was first') return ['flag', `FIRST · ${a.target}`, 'pink'];
     if (a.method === 'feed failed' || a.method === 'feed back' || a.method === 'news checked') return ['feed', `${a.target} · ${a.method}`, 'cyan'];
     if (a.method === 'connection lost' || a.method === 'connection back') return ['net', a.method, a.method === 'connection lost' ? 'pink' : ''];
+    if (a.method === 'term burst') return ['burst', cut(`${a.target} · ${(/^"([^"]+)"/.exec(a.detail) || [])[1] || ''}`, 60), 'yellow'];
+    if (a.actor === 'claude' && a.method === 'flagged') return ['flag', `CLAUDE · ${cut(a.target || 'for you', 40)}`, 'pink'];
+    if (a.kind === 'agent') return ['claude', cut(`${a.method}${a.target ? ` · ${a.target}` : ''}`, 60), 'teal'];
+    if (a.actor === 'claude') return ['claude', cut(`${a.method} · ${a.target}`, 60), 'teal'];
     return null;
   }
 

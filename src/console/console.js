@@ -274,6 +274,7 @@ const KIND = {
   write: ['WRITE', 'warn'],
   event: ['EVENT', ''],
   llm: ['CLAUDE', 'llm'],
+  agent: ['CLAUDE', 'agent'],
   error: ['ERROR', 'bad'],
   system: ['SYS', ''],
 };
@@ -282,7 +283,7 @@ const KIND = {
 
 const SOURCE_HEAD = ['', 'Source', 'Access', 'Last 24h', 'Volume', 'At the door', 'Reading', ''];
 const ORIGIN = { dialog: 'from your chats', manual: 'added by name' };
-const OFF = { owner: 'switched off', left: 'you left it in Telegram', 'auto-watch off': 'new · auto-read is off', banned: 'banned' };
+const OFF = { owner: 'switched off', claude: 'switched off by Claude', left: 'you left it in Telegram', 'auto-watch off': 'new · auto-read is off', banned: 'banned' };
 const DOTS = 'M4.5 10a1.4 1.4 0 1 0 2.8 0 1.4 1.4 0 0 0-2.8 0Zm4.1 0a1.4 1.4 0 1 0 2.8 0 1.4 1.4 0 0 0-2.8 0Zm4.1 0a1.4 1.4 0 1 0 2.8 0 1.4 1.4 0 0 0-2.8 0Z';
 
 function accessPill(a) {
@@ -780,6 +781,7 @@ function feedItem(a, fresh) {
 
 function shown(a) {
   const kind = a.ok ? a.kind : 'error';
+  if (filter === 'llm') return kind === 'llm' || kind === 'agent' || a.actor === 'claude'; // everything Claude did: API calls, MCP reads, its actions
   return filter === 'all' ? kind !== 'system' : kind === filter;
 }
 
@@ -790,8 +792,10 @@ function renderFeed() {
 }
 
 function addActivity(a) {
-  if (a.id <= lastActivityId) return;
-  lastActivityId = a.id;
+  // Rows other processes write (Claude's MCP server) reach the stream a moment late, so an id can
+  // arrive after a higher one: skip only what is already here.
+  if (a.id <= lastActivityId && feedRows.some((r) => r.id === a.id)) return;
+  lastActivityId = Math.max(lastActivityId, a.id);
   window.Crawler?.activity(a);
   feedRows.push(a);
   if (feedRows.length > FEED_MAX) feedRows.splice(0, feedRows.length - FEED_MAX);
@@ -965,16 +969,29 @@ function folderIcon() {
 
 // Claude's digests are Markdown. Shown as text nodes only (headings, list lines, **bold**): nothing
 // from the digest is ever parsed as HTML.
-function renderMarkdown(escaped) {
+/** Where a group's messages open in Telegram ("https://t.me/name/"), or null (a basic group has no message links). */
+function messageBase(chatId) {
+  const s = state?.sources.find((x) => x.chatId === chatId);
+  if (s && s.ref.startsWith('@')) return `https://t.me/${s.ref.slice(1)}/`;
+  const id = String(chatId);
+  return id.startsWith('-100') ? `https://t.me/c/${id.slice(4)}/` : null;
+}
+
+function renderMarkdown(escaped, base = null) {
   const decode = (t) => t.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+  // **bold**, and citations [#id](link) made clickable only when the link opens that very message of
+  // the digest's own group. Any other link stays text: an invite, a bot start or a proxy link in a
+  // digest (Claude could be led to write one by what it read) is never one click away.
   const inline = (text) => {
     const out = [];
-    const re = /\*\*(.+?)\*\*/g;
+    const re = /\*\*(.+?)\*\*|\[#(\d{1,12})\]\((https:\/\/t\.me\/[A-Za-z0-9_/]{1,80}?\/(\d{1,12}))\)/g;
     let last = 0;
     let m;
     while ((m = re.exec(text))) {
+      const cite = m[1] === undefined;
+      if (cite && !(base && m[2] === m[4] && m[3].toLowerCase() === `${base}${m[4]}`.toLowerCase())) continue;
       if (m.index > last) out.push(text.slice(last, m.index));
-      out.push(el('b', { text: m[1] }));
+      out.push(cite ? el('a', { href: m[3], target: '_blank', rel: 'noopener noreferrer', text: `#${m[2]}` }) : el('b', { text: m[1] }));
       last = re.lastIndex;
     }
     if (last < text.length) out.push(text.slice(last));
@@ -1019,7 +1036,7 @@ function renderOutbox(s) {
             el('span', { class: `pill ${item.delivered ? 'ok' : ''}`, text: item.delivered ? 'sent' : 'kept here' }),
             el('span', { class: 'digest-heading', text: item.heading || fmtDateTime(item.at) }),
             el('span', { class: 'digest-at', text: fmtDateTime(item.at) })),
-          el('div', { class: 'body' }, item.format === 'markdown' ? renderMarkdown(item.body) : sanitize(item.body)));
+          el('div', { class: 'body' }, item.format === 'markdown' ? renderMarkdown(item.body, f.chatId === null ? null : messageBase(f.chatId)) : sanitize(item.body)));
         d.addEventListener('toggle', () => {
           if (d.open) {
             openItems.add(key);

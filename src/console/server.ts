@@ -3,7 +3,8 @@
 // actions need a per-run token (no cross-site requests). There are two tokens: the page's, good
 // for every action, and the one left for local tools (Claude's MCP server), good only for the few
 // actions those tools use. So nothing Claude reads (other people's messages) can steer it into
-// confirming a join, clearing storage or changing settings.
+// confirming a join, clearing storage or changing settings. What Claude does through its token is
+// recorded as Claude's (actor "claude", and the app it came from), never as the owner's.
 
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
@@ -11,16 +12,17 @@ import { dirname, join } from 'node:path';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { TelegramClient as GramClient } from 'telegram';
 import type { Activity } from '../activity.ts';
+import { clientLabel } from '../agent-views.ts';
 import type { Config } from '../config.ts';
 import { denoise, formatSignal } from '../denoise.ts';
 import { digestFolders } from '../digest-folders.ts';
 import { inviteHash } from '../invite-rules.ts';
 import type { InviteTracker } from '../invites.ts';
 import type { NewsRadar } from '../news.ts';
-import type { Notifier } from '../notify.ts';
+import { clean, type Notifier } from '../notify.ts';
 import { probe, type ProbeResult } from '../probe.ts';
 import { parseRef, withTimeout, type Reader } from '../reader.ts';
-import type { Store } from '../store.ts';
+import type { ActivityRow, Store } from '../store.ts';
 import { lastSlot } from '../transcript.ts';
 
 export interface ConsoleDeps {
@@ -48,10 +50,30 @@ export interface ConsoleDeps {
   notifier?: Notifier | null;
   /** The news radar (keywords of the day from first-tier sources, matched against the groups). */
   news?: NewsRadar | null;
+  /** How often rows other processes add to the activity log are looked for (tests shorten it). */
+  tailMs?: number;
 }
 
 /** The only actions local tools (Claude's MCP server) may take: the ones its tools call. */
-const TOOL_ALLOWED = new Set(['/api/probe', '/api/watch', '/api/pull', '/api/audit', '/api/toggle', '/api/refresh']);
+const TOOL_ALLOWED = new Set(['/api/probe', '/api/watch', '/api/pull', '/api/audit', '/api/toggle', '/api/refresh', '/api/flag', '/api/news/refresh']);
+
+/** Who asked: the owner's page, or Claude through the tools' token (and which app it runs in). */
+export interface Asker {
+  actor: 'console' | 'claude';
+  /** " · via Claude Desktop" for Claude's requests; empty for the owner's. */
+  via: string;
+}
+const OWNER: Asker = { actor: 'console', via: '' };
+
+/** The app an MCP request came from, as the MCP server names it (x-agent-client). */
+export function askerFor(role: 'page' | 'tool', client: unknown): Asker {
+  if (role === 'page') return OWNER;
+  const name = clientLabel(client);
+  return { actor: 'claude', via: name ? ` · via ${name}` : '' };
+}
+
+/** At most this many of Claude's flags an hour become a notification; the rest are only recorded. */
+const FLAG_NOTICES_PER_HOUR = 4;
 
 const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
@@ -85,6 +107,11 @@ export class ConsoleServer {
   private server: Server | null = null;
   private unsubscribe: (() => void) | null = null;
   private heartbeat: ReturnType<typeof setInterval> | null = null;
+  /** Rows other processes (the MCP server) add to the activity log: streamed too, a moment later. */
+  private tail: ReturnType<typeof setInterval> | null = null;
+  private tailId = 0;
+  private readonly streamed = new Set<number>();
+  private flagTimes: number[] = [];
   /** The bound port (differs from deps.port when that is 0: any free port). */
   private port: number;
 
@@ -112,18 +139,39 @@ export class ConsoleServer {
       writeFileSync(this.deps.handoffFile, JSON.stringify({ url: this.url, token: this.toolToken, pid: process.pid }), { mode: 0o600 });
     }
     this.unsubscribe = this.deps.activity.subscribe((row) => {
-      const line = `id: ${row.id}\nevent: activity\ndata: ${JSON.stringify(row)}\n\n`;
-      for (const s of this.streams) s.write(line);
+      this.streamed.add(row.id);
+      this.broadcast(row);
     });
     this.heartbeat = setInterval(() => {
       for (const s of this.streams) s.write(': keep-alive\n\n');
     }, 25_000);
+    this.tailId = this.deps.store.lastActivityId();
+    this.tail = setInterval(() => this.followLog(), this.deps.tailMs ?? 1500);
+    this.tail.unref?.();
+  }
+
+  private broadcast(row: ActivityRow): void {
+    const line = `id: ${row.id}\nevent: activity\ndata: ${JSON.stringify(row)}\n\n`;
+    for (const s of this.streams) s.write(line);
+  }
+
+  /** Streams the rows this process did not write itself (Claude's tool calls, its saved digests). */
+  followLog(): void {
+    try {
+      const rows = this.deps.store.activity({ afterId: this.tailId, limit: 500 });
+      for (const row of rows) if (!this.streamed.has(row.id)) this.broadcast(row);
+      if (rows.length) this.tailId = rows[rows.length - 1].id;
+      for (const id of this.streamed) if (id <= this.tailId) this.streamed.delete(id);
+    } catch {
+      // the database busy for a moment: the next tick catches up
+    }
   }
 
   async stop(): Promise<void> {
     if (this.deps.handoffFile) rmSync(this.deps.handoffFile, { force: true });
     this.unsubscribe?.();
     if (this.heartbeat) clearInterval(this.heartbeat);
+    if (this.tail) clearInterval(this.tail);
     for (const s of this.streams) s.end();
     await new Promise<void>((resolve) => (this.server ? this.server.close(() => resolve()) : resolve()));
   }
@@ -193,6 +241,8 @@ export class ConsoleServer {
           return this.json(res, 200, this.deps.news && this.deps.config.news ? this.deps.news.view() : { enabled: false, sources: [], keywords: [], hits: [], alerts: [], items24h: 0 });
         case '/api/pulse':
           return this.json(res, 200, this.pulse());
+        case '/api/live':
+          return this.json(res, 200, this.live());
         case '/api/events':
           res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
           res.write(': connected\n\n');
@@ -213,11 +263,12 @@ export class ConsoleServer {
       const body = await this.body(req);
       const invites = this.deps.invites ?? null;
       const id = Number(body.id);
+      const asker = askerFor(role, req.headers['x-agent-client']);
       switch (url.pathname) {
         case '/api/probe':
-          return this.json(res, 200, await this.probe(String(body.target ?? ''), role === 'tool' ? 'mcp' : 'owner'));
+          return this.json(res, 200, await this.probe(String(body.target ?? ''), role === 'tool' ? 'mcp' : 'owner', asker));
         case '/api/watch':
-          return this.json(res, 200, await this.watch(String(body.target ?? '')));
+          return this.json(res, 200, await this.watch(String(body.target ?? ''), asker));
         case '/api/invite/opened':
           return this.json(res, 200, invites?.opened(id) ?? { error: 'Unknown invite.' });
         case '/api/invite/confirm':
@@ -233,15 +284,17 @@ export class ConsoleServer {
         case '/api/unwatch':
           return this.json(res, 200, this.unwatch(Number(body.chatId)));
         case '/api/pull':
-          return this.json(res, 200, await this.pull(Number(body.chatId)));
+          return this.json(res, 200, await this.pull(Number(body.chatId), asker));
         case '/api/digest':
           return this.json(res, 200, await this.digest(Number(body.chatId)));
         case '/api/audit':
-          return this.json(res, 200, await this.audit(Number(body.chatId), Number(body.hours ?? 1)));
+          return this.json(res, 200, await this.audit(Number(body.chatId), Number(body.hours ?? 1), asker));
         case '/api/toggle':
-          return this.json(res, 200, this.toggle(Number(body.chatId), body.on === true));
+          return this.json(res, 200, this.toggle(Number(body.chatId), body.on === true, asker));
+        case '/api/flag':
+          return this.json(res, 200, this.flag(body, asker));
         case '/api/refresh':
-          return this.json(res, 200, await this.refreshList());
+          return this.json(res, 200, await this.refreshList(asker));
         case '/api/settings':
           return this.json(res, 200, this.settings(body));
         case '/api/clear':
@@ -253,7 +306,7 @@ export class ConsoleServer {
         case '/api/news/remove':
           return this.json(res, 200, this.deps.news?.remove(String(body.id ?? '')) ?? { ok: false, message: 'The news radar is off.' });
         case '/api/news/refresh':
-          return this.json(res, 200, await this.newsRefresh());
+          return this.json(res, 200, await this.newsRefresh(asker));
       }
       res.writeHead(404).end('not found');
       return;
@@ -344,6 +397,27 @@ export class ConsoleServer {
     };
   }
 
+  /** What only this process knows, for the MCP server's status tool: the connection, and how each source is read. */
+  private live() {
+    const { reader, store, config, account } = this.deps;
+    return {
+      startedAt: this.deps.startedAt,
+      account: account ? { connection: account.state?.() ?? null } : null,
+      peekSeconds: config.readerPeekSeconds,
+      sources: store
+        .listChats(false)
+        .filter((c) => c.kind === 'watched')
+        .map((c) => ({
+          chatId: c.chatId,
+          pushed: reader?.isPushed(c.chatId) ?? false,
+          peeked: reader?.isPeeked(c.chatId) ?? false,
+          member: reader?.isMember(c.chatId) ?? c.readerOrigin === 'dialog',
+          everyS: reader?.intervalOf(c.chatId) ?? config.readerPollSeconds,
+          behind: reader?.isBehind(c.chatId) ?? false,
+        })),
+    };
+  }
+
   /** For the status card: how many news sources answer, and what was flagged today. */
   private newsSummary() {
     const { store, config, now } = this.deps;
@@ -360,16 +434,21 @@ export class ConsoleServer {
     };
   }
 
-  private async newsRefresh(): Promise<{ ok: boolean; message: string }> {
+  private newsAskedAt = 0;
+
+  private async newsRefresh(asker: Asker = OWNER): Promise<{ ok: boolean; message: string }> {
     const news = this.deps.news;
     if (!news || !this.deps.config.news) return { ok: false, message: 'The news radar is off (PULSE_NEWS=off).' };
+    // Claude may ask at most every two minutes: each ask reads every feed.
+    if (asker.actor === 'claude' && this.deps.now() - this.newsAskedAt < 120) return { ok: true, message: `The feeds were read ${this.deps.now() - this.newsAskedAt}s ago; they are read every few minutes anyway.` };
+    if (asker.actor === 'claude') this.newsAskedAt = this.deps.now();
     const before = this.deps.store.newsItemCounts(this.deps.now() - 86_400);
     await withTimeout(news.fetchDue(true), 120_000, 'reading the feeds').catch(() => undefined);
     await news.rebuild();
     const after = this.deps.store.newsItemCounts(this.deps.now() - 86_400);
     const added = [...after.values()].reduce((a, b) => a + b, 0) - [...before.values()].reduce((a, b) => a + b, 0);
     const failing = this.deps.store.newsSources().filter((x) => x.enabled && x.kind === 'rss' && x.lastError);
-    this.deps.activity.event('console', 'news checked', 'all feeds', `${Math.max(0, added)} new items${failing.length ? `; not answering: ${failing.map((x) => x.name).join(', ')}` : ''}`);
+    this.deps.activity.event(asker.actor, 'news checked', 'all feeds', `${Math.max(0, added)} new items${failing.length ? `; not answering: ${failing.map((x) => x.name).join(', ')}` : ''}${asker.via}`);
     return { ok: true, message: `Feeds checked: ${Math.max(0, added)} new item${added === 1 ? '' : 's'}${failing.length ? `; not answering: ${failing.map((x) => x.name).join(', ')}` : ''}.` };
   }
 
@@ -477,12 +556,20 @@ export class ConsoleServer {
     };
   }
 
-  /** The account's own groups and channels, and whether each is watched. */
+  private joinedAt = 0;
+  private joinedList: Awaited<ReturnType<Reader['joined']>> | null = null;
+
+  /** The account's own groups and channels, and whether each is watched. Asked of Telegram at most every 30 s. */
   private async joined(): Promise<{ error?: string; chats: { chatId: number; title: string; ref: string; type: string; members: number | null; watched: boolean }[] }> {
     const { reader, store } = this.deps;
     if (!reader) return { error: 'The reader account is not signed in.', chats: [] };
     try {
-      const list = await withTimeout(reader.joined(), 60_000, 'listing your chats');
+      const fresh = this.joinedList && this.deps.now() - this.joinedAt < 30;
+      const list = fresh ? this.joinedList! : await withTimeout(reader.joined(), 60_000, 'listing your chats');
+      if (!fresh) {
+        this.joinedList = list;
+        this.joinedAt = this.deps.now();
+      }
       return {
         chats: list.map((c) => {
           const row = store.getChat(c.chatId);
@@ -509,16 +596,16 @@ export class ConsoleServer {
 
   // ── actions ──────────────────────────────────────────────────────────────
 
-  private async probe(target: string, lane: 'owner' | 'mcp'): Promise<unknown> {
+  private async probe(target: string, lane: 'owner' | 'mcp', asker: Asker = OWNER): Promise<unknown> {
     const { account, activity } = this.deps;
     if (!account) return { error: 'The reader account is not signed in.' };
     if (!target.trim()) return { error: 'Type a @username, a t.me link or an invite link.' };
     // An invite link: the private-group flow (a rationed look, then joining in the Telegram app).
     if (this.deps.invites && inviteHash(target)) {
-      return withTimeout(this.deps.invites.preview(target.trim(), lane), 150_000, 'the check').catch((err) => ({ error: (err as Error).message }));
+      return withTimeout(this.deps.invites.preview(target.trim(), lane, asker.via), 150_000, 'the check').catch((err) => ({ error: (err as Error).message }));
     }
     const shown = parseRef(target)?.kind === 'invite' ? 'an invite link' : target; // never log a full invite hash
-    activity.event(lane === 'mcp' ? 'claude' : 'console', 'probe', shown, 'read-only look requested');
+    activity.event(asker.actor, 'probe', shown, `read-only look requested${asker.via}`);
     let r: ProbeResult;
     try {
       r = await withTimeout(probe(account.raw, target.trim(), this.deps.now()), 120_000, 'the check');
@@ -530,13 +617,13 @@ export class ConsoleServer {
     return r;
   }
 
-  private async watch(target: string): Promise<{ ok: boolean; message: string; chatId?: number }> {
+  private async watch(target: string, asker: Asker = OWNER): Promise<{ ok: boolean; message: string; chatId?: number }> {
     const { reader, store, config, activity } = this.deps;
     if (!reader) return { ok: false, message: 'The reader account is not signed in.' };
     if (config.reportTo === null) return { ok: false, message: 'Set PULSE_OWNER_IDS (or PULSE_REPORT_TO) in .env so digests have somewhere to go.' };
     const hash = inviteHash(target);
     if (hash && this.deps.invites) {
-      return withTimeout(this.deps.invites.watchMember(hash), 90_000, 'starting to read it').catch((err) => ({ ok: false, message: (err as Error).message }));
+      return withTimeout(this.deps.invites.watchMember(hash, { actor: asker.actor === 'claude' ? 'claude' : 'owner', via: asker.via }), 90_000, 'starting to read it').catch((err) => ({ ok: false, message: (err as Error).message }));
     }
     const ref = target.trim();
     let info;
@@ -550,7 +637,7 @@ export class ConsoleServer {
     else store.watchChat(info, config.reportTo, null, { language: config.language, digestHour: config.digestHour, timezone: config.timezone, rsiMode: config.rsiMode });
     if (!store.getChat(info.chatId)?.readerOrigin) store.updateChat(info.chatId, { readerOrigin: 'manual' });
     store.setKv(`reader_off_reason:${info.chatId}`, '');
-    activity.event('console', 'watch', info.title, `${info.ref}: reading from now on (first pull goes back 24 hours)`);
+    activity.event(asker.actor, 'watch', info.title, `${info.ref}: reading from now on (first pull goes back 24 hours)${asker.via}`);
     if (!store.getKv(probeKey(info.chatId)) && this.deps.account) {
       const raw = this.deps.account.raw;
       void probe(raw, info.ref, this.deps.now()).then((r) => r.chatId && store.setKv(probeKey(r.chatId), JSON.stringify(r))).catch(() => undefined);
@@ -574,7 +661,7 @@ export class ConsoleServer {
    * again, catching up from where it stopped but no further back than 24 hours. The owner's choice
    * sticks: following the chat list never switches back on what the owner switched off.
    */
-  private toggle(chatId: number, on: boolean): { ok: boolean; message: string } {
+  private toggle(chatId: number, on: boolean, asker: Asker = OWNER): { ok: boolean; message: string } {
     const { store, activity, reader } = this.deps;
     const chat = store.getChat(chatId);
     if (!chat || chat.kind !== 'watched') return { ok: false, message: 'Not a source.' };
@@ -583,18 +670,19 @@ export class ConsoleServer {
       store.updateChat(chatId, { enabled: true, readerError: null });
       store.setKv(`reader_off_reason:${chatId}`, '');
       store.setKv(`reader_floor:${chatId}`, String(this.deps.now() - 86_400));
-      activity.event('console', 'switched on', chat.title, 'reading again: catching up from where it stopped, at most 24 hours back');
+      activity.event(asker.actor, 'switched on', chat.title, `reading again: catching up from where it stopped, at most 24 hours back${asker.via}`);
       if (reader) void reader.pull(store.getChat(chatId)!).catch(() => undefined);
       return { ok: true, message: `${chat.title}: on. Catching up (at most the last 24 hours).` };
     }
     store.updateChat(chatId, { enabled: false });
-    store.setKv(`reader_off_reason:${chatId}`, 'owner');
-    activity.event('console', 'switched off', chat.title, 'not read any more; stored messages stay until retention deletes them');
+    // Either way it stays off: following the chat list switches back on only what the account had left.
+    store.setKv(`reader_off_reason:${chatId}`, asker.actor === 'claude' ? 'claude' : 'owner');
+    activity.event(asker.actor, 'switched off', chat.title, `not read any more; stored messages stay until retention deletes them${asker.via}`);
     return { ok: true, message: `${chat.title}: off. It is not read any more.` };
   }
 
   /** Re-checks the account's chat list now (it also runs hourly, and soon after a join). */
-  private async refreshList(): Promise<{ ok: boolean; message: string }> {
+  private async refreshList(asker: Asker = OWNER): Promise<{ ok: boolean; message: string }> {
     const { reader } = this.deps;
     if (!reader) return { ok: false, message: 'The reader account is not signed in.' };
     try {
@@ -603,6 +691,8 @@ export class ConsoleServer {
         r.added.length ? `new: ${r.added.map((c) => c.title).join(', ')}` : 'no new chats',
         r.left.length ? `left: ${r.left.map((c) => c.title).join(', ')}` : '',
       ].filter(Boolean);
+      // The owner sees the answer on the page; Claude's request leaves a line of its own.
+      if (asker.actor === 'claude') this.deps.activity.event('claude', 'chat list checked', '', `${parts.join('; ')}${asker.via}`);
       return { ok: true, message: `Chat list checked: ${parts.join('; ')}.` };
     } catch (err) {
       return { ok: false, message: (err as Error).message };
@@ -644,6 +734,32 @@ export class ConsoleServer {
     return { ok: true, message: `Cleared: ${summary}. Sources, switches and reading positions are kept, so nothing is downloaded again.` };
   }
 
+  /**
+   * Claude's way to reach the owner. Its note goes into the activity log, where the console shows
+   * it; the notification says only that a note is waiting, in our own words, so nothing a group
+   * wrote can reach the owner's screen through Claude. At most FLAG_NOTICES_PER_HOUR are shown an
+   * hour; the rest are recorded all the same.
+   */
+  private flag(body: Record<string, unknown>, asker: Asker): { ok: boolean; message: string; notified?: boolean } {
+    const { store, activity, notifier, config, now } = this.deps;
+    const note = clean(String(body.note ?? ''), 500);
+    if (!note) return { ok: false, message: 'Say what needs the owner, in a sentence or two.' };
+    const named = body.chatId !== undefined && body.chatId !== null;
+    const chat = named ? store.getChat(Number(body.chatId)) : null;
+    if (named && !chat) return { ok: false, message: 'Unknown group.' };
+    const ids = Array.isArray(body.ids) ? [...new Set(body.ids.map(Number).filter((n) => Number.isInteger(n) && n > 0))].slice(0, 20) : [];
+    activity.event(asker.actor, 'flagged', chat?.title ?? '', `${note}${ids.length ? ` · ${ids.map((n) => `#${n}`).join(' ')}` : ''}${asker.via}`);
+    const t = now();
+    this.flagTimes = this.flagTimes.filter((x) => x > t - 3600);
+    const where = `Recorded in the console (Activity)${chat ? ` for ${chat.title}` : ''}.`;
+    if (!notifier || !config.notify || process.platform !== 'darwin') return { ok: true, notified: false, message: `${where} Notifications are off, so the owner sees it there.` };
+    if (this.flagTimes.length >= FLAG_NOTICES_PER_HOUR) return { ok: true, notified: false, message: `${where} No notification: ${FLAG_NOTICES_PER_HOUR} were shown in the last hour already.` };
+    this.flagTimes.push(t);
+    // No group title either: Claude chose the group, and a title is text its admins wrote.
+    notifier.notify({ kind: 'flag', group: null, body: 'Claude left you a note in the console (Activity).' });
+    return { ok: true, notified: true, message: `Recorded in the console (Activity)${chat ? ` for ${chat.title}` : ''}, and a notification tells the owner a note is waiting.` };
+  }
+
   private notifyTest(): { ok: boolean; message: string } {
     const { notifier, config } = this.deps;
     if (!notifier || !config.notify || process.platform !== 'darwin') return { ok: false, message: 'Notifications are off (they need macOS; PULSE_NOTIFY=on).' };
@@ -661,7 +777,7 @@ export class ConsoleServer {
     return { ok: false, message: 'Nothing to change.' };
   }
 
-  private async pull(chatId: number): Promise<{ ok: boolean; message: string }> {
+  private async pull(chatId: number, asker: Asker = OWNER): Promise<{ ok: boolean; message: string }> {
     const { reader, store, activity } = this.deps;
     const chat = store.getChat(chatId);
     if (!reader || !chat || chat.kind !== 'watched') return { ok: false, message: 'Not a watched source, or no reader account.' };
@@ -669,14 +785,14 @@ export class ConsoleServer {
       const before = store.countMessages(chatId, 0, this.deps.now() + 86_400);
       const current = await withTimeout(reader.catchUp(chat, 5 * 60_000), 6 * 60_000, 'catching up');
       const n = store.countMessages(chatId, 0, this.deps.now() + 86_400) - before;
-      activity.event('console', 'catch up', chat.title, `${n} new messages${current ? ', up to date' : ', still catching up'}`);
+      activity.event(asker.actor, 'catch up', chat.title, `${n} new messages${current ? ', up to date' : ', still catching up'}${asker.via}`);
       return { ok: true, message: `${n} new messages; ${current ? 'up to date' : 'still catching up (a lot was posted while offline)'}.` };
     } catch (err) {
       return { ok: false, message: (err as Error).message };
     }
   }
 
-  private async audit(chatId: number, hours: number): Promise<{ ok: boolean; message: string; result?: unknown }> {
+  private async audit(chatId: number, hours: number, asker: Asker = OWNER): Promise<{ ok: boolean; message: string; result?: unknown }> {
     const { reader, store, activity, now } = this.deps;
     const chat = store.getChat(chatId);
     if (!reader || !chat || chat.kind !== 'watched') return { ok: false, message: 'Not a watched source, or no reader account.' };
@@ -687,7 +803,7 @@ export class ConsoleServer {
         `Last ${h}h, checked against Telegram: ${r.checked} messages; ${r.stored} stored, ${r.bots} from bots, ${r.service} service messages (joins, pins), ${r.empty} empty — ` +
         (r.missing.length ? `${r.missing.length} MISSING (#${r.missing.slice(0, 10).join(', #')}).` : 'nothing missing.') +
         (r.newerThanCursor ? ` ${r.newerThanCursor} newer ones arrive with the next pull.` : '');
-      activity.event('console', 'audit', chat.title, message, r.missing.length === 0);
+      activity.event(asker.actor, 'audit', chat.title, `${message}${asker.via}`, r.missing.length === 0);
       return { ok: r.missing.length === 0, message, result: r };
     } catch (err) {
       return { ok: false, message: (err as Error).message };

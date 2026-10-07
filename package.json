@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node --no-experimental-webstorage --env-file-if-exists=.env src/main.ts",
+    "restart": "node --env-file-if-exists=.env scripts/restart.ts",
     "login": "node --no-experimental-webstorage --env-file-if-exists=.env scripts/login.ts",
     "replay": "node --env-file-if-exists=.env scripts/replay.ts",
     "test": "node --test test/*.test.ts",

@@ -1,6 +1,7 @@
 // macOS notifications for the few moments the owner has to act in the Telegram app (a join
-// approved, a check waiting, a removal), and for the news radar (a group reacting to the news, or
-// talking about it before the first report). Shown with osascript and no shell. What is shown is our
+// approved, a check waiting, a removal), for the news radar (a group reacting to the news, or
+// talking about it before the first report), and for Claude flagging something (its note stays in
+// the console: the notification says only that there is one). Shown with osascript and no shell. What is shown is our
 // own fixed text plus, at most, a cleaned group title and (news radar) a cleaned keyword label of
 // up to 60 characters, and those reach osascript only as arguments AFTER `--`: without the `--`,
 // an argument starting with "-e" is read as one more line of AppleScript (checked on this Mac),
@@ -8,7 +9,7 @@
 
 import { execFile } from 'node:child_process';
 
-export type NoticeKind = 'approved' | 'verifying' | 'removed' | 'paused' | 'test' | 'news' | 'ahead';
+export type NoticeKind = 'approved' | 'verifying' | 'removed' | 'paused' | 'test' | 'news' | 'ahead' | 'flag';
 
 export interface Notice {
   kind: NoticeKind;
@@ -36,6 +37,7 @@ const TITLES: Record<NoticeKind, string> = {
   test: 'Group Pulse test',
   news: 'News in your groups',
   ahead: 'A group had it first',
+  flag: 'Claude flagged something',
 };
 
 /** The osascript arguments: the script is fixed; the title and body come after `--`, as data. */

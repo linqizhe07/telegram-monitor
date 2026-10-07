@@ -217,24 +217,40 @@ export function inputPeer(p: SavedPeer): unknown {
  */
 export function acquireSessionLock(sessionPath: string): { release: () => void } {
   const file = `${sessionPath}.lock`;
-  if (existsSync(file)) {
-    const pid = Number(readFileSync(file, 'utf8').trim());
-    let alive = false;
-    if (pid && pid !== process.pid) {
-      try {
-        process.kill(pid, 0);
-        alive = true;
-      } catch (err) {
-        alive = (err as NodeJS.ErrnoException).code === 'EPERM';
-      }
+  const holder = (): number => {
+    try {
+      return Number(readFileSync(file, 'utf8').trim()) || 0;
+    } catch {
+      return 0;
     }
-    if (alive) {
-      throw new Error(
-        `the reader session is in use by process ${pid} (the monitor service?). Two connections on one session can get it revoked: stop that process first, or use the console (Check) instead.`,
-      );
+  };
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'EPERM';
+    }
+  };
+  // The file is created only when it does not exist yet (O_EXCL), so two processes starting at the
+  // same moment cannot both take it. One left by a process that is gone is taken over.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      writeFileSync(file, String(process.pid), { mode: 0o600, flag: 'wx' });
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      const pid = holder();
+      if (pid === process.pid) break;
+      if (pid && alive(pid)) {
+        throw new Error(
+          `the reader session is in use by process ${pid} (the monitor service?). Two connections on one session can get it revoked: stop that process first, or use the console (Check) instead.`,
+        );
+      }
+      if (attempt > 0) throw new Error('another process is taking the reader session right now; try again in a moment');
+      rmSync(file, { force: true });
     }
   }
-  writeFileSync(file, String(process.pid), { mode: 0o600 });
   let released = false;
   const release = () => {
     if (released) return;
