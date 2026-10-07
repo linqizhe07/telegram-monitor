@@ -206,6 +206,23 @@ const METHODS = {
   'messages.GetBotCallbackAnswer': 'PRESS a button',
   'channels.ReadHistory': 'mark as read',
   'messages.ReadHistory': 'mark as read',
+  'messages.SendReaction': 'REACT to a message',
+  'messages.ForwardMessages': 'forward to Saved Messages',
+  'account.UpdateNotifySettings': 'mute or unmute a chat',
+  'messages.DeleteChatUser': 'LEAVE a group',
+  'messages.GetFullChat': 'read group info',
+  posted: 'you POSTED (pad)',
+  replied: 'you REPLIED (pad)',
+  reacted: 'you reacted (pad)',
+  'took a reaction back': 'you took a reaction back (pad)',
+  'saved to Saved Messages': 'you saved a message (pad)',
+  'marked read': 'you marked a chat read (pad)',
+  muted: 'you muted a chat (pad)',
+  unmuted: 'you unmuted a chat (pad)',
+  left: 'you LEFT a chat (pad)',
+  'pressed a button': 'you pressed a bot\'s button (pad)',
+  'digest deleted': 'you deleted a digest',
+  'message deleted': 'you deleted a kept message',
   'sendMessage': 'send to Telegram',
   'keep in console': 'digest kept in the console',
   stored: 'stored new messages',
@@ -1138,7 +1155,7 @@ function signalStat(header) {
 }
 
 function signalLine(l) {
-  return el('li', {},
+  return el('li', { 'data-id': l.ids[0], 'data-author': l.author, 'data-user': l.username || null, 'data-date': l.date },
     el('div', { class: 'who' },
       el('b', { text: l.author }),
       el('span', { text: fmtWhen(l.date) }),
@@ -1149,7 +1166,7 @@ function signalLine(l) {
 }
 
 function plainLine(m) {
-  return el('li', {},
+  return el('li', { 'data-id': m.id, 'data-author': m.author, 'data-user': m.username || null, 'data-date': m.date },
     el('div', { class: 'who' },
       el('b', { text: m.author }),
       el('span', { text: fmtWhen(m.date) }),
@@ -1791,6 +1808,18 @@ function followSections() {
   }, { rootMargin: '-72px 0px -62% 0px' });
   for (const id of links.keys()) if ($(id)) io.observe($(id));
 }
+
+// What the pad (pad.js) uses from this page: the same requests, toasts and refreshes.
+window.Pulse = {
+  api,
+  toast,
+  refresh,
+  loadMessages,
+  fmtWhen,
+  getState: () => state,
+  view: () => msgView,
+  setView: (v) => $('msg-view').querySelector(`button[data-v="${v}"]`)?.click(),
+};
 
 (async () => {
   makeFoldable();

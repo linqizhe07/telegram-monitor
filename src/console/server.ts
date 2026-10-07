@@ -17,6 +17,7 @@ import type { Config } from '../config.ts';
 import { denoise, formatSignal } from '../denoise.ts';
 import { digestFileHeading, digestFolders } from '../digest-folders.ts';
 import type { Discovery } from '../discover.ts';
+import type { Controller } from '../controller.ts';
 import type { OwnerActions } from '../owner-actions.ts';
 import { inviteHash } from '../invite-rules.ts';
 import type { InviteTracker } from '../invites.ts';
@@ -58,6 +59,8 @@ export interface ConsoleDeps {
   discovery?: Discovery | null;
   /** Joining and answering a group's check, on the owner's click (null: not signed in). Never for local tools. */
   owner?: OwnerActions | null;
+  /** The pad: posting, reacting, saving, marking read, muting, leaving, pressing, on the owner's click (null: not signed in). Never for local tools. */
+  pad?: Controller | null;
 }
 
 const NOT_SIGNED_IN = { ok: false, message: 'The reader account is not signed in.' };
@@ -89,6 +92,7 @@ const ASSETS: Record<string, { file: URL; type: string }> = {
   '/console.js': { file: new URL('./console.js', import.meta.url), type: 'text/javascript; charset=utf-8' },
   '/console.css': { file: new URL('./console.css', import.meta.url), type: 'text/css; charset=utf-8' },
   '/crawler.js': { file: new URL('./crawler.js', import.meta.url), type: 'text/javascript; charset=utf-8' },
+  '/pad.js': { file: new URL('./pad.js', import.meta.url), type: 'text/javascript; charset=utf-8' },
 };
 const PAGE = new URL('./page.html', import.meta.url);
 
@@ -315,6 +319,16 @@ export class ConsoleServer {
           return this.json(res, 200, owner ? await withTimeout(owner.press(Number(body.chatId), Number(body.msgId), Number(body.row), Number(body.col)), 60_000, 'pressing').catch((err) => ({ ok: false, message: (err as Error).message })) : NOT_SIGNED_IN);
         case '/api/verify/answer':
           return this.json(res, 200, owner ? await withTimeout(owner.answer(Number(body.chatId), Number(body.msgId), String(body.text ?? '')), 60_000, 'sending').catch((err) => ({ ok: false, message: (err as Error).message })) : NOT_SIGNED_IN);
+        case '/api/pad/look':
+        case '/api/pad/send':
+        case '/api/pad/react':
+        case '/api/pad/save':
+        case '/api/pad/read':
+        case '/api/pad/mute':
+        case '/api/pad/leave':
+        case '/api/pad/buttons':
+        case '/api/pad/press':
+          return this.json(res, 200, this.deps.pad ? await withTimeout(this.padCall(this.deps.pad, url.pathname.slice(9), body), 60_000, 'the pad').catch((err) => ({ ok: false, message: (err as Error).message })) : NOT_SIGNED_IN);
         case '/api/verify/photo': {
           const img = owner ? await withTimeout(owner.photo(Number(body.chatId), Number(body.msgId)), 60_000, 'the picture').catch(() => null) : null;
           if (!img) return this.json(res, 404, { ok: false, message: 'No picture for that check.' });
@@ -560,6 +574,7 @@ export class ConsoleServer {
       id: m.messageId,
       date: m.date,
       author: users.get(m.userId)?.displayName ?? String(m.userId),
+      username: users.get(m.userId)?.username ?? null,
       text: m.text,
       replyTo: m.replyTo,
       reactions: m.reactions,
@@ -582,7 +597,7 @@ export class ConsoleServer {
         .flatMap((c) => c.lines)
         .sort((a, b) => a.date - b.date)
         .slice(-300)
-        .map((l) => ({ ids: l.ids, date: l.date, author: name(l.userId), text: l.text, replies: l.replies, echoes: l.echoes, score: l.score })),
+        .map((l) => ({ ids: l.ids, date: l.date, author: name(l.userId), username: users.get(l.userId)?.username ?? null, text: l.text, replies: l.replies, echoes: l.echoes, score: l.score })),
     };
   }
 
@@ -762,6 +777,32 @@ export class ConsoleServer {
     // The one trace that remains: that a clear happened (not what was in it).
     activity.event('console', 'cleared storage', 'owner', summary);
     return { ok: true, message: `Cleared: ${summary}. Sources, switches and reading positions are kept, so nothing is downloaded again.` };
+  }
+
+  /** One press on the pad (src/controller.ts): the owner's page only, never local tools. */
+  private padCall(pad: Controller, what: string, body: Record<string, unknown>): Promise<unknown> {
+    const chatId = Number(body.chatId);
+    const msgId = Number(body.msgId);
+    switch (what) {
+      case 'look':
+        return pad.look(chatId, body.fresh === true);
+      case 'send':
+        return pad.send(chatId, String(body.text ?? '').slice(0, 5000), body.replyTo === undefined || body.replyTo === null ? null : Number(body.replyTo));
+      case 'react':
+        return pad.react(chatId, msgId, typeof body.emoji === 'string' ? body.emoji.slice(0, 32) : null);
+      case 'save':
+        return pad.save(chatId, msgId);
+      case 'read':
+        return pad.markRead(chatId);
+      case 'mute':
+        return pad.mute(chatId, body.on === true);
+      case 'leave':
+        return pad.leave(chatId);
+      case 'buttons':
+        return pad.buttons(chatId, msgId);
+      default:
+        return pad.press(chatId, msgId, Number(body.row), Number(body.col));
+    }
   }
 
   /**

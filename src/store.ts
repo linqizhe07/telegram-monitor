@@ -1387,6 +1387,12 @@ export class Store {
     return this.all('SELECT * FROM outbox ORDER BY id DESC LIMIT ?', limit).map((r) => this.toOutbox(r));
   }
 
+  /** The newest stored message of a chat (its Telegram id), or null. */
+  newestMessageId(chatId: number): number | null {
+    const r = this.get('SELECT MAX(message_id) AS id FROM messages WHERE chat_id = ?', chatId);
+    return r && r.id !== null && r.id !== undefined ? num(r.id) : null;
+  }
+
   outboxRow(id: number): OutboxRow | null {
     const r = this.get('SELECT * FROM outbox WHERE id = ?', id);
     return r ? this.toOutbox(r) : null;

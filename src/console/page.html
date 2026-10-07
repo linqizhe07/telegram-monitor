@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="/console.css">
 <script src="/crawler.js" defer></script>
 <script src="/console.js" defer></script>
+<script src="/pad.js" defer></script>
 </head>
 <body>
 <header class="top">
@@ -30,6 +31,9 @@
       <button class="icon-btn" id="notify-test" title="Send a test notification to this Mac (nothing is sent to Telegram)" aria-label="Send a test notification" hidden>
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.4a4.2 4.2 0 0 0-4.2 4.2v2.5c0 .8-.3 1.5-.9 2.1l-.6.6h11.4l-.6-.6c-.6-.6-.9-1.3-.9-2.1V7.6A4.2 4.2 0 0 0 10 3.4Z"/><path d="M8.3 15.4a1.8 1.8 0 0 0 3.4 0"/></svg>
       </button>
+      <button class="icon-btn" id="pad-toggle" title="Controller: your hands on Telegram (G)" aria-label="Open the controller" aria-controls="pad" aria-expanded="false">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6.2 6h7.6a3.6 3.6 0 0 1 3.5 2.8l.9 4.3a2.2 2.2 0 0 1-3.8 1.9L12.6 13H7.4l-1.8 2a2.2 2.2 0 0 1-3.8-1.9l.9-4.3A3.6 3.6 0 0 1 6.2 6Z"/><path d="M6.5 8.4v2.6M5.2 9.7h2.6"/><path d="M13.2 9h.01M14.6 10.6h.01"/></svg>
+      </button>
       <div class="live" id="live" role="status"><span class="dot" aria-hidden="true"></span><span id="live-text">Connecting</span></div>
     </div>
   </div>
@@ -40,7 +44,7 @@
 <section class="crawler" id="crawler" aria-label="Live view">
   <div class="hud-top">
     <div class="hud-stats" id="hud-stats"></div>
-    <div class="hud-brand" id="hud-brand">read-only</div>
+    <div class="hud-brand" id="hud-brand">writes only on your click</div>
   </div>
   <div class="hud-tabs" id="hud-tabs" role="tablist" aria-label="Groups"></div>
   <div class="stage" id="stage">
@@ -269,5 +273,53 @@
 <footer class="foot"><span>group-pulse · this computer only (127.0.0.1)</span><span id="foot-up"></span></footer>
 <div class="menu-pop" id="row-menu" role="menu" hidden></div>
 <div class="toast" id="toast" role="status" hidden></div>
+<aside class="pad" id="pad" aria-label="Controller" hidden>
+  <div class="pad-top">
+    <button type="button" class="pad-key sh" data-k="LT" title="Mark this chat read (U)"><b>LT</b><span>Mark read</span></button>
+    <button type="button" class="pad-key sh" data-k="LB" title="Switch Signal / All ([)"><b>LB</b><span>Signal / All</span></button>
+    <div class="pad-brand"><span class="pad-dot" id="pad-dot" aria-hidden="true"></span><span id="pad-device">PAD · keyboard</span></div>
+    <button type="button" class="pad-key sh" data-k="RB" title="The message's bot buttons (])"><b>RB</b><span>Buttons</span></button>
+    <button type="button" class="pad-key sh" data-k="RT" title="Mute or unmute this chat (M)"><b>RT</b><span id="pad-rt">Mute</span></button>
+    <button type="button" class="pad-close" id="pad-close" title="Put the controller away (G)" aria-label="Put the controller away">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 8l5 5 5-5"/></svg>
+    </button>
+  </div>
+  <div class="pad-body">
+    <div class="dpad" role="group" aria-label="Move: messages up and down, chats left and right">
+      <button type="button" class="pad-key d up" data-k="up" title="Newer message (↑)" aria-label="Newer message">▲</button>
+      <button type="button" class="pad-key d left" data-k="left" title="Previous chat (←)" aria-label="Previous chat">◀</button>
+      <span class="d mid" aria-hidden="true"></span>
+      <button type="button" class="pad-key d right" data-k="right" title="Next chat (→)" aria-label="Next chat">▶</button>
+      <button type="button" class="pad-key d down" data-k="down" title="Older message (↓)" aria-label="Older message">▼</button>
+    </div>
+    <div class="pad-screen" id="pad-screen">
+      <div class="lcd-chat" id="pad-chat"></div>
+      <div class="lcd-msg" id="pad-msg"></div>
+      <div class="lcd-layer" id="pad-layer" hidden></div>
+      <form class="pad-compose" id="pad-compose" autocomplete="off" hidden>
+        <div class="compose-head" id="pad-compose-head"></div>
+        <textarea id="pad-text" rows="2" maxlength="4096" aria-label="Message" placeholder="Type, then START (Enter) twice to post · Shift+Enter: new line · Esc: back"></textarea>
+        <div class="compose-foot"><span id="pad-count">0 / 4096</span></div>
+      </form>
+      <div class="lcd-status" id="pad-status" role="status" aria-live="polite"></div>
+      <div class="arm-bar" id="pad-arm" aria-hidden="true"></div>
+    </div>
+    <div class="face" role="group" aria-label="Act on the picked message">
+      <button type="button" class="pad-key f y" data-k="Y" title="Save it to your Saved Messages (S)"><b>Y</b><span>Save</span></button>
+      <button type="button" class="pad-key f x" data-k="X" title="React (E)"><b>X</b><span>React</span></button>
+      <button type="button" class="pad-key f b" data-k="B" title="Back (Esc)"><b>B</b><span>Back</span></button>
+      <button type="button" class="pad-key f a" data-k="A" title="Reply / choose (R)"><b>A</b><span>Reply</span></button>
+    </div>
+  </div>
+  <div class="pad-bottom">
+    <button type="button" class="pad-key c" data-k="select" title="Open it in the Telegram app (O)"><b>SELECT</b><span>Open in Telegram</span></button>
+    <button type="button" class="pad-key c" data-k="start" title="Write to this chat, then post (N, Enter)"><b>START</b><span id="pad-start">Write</span></button>
+    <button type="button" class="pad-key c" data-k="more" title="More: copy link, author, join, leave (.)"><b>≡</b><span>More</span></button>
+  </div>
+</aside>
+<button type="button" class="pad-tab" id="pad-tab" title="Controller: your hands on Telegram (G)" aria-controls="pad" aria-expanded="false">
+  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6.2 6h7.6a3.6 3.6 0 0 1 3.5 2.8l.9 4.3a2.2 2.2 0 0 1-3.8 1.9L12.6 13H7.4l-1.8 2a2.2 2.2 0 0 1-3.8-1.9l.9-4.3A3.6 3.6 0 0 1 6.2 6Z"/><path d="M6.5 8.4v2.6M5.2 9.7h2.6"/><path d="M13.2 9h.01M14.6 10.6h.01"/></svg>
+  <span>PAD</span><kbd>G</kbd>
+</button>
 </body>
 </html>

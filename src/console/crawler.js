@@ -1230,7 +1230,7 @@
     if (box.__sig === sig) return;
     box.__sig = sig;
     box.replaceChildren(...parts.map((p, i) => el('span', { class: i === 0 ? 'who' : p.startsWith('last write') ? 'pink' : '' }, p)));
-    setText($('hud-brand'), a ? `${a.name} · read-only` : 'read-only');
+    setText($('hud-brand'), a ? `${a.name} · writes only on your click` : 'writes only on your click');
   }
 
   // ── fetching what the view needs on its own ────────────────────────────
@@ -1369,7 +1369,7 @@
         }
       }
       if (firstTime) {
-        say('# reader.py · reads your groups, never writes', 'dim');
+        say('# reader.py · reads your groups; writes only on your click', 'dim');
         say(`groups = watch(${enabled.length})  # read-only`);
         say(s.news ? `news = radar(${s.news.sources})  # first-tier feeds` : 'news = None  # PULSE_NEWS=off', s.news ? '' : 'dim');
       }
