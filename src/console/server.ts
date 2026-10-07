@@ -17,6 +17,7 @@ import type { Config } from '../config.ts';
 import { denoise, formatSignal } from '../denoise.ts';
 import { digestFolders } from '../digest-folders.ts';
 import type { Discovery } from '../discover.ts';
+import type { OwnerActions } from '../owner-actions.ts';
 import { inviteHash } from '../invite-rules.ts';
 import type { InviteTracker } from '../invites.ts';
 import type { NewsRadar } from '../news.ts';
@@ -55,7 +56,11 @@ export interface ConsoleDeps {
   tailMs?: number;
   /** Finding groups worth reading (null: not signed in). */
   discovery?: Discovery | null;
+  /** Joining and answering a group's check, on the owner's click (null: not signed in). Never for local tools. */
+  owner?: OwnerActions | null;
 }
+
+const NOT_SIGNED_IN = { ok: false, message: 'The reader account is not signed in.' };
 
 /** The only actions local tools (Claude's MCP server) may take: the ones its tools call. */
 const TOOL_ALLOWED = new Set(['/api/probe', '/api/watch', '/api/pull', '/api/audit', '/api/toggle', '/api/refresh', '/api/flag', '/api/news/refresh', '/api/discover']);
@@ -269,6 +274,7 @@ export class ConsoleServer {
       const invites = this.deps.invites ?? null;
       const id = Number(body.id);
       const asker = askerFor(role, req.headers['x-agent-client']);
+      const owner = this.deps.owner ?? null;
       switch (url.pathname) {
         case '/api/probe':
           return this.json(res, 200, await this.probe(String(body.target ?? ''), role === 'tool' ? 'mcp' : 'owner', asker));
@@ -299,9 +305,22 @@ export class ConsoleServer {
         case '/api/flag':
           return this.json(res, 200, this.flag(body, asker));
         case '/api/discover':
-          return this.json(res, 200, this.deps.discovery?.start(String(body.topic ?? ''), typeof body.query === 'string' ? body.query.slice(0, 64) : null, asker, typeof body.kind === 'string' ? body.kind : 'groups') ?? { ok: false, message: 'The reader account is not signed in.' });
+          return this.json(res, 200, this.deps.discovery?.start(String(body.topic ?? ''), typeof body.query === 'string' ? body.query.slice(0, 64) : null, asker, typeof body.kind === 'string' ? body.kind : 'both') ?? { ok: false, message: 'The reader account is not signed in.' });
         case '/api/discover/dismiss':
           return this.json(res, 200, this.deps.discovery?.dismiss(Number(body.chatId)) ?? { ok: false, message: 'The reader account is not signed in.' });
+        // The owner's writes: never in TOOL_ALLOWED, so Claude's token gets 403 here.
+        case '/api/join':
+          return this.json(res, 200, owner ? await withTimeout(owner.join(String(body.target ?? '').slice(0, 300)), 90_000, 'joining').catch((err) => ({ ok: false, message: (err as Error).message })) : NOT_SIGNED_IN);
+        case '/api/verify/press':
+          return this.json(res, 200, owner ? await withTimeout(owner.press(Number(body.chatId), Number(body.msgId), Number(body.row), Number(body.col)), 60_000, 'pressing').catch((err) => ({ ok: false, message: (err as Error).message })) : NOT_SIGNED_IN);
+        case '/api/verify/answer':
+          return this.json(res, 200, owner ? await withTimeout(owner.answer(Number(body.chatId), Number(body.msgId), String(body.text ?? '')), 60_000, 'sending').catch((err) => ({ ok: false, message: (err as Error).message })) : NOT_SIGNED_IN);
+        case '/api/verify/photo': {
+          const img = owner ? await withTimeout(owner.photo(Number(body.chatId), Number(body.msgId)), 60_000, 'the picture').catch(() => null) : null;
+          if (!img) return this.json(res, 404, { ok: false, message: 'No picture for that check.' });
+          res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+          return void res.end(img);
+        }
         case '/api/refresh':
           return this.json(res, 200, await this.refreshList(asker));
         case '/api/settings':

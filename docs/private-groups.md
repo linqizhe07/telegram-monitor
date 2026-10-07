@@ -40,6 +40,32 @@ Verified live so far:
 - **L3: notifications.** `osascript` exited cleanly, and the owner confirmed the test notification appeared (2026-10-06).
 - **Still to run.** L2 with real links, and L4–L9. They need the owner, and a test group run from a second account.
 
+## Owner-click joins and answers (2026-10-07)
+
+At the owner's request ("应该直接在这个界面就能加入群聊，完成人机验证"), part of Phase 2 is built on the
+Phase 1 stack (GramJS, layer 198), within the lines Phase 2 drew (section 8):
+
+- **Join on a click.** `channels.joinChannel` for a public group or channel, `messages.importChatInvite`
+  for an open invite link (`src/owner-actions.ts`). Each passes the request door on a one-shot permit
+  that matches that exact request (`superviseRequests().permit`); every other write is still refused.
+  - Refused before anything is sent: Telegram's SCAM/FAKE flags, a likely scam in the latest search,
+    and `restriction_reason` for every platform.
+  - Sent to the app instead (table rows 5, 6 and 15): groups that need a join request, and paid ones.
+    A software request cannot be withdrawn, and a guard bot's join web view is bound to the session
+    that sent it.
+  - Rationed: 3 joins an hour and 10 a day. `PEER_FLOOD` holds joins for a day; a flood wait holds
+    them for as long as Telegram asks.
+- **The human's answer, relayed.** For a check caught by `matchChallenge` while its window is open:
+  - a plain callback button the owner picks is pressed with its exact data (`messages.getBotCallbackAnswer`);
+  - a typed answer of at most 64 characters goes as a reply to the check (`messages.sendMessage`);
+  - the check's photo is downloaded for the banner (a read).
+
+  Link buttons to Telegram open the app (`tg://resolve`). Web views, URL logins, phone, location and
+  peer requests, games and payments stay in the app (table row 40). Nothing is chosen, ranked,
+  guessed or retried. Presses are capped at 10 and answers at 5 per check.
+- **Still never:** joining or answering on Claude's word (these routes are not in the tool token's
+  list), a join request, a web view, a payment, a leave, an automatic re-join, or reading private chats.
+
 ## How to read this
 
 - **Evidence ids** come from the research pass of 2026-10-05 (`fact-sheet.md`, `research-facts.txt`). Prefixes:

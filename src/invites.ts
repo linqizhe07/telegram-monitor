@@ -7,8 +7,10 @@
 //  - once in: the chat becomes a source, and the account's own standing there is read at a few
 //    moments (held for a check, muted, removed), with a banner and a macOS notification when the
 //    owner has to act in the app.
-// It never joins, answers, presses, posts or marks anything read: the request supervisor refuses
-// every write before it reaches Telegram (reader-client.ts).
+// It never joins, answers, presses, posts or marks anything read by itself: the request supervisor
+// refuses every write before it reaches Telegram (reader-client.ts). The owner can join and answer a
+// check from the console (src/owner-actions.ts): those writes go through on the owner's click only,
+// and this tracker hands them the check messages it caught.
 
 import { Api, type TelegramClient } from 'telegram';
 import { returnBigInt } from 'telegram/Helpers.js';
@@ -124,6 +126,8 @@ export class InviteTracker {
   private readonly budget: InviteBudget;
   /** Bot messages that seem to address the account, per chat: in memory only, never stored. */
   private readonly hints = new Map<number, ChallengeHint[]>();
+  /** The messages behind those hints (`chatId:msgId`), for the owner's answer from the console: in memory only. */
+  private readonly checks = new Map<string, MtMessage>();
   /**
    * Chats whose new messages are looked at for checks, until `until`: just joined (15 min), or
    * held for a check (no end). `joinedAt` bounds how old a message can be and still count.
@@ -607,8 +611,42 @@ export class InviteTracker {
       this.watched.set(m.chatId, { joinedAt, until: m.state === 'verifying' ? Number.POSITIVE_INFINITY : joinedAt + HINT_WINDOW, verifying: m.state === 'verifying' });
     } else {
       this.watched.delete(m.chatId);
-      this.hints.delete(m.chatId);
+      this.forget(m.chatId);
     }
+  }
+
+  /** Drops what was caught in a chat (its hints and the messages behind them). */
+  private forget(chatId: number): void {
+    this.hints.delete(chatId);
+    for (const key of [...this.checks.keys()]) if (key.startsWith(`${chatId}:`)) this.checks.delete(key);
+  }
+
+  // ── for the owner's answer from the console (src/owner-actions.ts) ───────
+
+  /** After the owner joined from the console: the same steps as any join (standing, source on, a watch for checks). */
+  afterJoin(chat: { chatId: number; peer: string | null; entity: MtEntity }, by: Requester = BY_OWNER, inviteId: number | null = null): Promise<boolean> {
+    return this.postJoin(inviteId, chat, { by });
+  }
+
+  /** A check the console may answer: caught in this chat since the join, while its window is open. */
+  checkMessage(chatId: number, msgId: number): MtMessage | null {
+    const w = this.watched.get(chatId);
+    if (!w || (!w.verifying && this.d.now() > w.until)) return null;
+    return this.checks.get(`${chatId}:${msgId}`) ?? null;
+  }
+
+  /** The chat's saved address, for a request (null when none is saved). */
+  inputPeerOf(chatId: number): unknown | null {
+    const peer = this.peerFor(chatId, null);
+    return peer ? inputPeer(peer) : null;
+  }
+
+  /** What the owner did about a check (shown with it), then a standing check shortly after. */
+  answered(chatId: number, msgId: number, what: string): void {
+    const h = this.hints.get(chatId)?.find((x) => x.msgId === msgId);
+    if (h) h.done = `${this.at(this.d.now())}: ${what}`;
+    const timer = setTimeout(() => void this.checkMembership(chatId).catch(() => undefined), 4000);
+    timer.unref?.();
   }
 
   private enterVerifying(chatId: number, title: string, cause: 'restricted' | 'bot message'): void {
@@ -648,7 +686,7 @@ export class InviteTracker {
     store.setMembership(chatId, { state: self.state, untilDate: self.until, detail, checkedAt: this.d.now(), nextCheckAt: null });
     if (m?.inviteId) store.updateInvite(m.inviteId, { state: 'removed', nextCheckAt: null, doneAt: this.d.now() });
     this.watched.delete(chatId);
-    this.hints.delete(chatId);
+    this.forget(chatId);
     this.event('reader', 'removed', title, detail, false);
     this.notifyOnce(`removed:${chatId}:${m?.joinedAt ?? 0}`, 'removed', title, `${text}.`);
   }
@@ -718,7 +756,8 @@ export class InviteTracker {
       const list = this.hints.get(chatId) ?? [];
       if (list.some((x) => x.msgId === h.msgId)) continue;
       list.push(h);
-      if (list.length > 10) list.shift();
+      this.checks.set(`${chatId}:${h.msgId}`, m);
+      if (list.length > 10) this.checks.delete(`${chatId}:${list.shift()!.msgId}`);
       this.hints.set(chatId, list);
       // Without a standing row yet (a join the chat-list check just found), the hint waits for it.
       if (!w.verifying && this.d.store.membership(chatId)) {
@@ -793,7 +832,7 @@ export class InviteTracker {
           // Not a fresh join (an old chat moved, unarchived, or rejoined long ago): nothing to watch for.
           if (!this.d.store.membership(c.chatId)) {
             this.watched.delete(c.chatId);
-            this.hints.delete(c.chatId);
+            this.forget(c.chatId);
           }
           continue;
         }

@@ -569,7 +569,7 @@ async function inviteAction(button, path, body, done) {
   }
 }
 
-/** The buttons for an invite, by where it stands. Only the one check, never a join. */
+/** The buttons for an invite, by where it stands: join here (an open link), or in the app (a request, a paid group). */
 function inviteButtons(inv, onDone) {
   const out = [];
   const opened = () => api('/api/invite/opened', { id: inv.id }).then(() => refresh()).catch(() => undefined);
@@ -582,6 +582,9 @@ function inviteButtons(inv, onDone) {
   }
   // A dead link cannot confirm anything: if the account did join, the chat-list check finds the group.
   const waiting = ['previewed', 'owner-opened', 'no-answer'].includes(inv.state) || (inv.state === 'link-dead' && inv.said);
+  if (waiting && ['join', 'peek'].includes(inv.verdict) && inv.links) {
+    out.unshift(el('button', { class: 'btn primary', text: 'Join here', title: 'Join with your account from this page; a check, if any, is answered at the top of the page', onclick: (e) => joinGroup(e.currentTarget, inv.links.tme, inv.title || 'this group', inv.kind === 'channel' ? 'channel' : 'group') }));
+  }
   if (inv.verdict === 'member' && inv.state === 'previewed' && inv.links) {
     out.push(el('button', { class: 'btn primary', text: 'Read it', onclick: (e) => inviteAction(e.currentTarget, '/api/watch', { target: inv.links.tme }, onDone) }));
   } else if (waiting && inv.verdict !== 'refused' && inv.verdict !== 'dead') {
@@ -629,7 +632,7 @@ function renderInviteCard(r) {
       el('dl', { class: 'kv' }, rows),
       warningList(inv.warnings),
       el('div', { class: 'links' }, inviteButtons(inv, () => ($('probe-result').hidden = true))),
-      el('div', { class: 'footnote', text: 'You join in your Telegram app. This page never joins, never answers a check, and never presses anything in Telegram. When you say you\'re in, it looks once.' }),
+      el('div', { class: 'footnote', text: 'Join here, or in your Telegram app. A group that approves members one by one, or charges for them, is joined in the app: a request sent from here could not be taken back. Nothing else is written to Telegram from this page, and only on your click.' }),
       el('div', { class: 'footnote', text: budgetLine(state && state.privateGroups && state.privateGroups.budget) })));
 }
 
@@ -663,21 +666,108 @@ function renderBanner(s) {
   const held = ((s.privateGroups && s.privateGroups.memberships) || []).filter((m) => m.state === 'verifying');
   banner.hidden = held.length === 0;
   paint(banner, held, () => held.map((m) => el('section', { class: 'verify' },
-    el('h3', { text: `Verification in progress in «${m.title}»: answer it in your Telegram app.` }),
+    el('h3', { text: `Verification in progress in «${m.title}»: answer it here, or in your Telegram app.` }),
     el('div', { class: 'sub', text: m.cause === 'restricted' ? 'Telegram shows this account as restricted there (it cannot send messages yet).' : 'A bot addressed you there right after you joined.' }),
     m.priors ? el('div', { class: 'sub', text: `Usual timing for this bot: ${m.priors}.` }) : null,
-    m.hints.length ? el('ul', { class: 'hints' }, m.hints.map((h) => el('li', {},
-      el('div', { class: 'from', text: `From ${h.sender.username ? `@${h.sender.username}` : h.sender.name}${h.sender.bot ? ' (bot)' : ''} · ${fmtTime(h.date)} · why: ${h.why.join('; ')}` }),
-      h.suspicious ? el('div', { class: 'suspicious', text: h.suspicious }) : null,
-      h.text ? el('div', { class: 'text', text: h.text }) : null,
-      h.media ? el('div', { class: 'labels', text: h.media }) : null,
-      h.buttons.length ? el('div', { class: 'labels', text: `Buttons (labels only, answer in Telegram): ${h.buttons.join(' · ')}` }) : null))) : null,
+    m.hints.length
+      ? el('ul', { class: 'hints' }, m.hints.map((h) => checkItem(m, h)))
+      : el('div', { class: 'sub', text: 'No check message has shown up here yet. Some appear only inside the Telegram app.' }),
     el('ul', { class: 'always' },
-      el('li', { text: 'This page cannot answer checks and cannot see all of them. Some appear only inside the Telegram app (pages inside Telegram, or messages only you can see).' }),
+      el('li', { text: 'Press the button or type the answer the check asks for: nothing is chosen or guessed for you. Buttons marked “in the Telegram app” (pages inside Telegram, logins, payments) are done there.' }),
       el('li', { text: 'Real checks never ask for codes, passwords, your phone number, a wallet, or anything to paste or run.' })),
     el('div', { class: 'links' },
-      m.openLink ? el('a', { class: 'btn primary', href: m.openLink, text: 'Open the group in Telegram' }) : null,
+      m.openLink ? el('a', { class: 'btn', href: m.openLink, text: 'Open the group in Telegram' }) : null,
       el('button', { class: 'btn', text: "I've answered it — check now", onclick: (e) => inviteAction(e.currentTarget, '/api/membership/check', { chatId: m.chatId }) })))));
+}
+
+/** One check a bot put to the account: its words, its picture, its buttons, and a box for a typed answer. */
+function checkItem(m, h) {
+  const real = !h.suspicious;
+  const key = (k) => k.kind === 'press' && real
+    ? el('button', { type: 'button', class: 'btn', text: k.label, title: 'Press this button in the group, as your account', onclick: (e) => action(e.currentTarget, '/api/verify/press', { chatId: m.chatId, msgId: h.msgId, row: k.row, col: k.col }, `Pressing «${k.label}»…`) })
+    : k.kind === 'telegram'
+      ? el('a', { class: 'btn', href: k.open, text: `${k.label} ↗`, title: 'Opens this in your Telegram app' })
+      : el('span', { class: 'key-app', text: `${k.label} · in the Telegram app${k.host ? ` (${k.host})` : ''}` });
+  const rows = [];
+  for (const k of h.keys || []) (rows[k.row] ??= []).push(key(k));
+  const form = real
+    ? el('form', { class: 'answer', autocomplete: 'off', onsubmit: (e) => answerCheck(e, m.chatId, h.msgId) },
+        el('input', { name: 'answer', maxlength: '64', placeholder: 'Or type the answer it asks for (digits, a word…)', 'aria-label': `Answer to the check in ${m.title}` }),
+        el('button', { type: 'submit', class: 'btn', text: 'Send answer' }))
+    : null;
+  return el('li', {},
+    el('div', { class: 'from', text: `From ${h.sender.username ? `@${h.sender.username}` : h.sender.name}${h.sender.bot ? ' (bot)' : ''} · ${fmtTime(h.date)} · why: ${h.why.join('; ')}` }),
+    h.suspicious ? el('div', { class: 'suspicious', text: h.suspicious }) : null,
+    h.text ? el('div', { class: 'text', text: h.text }) : null,
+    h.photo ? checkPhoto(m.chatId, h.msgId) : h.media ? el('div', { class: 'labels', text: h.media }) : null,
+    rows.length ? el('div', { class: 'keys' }, rows.filter(Boolean).map((r) => el('div', { class: 'key-row' }, r))) : null,
+    form,
+    form ? el('div', { class: 'labels', text: 'A typed answer posts in the group as a reply to the bot: everyone there sees it.' }) : null,
+    h.done ? el('div', { class: 'done', text: `Done from here at ${h.done}` }) : null);
+}
+
+async function answerCheck(e, chatId, msgId) {
+  e.preventDefault();
+  const form = e.currentTarget;
+  const input = form.elements.answer;
+  const button = form.querySelector('button');
+  if (!input.value.trim()) return;
+  button.disabled = true;
+  try {
+    const r = await api('/api/verify/answer', { chatId, msgId, text: input.value });
+    toast(r.message);
+    if (r.ok) input.value = '';
+    refresh();
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+const checkPhotos = new Map();
+/** A check's picture (often the captcha itself), fetched with the page's token and kept for the page's life. */
+function checkPhoto(chatId, msgId) {
+  const img = el('img', { class: 'check-photo', alt: 'The check\'s picture' });
+  const key = `${chatId}:${msgId}`;
+  if (checkPhotos.has(key)) {
+    img.src = checkPhotos.get(key);
+    return img;
+  }
+  fetch('/api/verify/photo', { method: 'POST', headers: { 'content-type': 'application/json', 'x-console-token': TOKEN }, body: JSON.stringify({ chatId, msgId }) })
+    .then((r) => (r.ok ? r.blob() : null))
+    .then((b) => {
+      if (!b) return img.replaceWith(el('div', { class: 'labels', text: '[picture: see it in your Telegram app]' }));
+      const url = URL.createObjectURL(b);
+      checkPhotos.set(key, url);
+      img.src = url;
+    })
+    .catch(() => undefined);
+  return img;
+}
+
+/**
+ * Joins on the owner's click, after one confirmation. A group that has to be joined in the app
+ * (one that approves members one by one, or a paid one) opens there instead.
+ */
+async function joinGroup(button, target, title, type) {
+  const ask = type === 'channel'
+    ? `Join the channel «${title}» with your account?\n\nReading it does not need this: Watch reads a public channel from outside.`
+    : `Join «${title}» with your account?\n\nMembers will see the account join. If the group checks new members, the check shows at the top of this page within a few seconds: answer it there, in the time it gives (often 1 to 5 minutes).`;
+  if (!confirm(ask)) return;
+  button.disabled = true;
+  toast(`Joining ${title}…`);
+  try {
+    const r = await api('/api/join', { target });
+    toast(r.message || (r.ok ? 'Joined.' : 'Not joined.'));
+    if (r.state === 'app' && r.open) el('a', { href: r.open }).click(); // opens it in the Telegram app
+    await refresh();
+    if (discoverView) loadDiscover();
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 $('notify-test').addEventListener('click', (e) => inviteAction(e.currentTarget, '/api/notify-test', {}));
@@ -702,13 +792,15 @@ function renderProbe(r) {
   if (r.flags) add('Telegram flags', [r.flags.verified && 'verified', r.flags.scam && 'SCAM', r.flags.fake && 'FAKE'].filter(Boolean).join(', ') || 'none');
   add('About', r.about);
   const canWatch = r.verdict === 'read-from-outside' || r.verdict === 'member';
+  const canJoin = ['read-from-outside', 'join-needed', 'request-needed'].includes(r.verdict) && r.username;
   box.replaceChildren(
     el('div', { class: 'probe-head' }, el('span', { class: `pill ${cls}`, text: label }), el('span', { text: r.summary })),
     el('dl', { class: 'kv' }, rows),
     el('div', { class: 'actions' },
       canWatch ? el('button', { class: 'btn primary', text: r.verdict === 'member' ? 'Watch it' : 'Watch it (read without joining)', onclick: (e) => watch(e.currentTarget, r.target) }) : null,
+      canJoin ? el('button', { class: `btn ${canWatch ? '' : 'primary'}`, text: 'Join', onclick: (e) => joinGroup(e.currentTarget, `@${r.username}`, r.title || r.username, r.type === 'channel' ? 'channel' : 'group') }) : null,
       !canWatch && r.verdict !== 'not-found' && r.verdict !== 'unsafe' && r.verdict !== 'folder-link'
-        ? el('span', { class: 'footnote', text: 'Not readable from outside. To follow it, join in your Telegram app with its invite link (paste the link here first: the page shows what to expect). Nothing has been joined.' })
+        ? el('span', { class: 'footnote', text: canJoin ? 'Not readable from outside: join it to follow it (one that approves members one by one is joined in your Telegram app).' : 'Not readable from outside. To follow it, paste its invite link here: the page shows what to expect, and you can join from here or in your Telegram app.' })
         : null));
 }
 
@@ -778,12 +870,13 @@ let discoverKey = { topic: 'hyperliquid', query: null, kind: savedKind() };
 let discoverTimer = null;
 let discoverSignature = '';
 
+// "/2": the default became both groups and channels (2026-10-07), so a choice remembered before starts over once.
 function savedKind() {
   try {
-    const k = localStorage.getItem('discover-kind');
-    return k && KIND_LABEL[k] ? k : 'groups';
+    const k = localStorage.getItem('discover-kind/2');
+    return k && KIND_LABEL[k] ? k : 'both';
   } catch {
-    return 'groups';
+    return 'both';
   }
 }
 
@@ -824,7 +917,7 @@ function pickTopic(topic) {
 function pickKind(kind) {
   discoverKey = { ...discoverKey, kind };
   try {
-    localStorage.setItem('discover-kind', kind);
+    localStorage.setItem('discover-kind/2', kind);
   } catch {
     // a remembered choice is only a convenience
   }
@@ -833,7 +926,13 @@ function pickKind(kind) {
 
 function discoverRow(a) {
   const [label, cls] = FOUND_VERDICT[a.verdict];
-  const reading = state?.sources.some((src) => src.chatId === a.chatId && src.enabled);
+  const src = state?.sources.find((x) => x.chatId === a.chatId);
+  const reading = Boolean(src && src.enabled);
+  const member = Boolean(src && src.member);
+  const target = a.private ? a.link : a.username ? `@${a.username}` : null;
+  const join = !member && target
+    ? el('button', { type: 'button', class: 'btn', title: a.type === 'channel' ? 'Join the channel with your account (reading it does not need this)' : 'Join with your account: members see it; a check, if any, is answered at the top of this page', onclick: (e) => joinGroup(e.currentTarget, target, a.title, a.type) }, 'Join')
+    : null;
   const sub = [a.private ? `private ${a.type}` : a.username ? `@${a.username}` : null, a.private ? null : a.type, a.language ? LANGS[a.language] : null].filter(Boolean).join(' · ');
   const hide = el('button', { type: 'button', class: 'btn', title: 'Hide it from future searches', onclick: async (e) => {
     e.currentTarget.disabled = true;
@@ -846,13 +945,14 @@ function discoverRow(a) {
   } }, 'Hide');
   const open = (title) => (a.link ? el('a', { class: 'btn', href: a.link, target: '_blank', rel: 'noopener noreferrer', title }, 'Open') : null);
   const act = reading
-    ? el('span', { class: 'pill ok', text: 'Reading' })
+    ? el('span', { class: 'row-actions' }, el('span', { class: 'pill ok', text: member ? 'Member' : 'Reading' }), join)
     : a.private
-      ? el('span', { class: 'row-actions' }, open('Private: only members can read it. Join in the Telegram app if you want it, and it shows up under Sources'), hide)
+      ? el('span', { class: 'row-actions' }, join, open('Private: only members can read it. Join here, or in the Telegram app; it then shows up under Sources'), hide)
       : a.verdict === 'closed'
-        ? el('span', { class: 'row-actions' }, open('Only members can read it: join in the Telegram app if you want it, and it shows up under Sources'), hide)
+        ? el('span', { class: 'row-actions' }, join, open('Only members can read it: join here, or in the Telegram app; it then shows up under Sources'), hide)
         : el('span', { class: 'row-actions' },
             el('button', { type: 'button', class: 'btn', title: 'Read it from outside: the account does not join', onclick: (e) => action(e.currentTarget, '/api/watch', { target: `@${a.username}` }, `Starting to read ${a.title}…`) }, 'Watch'),
+            join,
             hide);
   const online = a.online === null || a.online === undefined ? null : el('div', { class: 'cell-sub', text: `${n(a.online)} online` });
   const views = a.views === null || a.views === undefined ? null : el('div', { class: 'cell-sub', text: `~${n(a.views)} views a post` });
