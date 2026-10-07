@@ -134,7 +134,7 @@ export interface FeedbackRow {
  * write  = changes something others can see or the account's state (join, send, mark read, press a button)
  * system = connection upkeep (config, update state, keep-alive)
  */
-export type ActivityKind = 'read' | 'write' | 'system' | 'llm' | 'event' | 'error';
+export type ActivityKind = 'read' | 'write' | 'system' | 'llm' | 'event' | 'error' | 'agent';
 
 export interface ActivityRow {
   id: number;
@@ -489,6 +489,15 @@ CREATE TABLE IF NOT EXISTS news_alerts (
 type Row = Record<string, unknown>;
 type Param = number | string | null;
 
+/** The activity rows that need someone's attention (Store.attention). */
+const ATTENTION = `(
+  (actor = 'news' AND method IN ('news in the group', 'group was first'))
+  OR (actor = 'reader' AND method IN ('was off', 'removed', 'banned', 'muted', 'left chat', 'history hidden', 'invite link dead', 'request not answered', 'rejoined', 'ban over', 'verification over'))
+  OR (actor = 'notify' AND method IN ('approved', 'verifying', 'paused'))
+  OR (actor = 'service' AND method = 'internal error')
+  OR (actor = 'claude' AND method = 'flagged')
+)`;
+
 const num = (v: unknown): number => Number(v);
 const numOrNull = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
 const str = (v: unknown): string => (v === null || v === undefined ? '' : String(v));
@@ -766,13 +775,8 @@ export class Store {
     );
   }
 
-  messages(chatId: number, from: number, to: number): StoredMessage[] {
-    return this.all(
-      'SELECT * FROM messages WHERE chat_id = ? AND date >= ? AND date < ? ORDER BY date, message_id',
-      chatId,
-      from,
-      to,
-    ).map((r) => ({
+  private toMessage(r: Row): StoredMessage {
+    return {
       chatId: num(r.chat_id),
       messageId: num(r.message_id),
       threadId: numOrNull(r.thread_id),
@@ -782,7 +786,91 @@ export class Store {
       replyTo: numOrNull(r.reply_to),
       reactions: num(r.reactions),
       edited: num(r.edited) === 1,
-    }));
+    };
+  }
+
+  messages(chatId: number, from: number, to: number): StoredMessage[] {
+    return this.all('SELECT * FROM messages WHERE chat_id = ? AND date >= ? AND date < ? ORDER BY date, message_id', chatId, from, to).map((r) => this.toMessage(r));
+  }
+
+  // ── for agents (the MCP server): storage order, ids, context, search ────
+
+  /**
+   * The storage position of the newest message. Positions (SQLite rowids) only grow as messages
+   * are stored, whatever their date, so "after position N" is everything stored since a reader
+   * last looked: a catch-up of messages posted hours ago included.
+   */
+  lastMessageRow(): number {
+    return num(this.get('SELECT MAX(rowid) AS r FROM messages')?.r ?? 0);
+  }
+
+  /** The position just before the first message of these chats posted at or after `since`. */
+  rowBefore(chatIds: number[], since: number): number {
+    let first = Number.POSITIVE_INFINITY;
+    for (const chatId of chatIds) {
+      const r = numOrNull(this.get('SELECT MIN(rowid) AS r FROM messages WHERE chat_id = ? AND date >= ?', chatId, since)?.r);
+      if (r !== null) first = Math.min(first, r);
+    }
+    return Number.isFinite(first) ? first - 1 : this.lastMessageRow();
+  }
+
+  /** Messages of these chats stored after position `after`, in storage order. */
+  messagesAfterRow(after: number, chatIds: number[], limit: number): (StoredMessage & { row: number })[] {
+    if (chatIds.length === 0) return [];
+    return (this.db
+      .prepare(`SELECT rowid AS row, * FROM messages WHERE rowid > ? AND chat_id IN (${chatIds.map(() => '?').join(',')}) ORDER BY rowid LIMIT ?`)
+      .all(after, ...chatIds, limit) as Row[]).map((r) => ({ ...this.toMessage(r), row: num(r.row) }));
+  }
+
+  /** The newest `limit` messages of these chats stored after position `after`, in storage order. */
+  newestAfterRow(after: number, chatIds: number[], limit: number): (StoredMessage & { row: number })[] {
+    if (chatIds.length === 0) return [];
+    return (this.db
+      .prepare(`SELECT rowid AS row, * FROM messages WHERE rowid > ? AND chat_id IN (${chatIds.map(() => '?').join(',')}) ORDER BY rowid DESC LIMIT ?`)
+      .all(after, ...chatIds, limit) as Row[])
+      .map((r) => ({ ...this.toMessage(r), row: num(r.row) }))
+      .reverse();
+  }
+
+  /** How many messages of each of these chats were stored after position `after`. */
+  countAfterRow(after: number, chatIds: number[]): Map<number, number> {
+    const out = new Map<number, number>();
+    if (chatIds.length === 0) return out;
+    for (const r of this.db.prepare(`SELECT chat_id, COUNT(*) AS n FROM messages WHERE rowid > ? AND chat_id IN (${chatIds.map(() => '?').join(',')}) GROUP BY chat_id`).all(after, ...chatIds) as Row[]) {
+      out.set(num(r.chat_id), num(r.n));
+    }
+    return out;
+  }
+
+  messagesByIds(chatId: number, ids: number[]): StoredMessage[] {
+    if (ids.length === 0) return [];
+    return (this.db.prepare(`SELECT * FROM messages WHERE chat_id = ? AND message_id IN (${ids.map(() => '?').join(',')}) ORDER BY date, message_id`).all(chatId, ...ids) as Row[]).map((r) => this.toMessage(r));
+  }
+
+  /** Up to `n` messages of a chat right before or right after one message, oldest first. */
+  messagesNear(chatId: number, at: { date: number; messageId: number }, n: number, side: 'before' | 'after'): StoredMessage[] {
+    if (n <= 0) return [];
+    const rows =
+      side === 'before'
+        ? this.all('SELECT * FROM messages WHERE chat_id = ? AND date <= ? AND NOT (date = ? AND message_id >= ?) ORDER BY date DESC, message_id DESC LIMIT ?', chatId, at.date, at.date, at.messageId, n).reverse()
+        : this.all('SELECT * FROM messages WHERE chat_id = ? AND date >= ? AND NOT (date = ? AND message_id <= ?) ORDER BY date, message_id LIMIT ?', chatId, at.date, at.date, at.messageId, n);
+    return rows.map((r) => this.toMessage(r));
+  }
+
+  /** Replies to these messages (they come after what they answer, so from `since` on), oldest first. */
+  repliesTo(chatId: number, ids: number[], since: number, limit: number): StoredMessage[] {
+    if (ids.length === 0) return [];
+    return (this.db
+      .prepare(`SELECT * FROM messages WHERE chat_id = ? AND date >= ? AND reply_to IN (${ids.map(() => '?').join(',')}) ORDER BY date, message_id LIMIT ?`)
+      .all(chatId, since, ...ids, limit) as Row[]).map((r) => this.toMessage(r));
+  }
+
+  /** Messages of a chat in a window that contain any of the phrases (Latin letters in any case), newest first. */
+  searchMessages(chatId: number, from: number, to: number, phrases: string[], limit: number): StoredMessage[] {
+    if (phrases.length === 0) return [];
+    return (this.db
+      .prepare(`SELECT * FROM messages WHERE chat_id = ? AND date >= ? AND date < ? AND (${phrases.map(() => 'instr(lower(text), lower(?)) > 0').join(' OR ')}) ORDER BY date DESC, message_id DESC LIMIT ?`)
+      .all(chatId, from, to, ...phrases, limit) as Row[]).map((r) => this.toMessage(r));
   }
 
   /** How many messages a chat has in a period, and the oldest one's date (how much of the period is covered). */
@@ -1185,8 +1273,8 @@ export class Store {
     };
   }
 
-  /** The newest `limit` rows (oldest first), or the rows after `afterId`. */
-  activity(opts: { afterId?: number; limit?: number; kind?: ActivityKind } = {}): ActivityRow[] {
+  /** The newest `limit` rows after `afterId` (oldest first); with `next`, the first `limit` rows after it instead (to page through). */
+  activity(opts: { afterId?: number; limit?: number; kind?: ActivityKind; actor?: string; next?: boolean } = {}): ActivityRow[] {
     const limit = Math.min(Math.max(opts.limit ?? 200, 1), 2000);
     const where = ['id > ?'];
     const params: Param[] = [opts.afterId ?? 0];
@@ -1194,8 +1282,45 @@ export class Store {
       where.push('kind = ?');
       params.push(opts.kind);
     }
+    if (opts.actor) {
+      where.push('actor = ?');
+      params.push(opts.actor);
+    }
+    if (opts.next) return this.all(`SELECT * FROM activity WHERE ${where.join(' AND ')} ORDER BY id LIMIT ?`, ...params, limit).map((r) => this.toActivity(r));
     const rows = this.all(`SELECT * FROM activity WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`, ...params, limit);
     return rows.map((r) => this.toActivity(r)).reverse();
+  }
+
+  /** The service's own newest row: what Claude's MCP server writes (it runs while the service may not) does not count. */
+  lastServiceActivity(): ActivityRow | null {
+    const r = this.get("SELECT * FROM activity WHERE actor != 'claude' ORDER BY id DESC LIMIT 1");
+    return r ? this.toActivity(r) : null;
+  }
+
+  lastActivityId(): number {
+    return num(this.get('SELECT MAX(id) AS id FROM activity')?.id ?? 0);
+  }
+
+  /** The id just before the first row recorded at or after `at`. */
+  activityIdBefore(at: number): number {
+    const first = numOrNull(this.get('SELECT MIN(id) AS id FROM activity WHERE at >= ?', at)?.id);
+    return first === null ? this.lastActivityId() : first - 1;
+  }
+
+  /**
+   * What needs someone's attention, after row `afterId`, oldest first (or the newest `limit`, newest
+   * first): the news radar's alerts, the account's standing changing in a group, the service having
+   * been off, internal errors, and what Claude flagged. Connection blips and feed hiccups are not
+   * here: they mend themselves.
+   */
+  attention(afterId: number, limit: number, newestFirst = false): ActivityRow[] {
+    return this.all(`SELECT * FROM activity WHERE id > ? AND ${ATTENTION} ORDER BY id ${newestFirst ? 'DESC' : ''} LIMIT ?`, afterId, Math.min(Math.max(limit, 1), 500)).map((r) =>
+      this.toActivity(r),
+    );
+  }
+
+  lastAttentionId(): number {
+    return num(this.get(`SELECT MAX(id) AS id FROM activity WHERE ${ATTENTION}`)?.id ?? 0);
   }
 
   /** How many requests of each kind since `since`, and the last write. */
@@ -1205,6 +1330,17 @@ export class Store {
     const w = this.get("SELECT * FROM activity WHERE kind = 'write' ORDER BY id DESC LIMIT 1");
     const errors = num(this.get('SELECT COUNT(*) AS n FROM activity WHERE at > ? AND ok = 0', since)?.n ?? 0);
     return { counts, lastWrite: w ? this.toActivity(w) : null, errors };
+  }
+
+  /** How many times each event happened since `since`, newest first by its last time (reads and upkeep left out). */
+  activityTally(since: number): { actor: string; method: string; ok: boolean; n: number; lastAt: number; lastTarget: string; lastDetail: string }[] {
+    return this.all(
+      `SELECT actor, method, ok, COUNT(*) AS n, MAX(id) AS last FROM activity WHERE at > ? AND kind NOT IN ('read', 'system') GROUP BY actor, method, ok ORDER BY last DESC`,
+      since,
+    ).map((r) => {
+      const last = this.get('SELECT at, target, detail FROM activity WHERE id = ?', num(r.last));
+      return { actor: str(r.actor), method: str(r.method), ok: num(r.ok) === 1, n: num(r.n), lastAt: num(last?.at ?? 0), lastTarget: str(last?.target), lastDetail: str(last?.detail) };
+    });
   }
 
   pruneActivity(before: number): number {
@@ -1305,6 +1441,8 @@ export class Store {
     this.transaction(() => {
       if (what.messages) {
         deleted.messages = this.run('DELETE FROM messages').changes;
+        // Storage positions start over: readers' places from before (agent-views) are reset.
+        this.setKv('messages_epoch', String(Number(this.getKv('messages_epoch') ?? 0) + 1));
         deleted.people = this.run('DELETE FROM users').changes;
         // The news radar's record of what it saw and flagged goes too; feeds are read afresh.
         deleted.news = this.run('DELETE FROM news_items').changes;

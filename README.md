@@ -12,6 +12,7 @@ Follow the Telegram groups that matter to you, including big public groups you d
 - **Denoiser.** Stickers, one-word chatter, bot commands, repeats and scams are removed before anything is read.
 - **Live console** at `127.0.0.1:4830`. Each group is a nebula; the reader is a crawler whose two hands are a keyword detector and a denoiser. Live instruments below, and every request the account sends.
 - **Digests by Claude.** Claude Desktop writes them through MCP, no API key needed. With an API key and a bot, the service writes and sends them itself, and the digest's playbook improves itself from blind tests and your votes.
+- **Built for agents.** The MCP server gives Claude (or any MCP client) 24 tools: health in one call, everything new since its last look, search across groups, messages with their thread, alerts, past digests, and a way to flag something for you. It also has prompts for the daily jobs and resources a client can subscribe to. What Claude reads and changes shows in the console as Claude's.
 - **Local.** Messages are kept in a local SQLite file for 7 days.
 
 ## Quick start

@@ -403,6 +403,7 @@ table.news-src { min-width: 860px; margin-top: 6px; }
 .feed .kind.warn { color: var(--yellow); }
 .feed .kind.bad { color: var(--pink); }
 .feed .kind.llm { color: var(--yellow); }
+.feed .kind.agent { color: var(--teal); }
 .feed .what { min-width: 0; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .feed .what b { color: var(--ink); font-weight: 600; }
 .feed .what .meta { font-size: inherit; }
@@ -446,6 +447,8 @@ table.news-src { min-width: 860px; margin-top: 6px; }
 .md-li2 { padding-left: 3.2em; }
 .md-mark { display: inline-block; min-width: 1.2em; text-indent: 0; color: var(--pink); }
 .md-gap { height: 6px; }
+.md a { color: var(--cyan); text-decoration: none; }
+.md a:hover, .md a:focus-visible { text-decoration: underline; }
 
 /* ── storage ───────────────────────────────────────────────────────────────── */
 

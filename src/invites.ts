@@ -84,9 +84,20 @@ export interface MembershipView {
   openLink: string | null;
 }
 
+/** Who asked for a source to be read: the owner, or Claude through its tools (and the app it runs in). */
+export interface Requester {
+  actor: string;
+  /** " · via Claude Desktop", or empty. */
+  via: string;
+}
+
+const BY_OWNER: Requester = { actor: 'owner', via: '' };
+
 interface PostJoinOptions {
   /** False: the chat-list check already made it a source (or listed it switched off): leave that alone. */
   makeSource?: boolean;
+  /** Who asked (recorded with the switch it makes). */
+  by?: Requester;
   /** The account's participant entry, when it was just read (no second read). */
   participant?: SelfState;
 }
@@ -197,7 +208,7 @@ export class InviteTracker {
   }
 
   /** A look at an invite link: who it leads to, and what to know before joining. Never joins. */
-  async preview(target: string, lane: 'owner' | 'mcp'): Promise<PreviewResult> {
+  async preview(target: string, lane: 'owner' | 'mcp', via = ''): Promise<PreviewResult> {
     const hash = inviteHash(target);
     if (!hash) return { error: 'Not an invite link (t.me/+…, t.me/joinchat/… or tg://join?invite=…).' };
     const { store } = this.d;
@@ -250,7 +261,7 @@ export class InviteTracker {
     } else {
       row = store.addInvite({ hash, origin: lane === 'mcp' ? 'mcp' : 'console', state, verdict: facts.verdict, ...patch });
     }
-    this.event(lane === 'mcp' ? 'claude' : 'console', 'invite previewed', row.title || 'an invite', `${facts.verdict} · invite ${hash.slice(0, 4)}… (looked at, not joined)`);
+    this.event(lane === 'mcp' ? 'claude' : 'console', 'invite previewed', row.title || 'an invite', `${facts.verdict} · invite ${hash.slice(0, 4)}… (looked at, not joined)${lane === 'mcp' ? via : ''}`);
     return this.result(row, target, lane, details);
   }
 
@@ -333,13 +344,13 @@ export class InviteTracker {
   }
 
   /** Reading straight away a group the account is already in, by the invite link that was checked. */
-  async watchMember(hash: string): Promise<{ ok: boolean; message: string; chatId?: number }> {
+  async watchMember(hash: string, by: Requester = BY_OWNER): Promise<{ ok: boolean; message: string; chatId?: number }> {
     const row = this.d.store.inviteByHash(hash);
     if (!row || row.verdict !== 'member' || row.chatId === null) {
       return { ok: false, message: 'Check this invite link first: a link can be read straight away only when the account is already in the group.' };
     }
     const entity = this.entityOf(row);
-    const done = await this.postJoin(row.id, { chatId: row.chatId, peer: row.peer, entity });
+    const done = await this.postJoin(row.id, { chatId: row.chatId, peer: row.peer, entity }, { by });
     return done ? { ok: true, message: `Reading ${row.title} from now on.`, chatId: row.chatId } : { ok: false, message: this.d.store.getInvite(row.id)?.note || 'Could not start reading it.' };
   }
 
@@ -510,7 +521,7 @@ export class InviteTracker {
     }
     const gone = self.state === 'removed' || self.state === 'banned' || self.state === 'banned-until';
     let reading = false;
-    if (!gone && opts.makeSource !== false) reading = this.makeSource(inviteId, chat, title);
+    if (!gone && opts.makeSource !== false) reading = this.makeSource(inviteId, chat, title, opts.by);
     else reading = this.isReading(chat.chatId);
     if (reading && historyFrom && store.getChat(chat.chatId)?.readerCursor === null) {
       // History before the join is hidden: start right after what this account can see.
@@ -559,7 +570,7 @@ export class InviteTracker {
   }
 
   /** Switches the chat on as a source (it may already be one, listed switched off). */
-  private makeSource(inviteId: number | null, chat: { chatId: number; peer: string | null; entity: MtEntity }, title: string): boolean {
+  private makeSource(inviteId: number | null, chat: { chatId: number; peer: string | null; entity: MtEntity }, title: string, by: Requester = BY_OWNER): boolean {
     const { store, config } = this.d;
     const note = (text: string) => inviteId !== null && store.updateInvite(inviteId, { note: text });
     if (config.reportTo === null) {
@@ -578,11 +589,11 @@ export class InviteTracker {
     const row = store.getChat(info.chatId);
     if (row && (row.kind === 'group' || row.kind === 'report')) return false; // the bot's own chats
     if (row?.kind === 'watched') {
-      if (!row.enabled) this.event('owner', 'switched on', row.title, 'joined through its invite link: reading it');
+      if (!row.enabled) this.event(by.actor, 'switched on', row.title, `joined through its invite link: reading it${by.via}`);
       store.updateChat(info.chatId, { enabled: true, readerError: null, ...(info.peer ? { readerPeer: info.peer } : {}) });
     } else {
       store.watchChat(info, config.reportTo, null, this.d.defaults);
-      this.event('reader', 'new chat', info.title, `joined through its invite link: reading it (from ${this.d.store.getChat(info.chatId)?.readerCursor ? 'where it stopped' : 'up to 24 hours back'})`);
+      this.event(by.actor === 'claude' ? 'claude' : 'reader', by.actor === 'claude' ? 'watch' : 'new chat', info.title, `joined through its invite link: reading it (from ${this.d.store.getChat(info.chatId)?.readerCursor ? 'where it stopped' : 'up to 24 hours back'})${by.via}`);
     }
     if (!store.getChat(info.chatId)?.readerOrigin) store.updateChat(info.chatId, { readerOrigin: 'dialog' });
     store.setKv(`reader_off_reason:${info.chatId}`, '');

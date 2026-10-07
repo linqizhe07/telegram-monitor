@@ -1,3 +1,4 @@
+import { dirname, join } from 'node:path';
 import { Activity } from './activity.ts';
 import { PulseBot } from './bot.ts';
 import { loadConfig } from './config.ts';
@@ -90,8 +91,9 @@ async function main(): Promise<void> {
   // The news radar: first-tier news, turned into keywords of the day and matched against every
   // group message as it is stored. It needs no Telegram request of its own.
   const news = new NewsRadar({ store, config, now, log, activity, notifier, live: true });
-  // The last thing recorded before this start: read before connecting, which records requests itself.
-  const [lastSeen] = store.activity({ limit: 1 });
+  // The last thing this service recorded before this start (read before connecting, which records
+  // requests itself). Claude's MCP server writes rows while the service is off: those do not count.
+  const lastSeen = store.lastServiceActivity();
   const connection: ReaderConnection | null = config.telegramApiId
     ? await connectReader(config, log, { activity, titleOf: (id) => store.getChat(id)?.title ?? null }).catch((err) => {
         log(`reader: could not connect: ${(err as Error).message}`);
@@ -197,7 +199,8 @@ async function main(): Promise<void> {
       reader,
       bot: me?.username ? { username: me.username } : null,
       claude: { ready: claudeReady, model: config.model },
-      handoffFile: './data/console.json',
+      // Next to the database, where the MCP server looks for it (data/console.json).
+      handoffFile: join(dirname(config.dbPath), 'console.json'),
       invites,
       notifier,
       news,
@@ -251,6 +254,8 @@ async function main(): Promise<void> {
   });
   process.on('SIGINT', () => void stop('SIGINT'));
   process.on('SIGTERM', () => void stop('SIGTERM'));
+  // Closing its terminal tab: stop cleanly too, so the session lock is released.
+  process.on('SIGHUP', () => void stop('SIGHUP'));
 
   if (!telegram || !bot) {
     await new Promise<void>((resolve) => abort.signal.addEventListener('abort', () => resolve()));

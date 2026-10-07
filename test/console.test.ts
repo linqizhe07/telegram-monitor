@@ -213,11 +213,11 @@ test('two tokens: the page can do everything; local tools (Claude) only the acti
     assert.notEqual(pageToken, toolToken);
     assert.ok(!page.body.includes(toolToken), 'the page never carries the tool token');
     const post = (path: string, token: string, body = '{}') => call(port, path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-console-token': token }, body });
-    for (const path of ['/api/invite/confirm', '/api/invite/recheck', '/api/invite/dismiss', '/api/membership/check', '/api/digest', '/api/settings', '/api/clear', '/api/unwatch', '/api/notify-test', '/api/news/feed', '/api/news/toggle', '/api/news/remove', '/api/news/refresh']) {
+    for (const path of ['/api/invite/confirm', '/api/invite/recheck', '/api/invite/dismiss', '/api/membership/check', '/api/digest', '/api/settings', '/api/clear', '/api/unwatch', '/api/notify-test', '/api/news/feed', '/api/news/toggle', '/api/news/remove']) {
       assert.equal((await post(path, toolToken)).status, 403, `${path}: not for local tools`);
       assert.notEqual((await post(path, pageToken)).status, 403, `${path}: the page may`);
     }
-    for (const path of ['/api/probe', '/api/watch', '/api/pull', '/api/audit', '/api/toggle', '/api/refresh']) {
+    for (const path of ['/api/probe', '/api/watch', '/api/pull', '/api/audit', '/api/toggle', '/api/refresh', '/api/flag', '/api/news/refresh']) {
       assert.notEqual((await post(path, toolToken, '{"target":"@x","chatId":1}')).status, 403, `${path}: what Claude's tools call`);
     }
     const state = JSON.parse((await call(port, '/api/state')).body);
