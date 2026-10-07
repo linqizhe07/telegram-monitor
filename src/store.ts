@@ -506,6 +506,9 @@ const ATTENTION = `(
   OR (actor = 'terms' AND method = 'term burst')
 )`;
 
+/** A source's own reading state in the kv table, as `<key>:<chatId>` (deleted with it). */
+const SOURCE_KEYS = ['reader_off_reason', 'reader_floor', 'reader_cursor_date', 'reader_caught_up', 'reenable_at', 'reenable_tries', 'probe'];
+
 const num = (v: unknown): number => Number(v);
 const numOrNull = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
 const str = (v: unknown): string => (v === null || v === undefined ? '' : String(v));
@@ -709,6 +712,22 @@ export class Store {
     this.upsertChat({ chatId: c.chatId, title: c.title, username: c.username, type: c.type }, defaults);
     this.updateChat(c.chatId, { kind: 'watched', reportChatId, threadId, readerRef: c.ref, enabled: true, readerError: null, ...(c.peer ? { readerPeer: c.peer } : {}) });
     return this.getChat(c.chatId)!;
+  }
+
+  /**
+   * Takes a source off the list for good (the account is no longer in it): its row, the messages and
+   * names kept for it, and its reading state. Digests already written, its playbook, opt-outs and the
+   * invite and membership history stay. If the account joins it again, it comes back as a new chat.
+   */
+  removeSource(chatId: number): boolean {
+    if (this.getChat(chatId)?.kind !== 'watched') return false;
+    this.transaction(() => {
+      this.run('DELETE FROM messages WHERE chat_id = ?', chatId);
+      this.run('DELETE FROM users WHERE chat_id = ?', chatId);
+      for (const key of SOURCE_KEYS) this.run('DELETE FROM kv WHERE key = ?', `${key}:${chatId}`);
+      this.run('DELETE FROM chats WHERE chat_id = ?', chatId);
+    });
+    return true;
   }
 
   /** Watched chats whose digests go to `reportChatId`, in the order they were added (that is what #1, #2… refer to). */

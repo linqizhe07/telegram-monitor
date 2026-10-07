@@ -117,10 +117,15 @@ test("the owner's switch sticks: checking the list again never turns back on wha
   assert.equal(env.store.getChat(idOf(3333))!.enabled, false);
 });
 
-test('leaving stops reading; joining again starts it; a cut-short list proves nothing', async () => {
+test('leaving takes the source off, with its messages; joining again brings it back; a cut-short list proves nothing', async () => {
   const env = setup();
+  env.account.history.set(7777, [msg(1, T0 - 600, 'whale alert')]);
   env.account.dialogs = [ch(3333, 'Alpha VIP'), ch(7777, 'Whales')];
   await env.reader.reconcile();
+  await new Promise((r) => setTimeout(r, 20)); // the first pulls
+  assert.equal(env.store.messages(idOf(7777), 0, T0 * 2).length, 1);
+  env.store.saveDigest({ chatId: idOf(7777), kind: 'production', windowStart: T0 - 86_400, windowEnd: T0, genomeVersion: 0, digest: {} as never, metrics: null });
+  env.store.setMembership(idOf(7777), { state: 'member', joinedAt: T0 - 7200, checkedAt: T0 - 7200 });
 
   // The list comes back cut short (more dialogs than returned): Whales is missing but may just be beyond the cut.
   env.account.dialogs = [ch(3333, 'Alpha VIP')];
@@ -128,23 +133,51 @@ test('leaving stops reading; joining again starts it; a cut-short list proves no
   await env.reader.reconcile();
   assert.equal(env.store.getChat(idOf(7777))!.enabled, true);
 
-  // A complete list without Whales: the account left it.
+  // A complete list without Whales: the account left it, so the source goes.
   env.account.total = null;
   const r = await env.reader.reconcile();
   assert.deepEqual(r.left.map((c) => c.title), ['Whales']);
-  const whales = env.store.getChat(idOf(7777))!;
-  assert.equal(whales.enabled, false);
-  assert.match(whales.readerError!, /no longer in this chat/);
-  assert.equal(env.store.getKv(`reader_off_reason:${idOf(7777)}`), 'left');
+  assert.ok(r.left[0].readerPeer, 'its address goes along, for the membership check that follows');
+  assert.equal(env.store.getChat(idOf(7777)), null, 'taken off Sources');
+  assert.deepEqual(env.store.messages(idOf(7777), 0, T0 * 2), [], 'with the messages kept for it');
+  assert.equal(env.store.getKv(`reader_cursor_date:${idOf(7777)}`), null, 'and its reading state');
+  assert.match(env.events.find((e) => e.method === 'left chat')!.detail, /taken off Sources/);
+  assert.equal(env.store.recentDigests(10).filter((d) => d.chatId === idOf(7777)).length, 1, 'digests already written stay');
+  assert.ok(env.store.membership(idOf(7777)), 'so does the membership record');
+  assert.ok(env.store.getChat(idOf(3333)), 'the rest stay');
 
-  // Back in it (and renamed meanwhile): reading again, from up to 24 hours back.
+  // Back in it (and renamed meanwhile): a new chat again, read from up to 24 hours back.
   env.account.dialogs = [ch(3333, 'Alpha VIP'), ch(7777, 'Whale Brothers')];
+  const again = await env.reader.reconcile();
+  assert.deepEqual(again.added.map((c) => c.title), ['Whale Brothers']);
+  assert.equal(env.store.getChat(idOf(7777))!.enabled, true);
+});
+
+test('every source the account is no longer in goes, whatever its switch; one still in the list never does', async () => {
+  const env = setup();
+  env.account.dialogs = [ch(3333, 'Alpha VIP'), ch(7777, 'Whales'), ch(8888, 'Muted one')];
   await env.reader.reconcile();
-  const back = env.store.getChat(idOf(7777))!;
-  assert.equal(back.enabled, true);
-  assert.equal(back.title, 'Whale Brothers');
-  assert.ok(Number(env.store.getKv(`reader_floor:${idOf(7777)}`)) > 0);
-  assert.ok(env.events.some((e) => e.method === 'rejoined'));
+  env.store.updateChat(idOf(8888), { enabled: false });
+  env.store.setKv(`reader_off_reason:${idOf(8888)}`, 'owner');
+  // Switched off by an earlier version when the account left it (read by name, so not from the chat list).
+  env.store.watchChat({ chatId: idOf(5555), title: 'Gone earlier', username: 'gone_earlier', type: 'supergroup', ref: '@gone_earlier' }, 42, null, DEFAULTS);
+  env.store.updateChat(idOf(5555), { enabled: false, readerOrigin: 'manual', readerError: 'no longer a member (left or removed): reading stopped' });
+  env.store.setKv(`reader_off_reason:${idOf(5555)}`, 'left');
+  // A source the account is still in, though Telegram now restricts it for every client (it cannot be listed as one).
+  env.store.watchChat({ chatId: idOf(6666), title: 'Restricted now', username: null, type: 'supergroup', ref: String(idOf(6666)) }, 42, null, DEFAULTS);
+  env.store.updateChat(idOf(6666), { readerOrigin: 'dialog' });
+  // Read by name from outside: not being in it is normal.
+  env.store.watchChat({ chatId: idOf(4444), title: 'Public', username: 'publicgroup', type: 'supergroup', ref: '@publicgroup' }, 42, null, DEFAULTS);
+  env.store.updateChat(idOf(4444), { readerOrigin: 'manual' });
+
+  env.account.dialogs = [ch(3333, 'Alpha VIP'), ch(6666, 'Restricted now', { restrictionReason: [{ platform: 'all', reason: 'porn', text: 'Blocked' }] })];
+  const r = await env.reader.reconcile();
+  assert.deepEqual(r.left.map((c) => c.title).sort(), ['Muted one', 'Whales']);
+  assert.deepEqual(
+    env.store.listChats(false).map((c) => c.title).sort(),
+    ['Alpha VIP', 'Public', 'Restricted now'],
+  );
+  assert.ok(env.events.some((e) => e.method === 'source removed' && e.target === 'Gone earlier'), 'switched off before because the account had left: it goes too');
 });
 
 test('a source added by name is not stopped when it is missing from the chat list (read from outside)', async () => {
@@ -218,7 +251,7 @@ test('a membership notice loads the chat list only when it can mean a join, a le
   env.reader.membershipNotice({ chatId: idOf(3333), entity: { ...vip, left: true } });
   await wait();
   assert.equal(loads(), before + 2, 'a source the notice shows it left: checked');
-  assert.equal(env.store.getChat(idOf(3333))!.enabled, false);
+  assert.equal(env.store.getChat(idOf(3333)), null, 'and taken off Sources');
 
   env.account.dialogs = [vip, ch(5555, 'Fresh')];
   env.reader.membershipNotice({ chatId: idOf(3333), entity: vip });

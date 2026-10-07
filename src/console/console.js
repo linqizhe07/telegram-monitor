@@ -1499,6 +1499,67 @@ $('clear-btn').addEventListener('click', async () => {
   }
 });
 
+// ── folding: each module folds away under its heading, remembered on this computer ─
+
+const FOLDED = 'console-folded';
+const CHEVRON = 'M6 8l4 4 4-4';
+
+function foldedIds() {
+  try {
+    const v = JSON.parse(localStorage.getItem(FOLDED) || '[]');
+    return new Set(Array.isArray(v) ? v : []);
+  } catch {
+    return new Set(); // a remembered fold is only a convenience
+  }
+}
+
+function setFolded(section, on) {
+  section.classList.toggle('folded', on);
+  const b = section.querySelector('.fold');
+  if (b) {
+    b.setAttribute('aria-expanded', String(!on));
+    b.title = on ? 'Show this section' : 'Fold this section away';
+  }
+  const ids = foldedIds();
+  if (on) ids.add(section.id);
+  else ids.delete(section.id);
+  try {
+    localStorage.setItem(FOLDED, JSON.stringify([...ids]));
+  } catch {
+    // a private window or blocked storage: it folds, it is just not remembered
+  }
+}
+
+/** A fold button for every module: on each panel's heading, and at the head of the live view's stats line. */
+function makeFoldable() {
+  const remembered = foldedIds();
+  for (const section of document.querySelectorAll('#crawler, main > .panel, main > .split > .panel')) {
+    const button = el('button', { type: 'button', class: 'fold', 'aria-expanded': 'true', 'aria-controls': section.id, title: 'Fold this section away' }, svgIcon(CHEVRON, 'chev'));
+    if (section.id === 'crawler') {
+      button.classList.add('hud-fold');
+      button.append(el('span', { class: 'idx', text: '01' }), 'Live');
+      section.querySelector('.hud-top').prepend(button);
+    } else {
+      const h2 = section.querySelector('.panel-head h2');
+      button.append(...h2.childNodes);
+      h2.append(button);
+    }
+    button.addEventListener('click', () => setFolded(section, !section.classList.contains('folded')));
+    if (remembered.has(section.id)) setFolded(section, true);
+  }
+  // Going to a folded module (the header's links, or the address) opens it first.
+  const open = (hash) => {
+    const s = hash && hash.length > 1 ? document.getElementById(hash.slice(1)) : null;
+    if (s?.classList.contains('folded')) setFolded(s, false);
+  };
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('a[href^="#"]');
+    if (a) open(a.getAttribute('href'));
+  });
+  addEventListener('hashchange', () => open(location.hash));
+  open(location.hash);
+}
+
 // ── refresh loop and live stream ───────────────────────────────────────────
 
 // While the page is hidden nothing is fetched or drawn; it catches up the moment it is shown again.
@@ -1605,6 +1666,7 @@ function followSections() {
 }
 
 (async () => {
+  makeFoldable();
   followSections();
   await refresh(true);
   const initial = await api('/api/activity?limit=400').catch(() => []);

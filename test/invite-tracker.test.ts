@@ -254,7 +254,7 @@ test('after a restart: pending requests keep their schedule; chats held for a ch
   assert.equal(env.store.membership(CHAT_ID)!.state, 'member', 'free to send: the check is over');
 });
 
-test('removed: one read says why, reading stops, one notification; a rejoin switches it back on', async () => {
+test('removed: one read says why, the source goes, one notification; the membership record stays', async () => {
   const env = setup();
   env.store.watchChat({ chatId: CHAT_ID, title: 'Alpha VIP', username: null, type: 'supergroup', ref: String(CHAT_ID), peer: JSON.stringify({ type: 'channel', id: '1234', accessHash: '987' }) }, 42, null, DEFAULTS);
   env.store.updateChat(CHAT_ID, { readerOrigin: 'dialog' });
@@ -263,10 +263,8 @@ test('removed: one read says why, reading stops, one notification; a rejoin swit
   await env.tracker.onAccessLost(CHAT_ID, new ReaderError('x', 0, 'CHANNEL_PRIVATE'));
   await env.tracker.onAccessLost(CHAT_ID, new ReaderError('x', 0, 'CHANNEL_PRIVATE'));
   assert.deepEqual(env.calls, ['channels.GetChannels'], 'at most one look per 10 minutes');
-  const row = env.store.getChat(CHAT_ID)!;
-  assert.equal(row.enabled, false);
-  assert.match(row.readerError!, /removed from it until .*: reading stopped/);
-  assert.equal(env.store.getKv(`reader_off_reason:${CHAT_ID}`), 'left', 'the chat-list check switches it back on after a rejoin');
+  assert.equal(env.store.getChat(CHAT_ID), null, 'taken off Sources (a rejoin brings it back as a new chat)');
+  assert.match(env.store.membership(CHAT_ID)!.detail, /removed from it until .*: taken off Sources/);
   assert.equal(env.store.membership(CHAT_ID)!.state, 'banned-until');
   assert.deepEqual(env.notices.map((n) => n.kind), ['removed']);
 });
