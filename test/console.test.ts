@@ -213,7 +213,7 @@ test('two tokens: the page can do everything; local tools (Claude) only the acti
     assert.notEqual(pageToken, toolToken);
     assert.ok(!page.body.includes(toolToken), 'the page never carries the tool token');
     const post = (path: string, token: string, body = '{}') => call(port, path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-console-token': token }, body });
-    for (const path of ['/api/invite/confirm', '/api/invite/recheck', '/api/invite/dismiss', '/api/membership/check', '/api/digest', '/api/settings', '/api/clear', '/api/unwatch', '/api/notify-test', '/api/news/feed', '/api/news/toggle', '/api/news/remove', '/api/discover/dismiss', '/api/join', '/api/verify/press', '/api/verify/answer', '/api/verify/photo']) {
+    for (const path of ['/api/invite/confirm', '/api/invite/recheck', '/api/invite/dismiss', '/api/membership/check', '/api/digest', '/api/settings', '/api/clear', '/api/unwatch', '/api/notify-test', '/api/news/feed', '/api/news/toggle', '/api/news/remove', '/api/discover/dismiss', '/api/join', '/api/verify/press', '/api/verify/answer', '/api/verify/photo', '/api/digest/delete']) {
       assert.equal((await post(path, toolToken)).status, 403, `${path}: not for local tools`);
       assert.notEqual((await post(path, pageToken)).status, 403, `${path}: the page may`);
     }
@@ -256,6 +256,92 @@ test('clearing digests removes the files in every group folder, and the empty fo
     assert.match(r.message, /2 digest files/);
     assert.equal(existsSync(join(dataDir, 'digests', '币安官方中文群')), false, 'the empty group folder is gone');
     assert.equal(existsSync(join(dataDir, 'digests', 'notes.txt')), true, 'only digests are deleted');
+  } finally {
+    await server.stop();
+  }
+});
+
+test('deleting one digest takes its row and its file, and nothing else', async (t) => {
+  const { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { escapeHtml } = await import('../src/render.ts');
+  const dataDir = mkdtempSync(join(tmpdir(), 'pulse-delete-'));
+  const clock = new Clock();
+  const store = memoryStore(clock);
+  const activity = new Activity(store);
+  const config = testConfig({ reportTo: 700000001, dbPath: join(dataDir, 'pulse.db') });
+  const defaults = { language: 'auto' as const, digestHour: 9, timezone: 'UTC', rsiMode: 'auto' as const };
+  store.watchChat({ chatId: -1001, title: 'A <&> B', username: 'ab', type: 'supergroup', ref: '@ab' }, 700000001, null, defaults);
+  store.watchChat({ chatId: -1002, title: 'Quiet', username: 'q', type: 'supergroup', ref: '@q' }, 700000001, null, defaults);
+  // As save_digest keeps them: a row with the heading in bold, and a file whose first line is "# heading".
+  const save = (title: string, chatId: number, head: string, markdown: string, file: string) => {
+    const id = store.addOutbox(700000001, `<b>${escapeHtml(head)}</b>\n\n${escapeHtml(markdown)}`, false, chatId);
+    mkdirSync(join(dataDir, 'digests', title), { recursive: true });
+    writeFileSync(join(dataDir, 'digests', title, file), `# ${head}\n\n${markdown}\n`);
+    clock.t += 60;
+    return id;
+  };
+  const one = save('A  B', -1001, 'A <&> B · 10/6 09:00 → 10/7 09:00 (UTC) · written by Claude', '## Topics\n- one <b>not html</b> #12', '2026-10-07 0900.md');
+  const two = save('A  B', -1001, 'A <&> B · 10/7 09:00 → 10/8 09:00 (UTC) · written by Claude', '## Topics\n- two', '2026-10-08 0900.md');
+  const quiet = save('Quiet', -1002, 'Quiet · 10/7 09:00 → 10/8 09:00 (UTC) · written by Claude', 'nothing much', '2026-10-08 0900.md');
+  // The owner edited this file: it is still found by its first line.
+  writeFileSync(join(dataDir, 'digests', 'Quiet', '2026-10-08 0900.md'), '# Quiet · 10/7 09:00 → 10/8 09:00 (UTC) · written by Claude\r\n\nmy own notes\r\n');
+  // The same digest saved twice: its file stays until the last row with that heading goes.
+  const twinA = save('Quiet', -1002, 'Quiet · 10/8 09:00 → 10/9 09:00 (UTC) · written by Claude', 'twice', '2026-10-09 0900.md');
+  const twinB = store.addOutbox(700000001, store.outboxRow(twinA)!.html, false, -1002);
+  // A digest the service wrote and kept here in two parts: it goes whole, with its record.
+  const partA = store.addOutbox(700000001, '<b>Daily digest</b>\n\npart one', false);
+  const partB = store.addOutbox(700000001, 'part two', false);
+  const record = store.saveDigest({ chatId: -1002, kind: 'production', windowStart: clock.now() - 86_400, windowEnd: clock.now(), genomeVersion: 0, digest: {} as never, metrics: null });
+  store.setPosted(record, [-partA, -partB]);
+  const sent = store.addOutbox(700000001, 'pong', true);
+
+  const server = new ConsoleServer({ store, activity, config, port: 0, now: clock.now, log: () => undefined, startedAt: clock.now(), account: null, reader: null, bot: null, claude: { ready: false, model: config.model } });
+  try {
+    await server.start();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EPERM') return t.skip('this sandbox does not allow listening on a local port');
+    throw err;
+  }
+  const port = Number(new URL(server.url).port);
+  try {
+    const token = /name="console-token" content="([^"]+)"/.exec((await call(port, '/')).body)![1];
+    const del = async (id: number) => JSON.parse((await call(port, '/api/digest/delete', { method: 'POST', headers: { 'content-type': 'application/json', 'x-console-token': token }, body: JSON.stringify({ id }) })).body);
+    const left = () => store.outbox(100).map((r) => r.id).sort((a, b) => a - b);
+    const files = (title: string) => (existsSync(join(dataDir, 'digests', title)) ? readdirSync(join(dataDir, 'digests', title)).sort() : null);
+
+    let r = await del(one);
+    assert.equal(r.ok, true);
+    assert.equal(r.message, 'Deleted the digest «A <&> B · 10/6 09:00 → 10/7 09:00 (UTC) · written by Claude», with its file in data/digests.');
+    assert.deepEqual(files('A  B'), ['2026-10-08 0900.md'], "only that digest's file");
+    assert.ok(!left().includes(one) && left().includes(two));
+    assert.equal((await del(one)).message, 'Already deleted.');
+
+    await del(two);
+    assert.equal(files('A  B'), null, 'the empty group folder goes too');
+
+    r = await del(quiet);
+    assert.match(r.message, /with its file/, 'an edited file is found by its heading line');
+    assert.deepEqual(files('Quiet'), ['2026-10-09 0900.md']);
+
+    r = await del(twinA);
+    assert.doesNotMatch(r.message, /file/, 'the twin still has that file');
+    assert.deepEqual(files('Quiet'), ['2026-10-09 0900.md']);
+    r = await del(twinB);
+    assert.match(r.message, /with its file/);
+    assert.equal(files('Quiet'), null);
+
+    r = await del(partB);
+    assert.match(r.message, /with 2 parts/);
+    assert.ok(!left().includes(partA), 'the whole digest goes');
+    assert.equal(store.digest(record), null, 'and its record');
+
+    r = await del(sent);
+    assert.equal(r.message, 'Deleted the message «pong». The copy in Telegram stays.');
+    assert.deepEqual(left(), []);
+    assert.deepEqual(store.activity().filter((a) => a.method.endsWith(' deleted')).map((a) => [a.actor, a.method, a.target]).slice(-2), [['console', 'digest deleted', 'Quiet'], ['console', 'message deleted', 'Other messages']]);
+    assert.equal((await del(0)).ok, false);
   } finally {
     await server.stop();
   }

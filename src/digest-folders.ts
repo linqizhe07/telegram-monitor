@@ -41,6 +41,19 @@ export function splitHeading(html: string): { heading: string; body: string } {
   return { heading: plain.length > 80 ? `${plain.slice(0, 79)}…` : plain, body: html };
 }
 
+/**
+ * The first line of the Markdown file save_digest wrote for a digest Claude saved ("# <heading>"),
+ * or null for anything else (what the service sent or kept has no file). The heading names the
+ * group and the window to the minute, as the file's name does, so it finds the file even after
+ * the owner edited the text in it.
+ */
+export function digestFileHeading(html: string): string | null {
+  const m = /^<b>([^\n]*)<\/b>\n/.exec(html);
+  if (!m) return null;
+  const head = m[1].replace(/&(amp|lt|gt);/g, (e) => ENTITIES[e]);
+  return /· written by Claude$/.test(head) ? `# ${head}` : null;
+}
+
 export function digestFolders(rows: OutboxRow[], digests: DigestRow[], chats: ChatRow[]): DigestFolder[] {
   // A digest the service posted with no bot is kept as outbox row N and recorded as message -N.
   const postedFor = new Map<number, number>();

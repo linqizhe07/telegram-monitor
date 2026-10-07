@@ -1283,6 +1283,31 @@ function renderMarkdown(escaped, base = null) {
   return box;
 }
 
+const TRASH = 'M3.5 5.5h13M8 5.5v-2h4v2M5.5 5.5l.8 10.2a1 1 0 0 0 1 .8h5.4a1 1 0 0 0 1-.8l.8-10.2M8.5 8.5v5M11.5 8.5v5';
+
+/** The owner's delete button on one digest (or message): asks once, then deletes it for good. */
+async function deleteDigest(button, item, folder) {
+  const what = folder.key === 'other' ? 'message' : 'digest';
+  const where = [
+    'It goes from this page and from the digests Claude reads back before writing the next one',
+    item.format === 'markdown' ? ', and its file in data/digests/ is deleted' : '',
+    '.',
+    item.delivered ? ' The copy already sent to Telegram stays there.' : '',
+  ].join('');
+  if (!confirm(`Delete this ${what} for good?\n\n${folder.title}\n${item.heading || fmtDateTime(item.at)}\n\n${where} This cannot be undone.`)) return;
+  button.disabled = true;
+  try {
+    const r = await api('/api/digest/delete', { id: item.id });
+    toast(r.message);
+    await refresh();
+    loadStorage();
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function renderOutbox(s) {
   setText($('out-hint'), s.bot ? 'What the service sent to Telegram, one folder per group' : 'Kept here and in data/digests/, one folder per group');
   const folders = s.digestFolders || [];
@@ -1319,7 +1344,9 @@ function renderOutbox(s) {
             closedItems.add(key);
           }
         });
-        return el('li', {}, d);
+        const del = el('button', { type: 'button', class: 'icon-btn digest-del', title: f.key === 'other' ? 'Delete this message' : 'Delete this digest', 'aria-label': `Delete «${item.heading || fmtDateTime(item.at)}»` }, svgIcon(TRASH));
+        del.addEventListener('click', () => deleteDigest(del, item, f));
+        return el('li', { class: 'digest-row' }, d, del);
       })));
     folder.addEventListener('toggle', () => (folder.open ? openFolders.add(f.key) : openFolders.delete(f.key)));
     return el('li', {}, folder);
@@ -1560,7 +1587,7 @@ async function loadStorage() {
   const s = storageNow;
   setText($('storage-now'),
     `${n(s.messages)} messages from ${n(s.sources)} sources · ${n(s.people)} names · ${n(s.activity)} activity rows · ` +
-    `${n(s.digests)} digests${s.digestFiles ? ` (+${n(s.digestFiles)} files)` : ''} · ${(s.bytes / 1048576).toFixed(1)} MB on disk · ` +
+    `${n(s.outbox)} digests & outgoing messages${s.digestFiles ? ` (+${n(s.digestFiles)} files)` : ''} · ${(s.bytes / 1048576).toFixed(1)} MB on disk · ` +
     `messages older than ${s.retentionDays} days are deleted automatically`);
 }
 
@@ -1573,7 +1600,7 @@ $('clear-btn').addEventListener('click', async () => {
   const list = [
     what.messages ? `${n(s.messages)} messages and ${n(s.people)} names` : null,
     what.activity ? `${n(s.activity)} activity rows` : null,
-    what.digests ? `${n(s.digests)} digests and their files` : null,
+    what.digests ? `${n(s.outbox)} digests & outgoing messages, and their files` : null,
   ].filter(Boolean);
   if (!confirm(`Delete permanently: ${list.join(', ')}?\n\nThis cannot be undone. Sources, switches and reading positions are kept, so nothing is downloaded again.`)) return;
   b.disabled = true;

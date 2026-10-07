@@ -15,7 +15,7 @@ import type { Activity } from '../activity.ts';
 import { clientLabel } from '../agent-views.ts';
 import type { Config } from '../config.ts';
 import { denoise, formatSignal } from '../denoise.ts';
-import { digestFolders } from '../digest-folders.ts';
+import { digestFileHeading, digestFolders } from '../digest-folders.ts';
 import type { Discovery } from '../discover.ts';
 import type { OwnerActions } from '../owner-actions.ts';
 import { inviteHash } from '../invite-rules.ts';
@@ -327,6 +327,8 @@ export class ConsoleServer {
           return this.json(res, 200, this.settings(body));
         case '/api/clear':
           return this.json(res, 200, this.clear(body));
+        case '/api/digest/delete':
+          return this.json(res, 200, this.deleteDigest(Number(body.id)));
         case '/api/news/feed':
           return this.json(res, 200, this.deps.news ? await withTimeout(this.deps.news.addFeed(String(body.url ?? ''), String(body.name ?? '')), 30_000, 'reading the feed').catch((err) => ({ ok: false, message: (err as Error).message })) : { ok: false, message: 'The news radar is off.' });
         case '/api/news/toggle':
@@ -760,6 +762,42 @@ export class ConsoleServer {
     // The one trace that remains: that a clear happened (not what was in it).
     activity.event('console', 'cleared storage', 'owner', summary);
     return { ok: true, message: `Cleared: ${summary}. Sources, switches and reading positions are kept, so nothing is downloaded again.` };
+  }
+
+  /**
+   * The owner's delete button on one digest or message in "Digests & outgoing messages": the row
+   * and, for a digest Claude saved, its Markdown file under data/digests (found by its heading
+   * line; kept while another row still has that heading). What was sent stays in Telegram. Only
+   * the console offers it; Claude's tools cannot.
+   */
+  private deleteDigest(id: number): { ok: boolean; message: string } {
+    const { store, config, activity } = this.deps;
+    if (!Number.isInteger(id) || id <= 0) return { ok: false, message: 'Which one? No digest given.' };
+    const row = store.outboxRow(id);
+    if (!row) return { ok: false, message: 'Already deleted.' };
+    const [folder] = digestFolders([row], store.recentDigests(500), store.listChats(false));
+    const what = folder.key === 'other' ? 'message' : 'digest';
+    const heading = folder.items[0].heading;
+    const fileHead = digestFileHeading(row.html);
+    const dir = join(dirname(config.dbPath), 'digests');
+    let files = 0;
+    if (fileHead && !store.outbox(100_000).some((r) => r.id !== id && digestFileHeading(r.html) === fileHead)) {
+      for (const f of digestFiles(dir)) {
+        const text = readFileSync(f, 'utf8');
+        const nl = text.indexOf('\n');
+        if ((nl === -1 ? text : text.slice(0, nl)).replace(/\r$/, '') !== fileHead) continue;
+        rmSync(f, { force: true });
+        files++;
+        // Its group folder, once empty.
+        const parent = dirname(f);
+        if (parent !== dir && readdirSync(parent).length === 0) rmSync(parent, { recursive: true });
+      }
+    }
+    const gone = store.deleteOutbox(id);
+    const extra = [gone.outbox.length > 1 ? `${gone.outbox.length} parts` : '', files ? `${files === 1 ? 'its file' : `${files} files`} in data/digests` : ''].filter(Boolean).join(' and ');
+    activity.event('console', `${what} deleted`, folder.title, `${heading}${extra ? ` · with ${extra}` : ''}`);
+    const sent = row.delivered ? ' The copy in Telegram stays.' : '';
+    return { ok: true, message: `Deleted the ${what} «${heading}»${extra ? `, with ${extra}` : ''}.${sent}` };
   }
 
   /**
