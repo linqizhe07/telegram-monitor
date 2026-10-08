@@ -92,6 +92,7 @@ const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(
 const ASSETS: Record<string, { file: URL; type: string }> = {
   '/console.js': { file: new URL('./console.js', import.meta.url), type: 'text/javascript; charset=utf-8' },
   '/console.css': { file: new URL('./console.css', import.meta.url), type: 'text/css; charset=utf-8' },
+  '/starmap.js': { file: new URL('./starmap.js', import.meta.url), type: 'text/javascript; charset=utf-8' },
   '/crawler.js': { file: new URL('./crawler.js', import.meta.url), type: 'text/javascript; charset=utf-8' },
   '/pad.js': { file: new URL('./pad.js', import.meta.url), type: 'text/javascript; charset=utf-8' },
 };

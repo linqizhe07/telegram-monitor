@@ -73,6 +73,12 @@
   const ctx = canvas.getContext('2d', { alpha: false });
   const view = { w: 0, h: 0, dpr: 1, s: 1 };
   const cam = { x: 0, y: 0, z: 1, tx: 0, ty: 0, tz: 1 };
+  /**
+   * The room the map has (starmap.js): `k` scales the nebulae, `g` the world (1: the stage), `zoom`
+   * is the default view's. The stage is the world while the groups fit on it.
+   */
+  let room = { k: 1, g: 1, zoom: 1, fill: 0 };
+  const StarMap = window.StarMap;
   /** Gas colours for the nebulae (each group keeps its own), the news, and the group being read. */
   const HUES = ['92,200,236', '112,128,255', '170,112,255', '79,209,176', '90,160,255'];
   const NEWS_RGB = '92,200,236';
@@ -103,13 +109,14 @@
 
   /** A group's messages: its last 24 hours, or that day's when another day is shown. */
   const countOf = (c) => (mapDay && c.kind === 'group' ? dayCount.get(c.chatId) ?? 0 : c.count);
-  function radiusOf(c) {
+  /** A nebula's own size on this stage; the map scales it by `room.k` (starmap.js). */
+  function ownRadius(c) {
     const base = c.kind === 'news' ? 118 : Math.min(148, 44 + 1.15 * Math.sqrt(countOf(c)));
     return base * view.s;
   }
   function pointsOf(c) {
     const raw = c.kind === 'news' ? 520 + c.count * 7 : 260 + countOf(c) * 0.32;
-    return Math.round(Math.min(2800, raw) * Math.max(0.35, Math.min(1, view.s)));
+    return Math.round(Math.min(2800, raw) * Math.max(0.35, Math.min(1, view.s * room.k)));
   }
 
   function makeCloud(c) {
@@ -239,92 +246,28 @@
   const labelled = (c) => !compact() || c.key === activeKey || c.kind === 'news';
 
   /**
-   * Where each nebula goes: groups whose topics overlap that day pull together (the more, the
-   * closer), every nebula pushes the others away, the news holds the middle. It starts from where
-   * they are, so a new day moves them; it never shuffles them.
+   * Where each nebula goes (starmap.js): on a ring around the news, as in the first view, the groups
+   * that share topics that day side by side and as close as they share, each one otherwise kept
+   * where it was. Laid out again only when something it depends on changed.
    */
+  let laidFor = '';
   function layout() {
     const groups = order.map((k) => clouds.get(k)).filter(Boolean);
     const news = clouds.get('news');
-    const all = [...groups, news].filter(Boolean);
-    if (!all.length) return;
-    const span = Math.max(240, Math.min(view.w, view.h * 1.7) * 0.4);
-    groups.forEach((c, i) => {
-      if (c.laid) return;
-      const a = -Math.PI * 0.86 + (i / Math.max(1, groups.length)) * Math.PI * 2;
-      c.tx = Math.cos(a) * span;
-      c.ty = Math.sin(a) * span * 0.62;
-      c.laid = true;
-    });
-    if (news) {
-      news.tx = 0;
-      news.ty = 0;
-    }
-    const springs = [];
-    for (const r of routes) {
-      const A = clouds.get(`g:${r.a}`);
-      const B = clouds.get(`g:${r.b}`);
-      if (A && B) springs.push([A, B, r.overlap]);
-    }
-    const linked = new Set(springs.flatMap(([A, B]) => [A, B]));
-    // Laid out in a round space, then stretched to the stage's shape.
-    const SX = 1.25;
-    const SY = 0.78;
-    const pos = new Map(all.map((c) => [c, { x: c.tx / SX, y: c.ty / SY }]));
-    for (let it = 0; it < 360; it++) {
-      const cool = 1 - it / 420;
-      const force = new Map(all.map((c) => [c, { x: 0, y: 0 }]));
-      for (let i = 0; i < all.length; i++) {
-        for (let j = i + 1; j < all.length; j++) {
-          const A = all[i];
-          const B = all[j];
-          const pa = pos.get(A);
-          const pb = pos.get(B);
-          const dx = pb.x - pa.x;
-          const dy = pb.y - pa.y;
-          const d = Math.hypot(dx, dy) || 0.01;
-          const ux = dx / d;
-          const uy = dy / d;
-          let push = (span * span * 0.01) / d;
-          const want = (A.r + B.r) * 1.06;
-          if (d < want) push += (want - d) * 0.6;
-          force.get(A).x -= ux * push;
-          force.get(A).y -= uy * push;
-          force.get(B).x += ux * push;
-          force.get(B).y += uy * push;
-        }
-      }
-      for (const [A, B, w] of springs) {
-        const pa = pos.get(A);
-        const pb = pos.get(B);
-        const dx = pb.x - pa.x;
-        const dy = pb.y - pa.y;
-        const d = Math.hypot(dx, dy) || 0.01;
-        const rest = (A.r + B.r) * (1.2 - Math.min(0.7, w * 4));
-        const pull = (d - rest) * (0.03 + Math.min(0.12, w * 0.6));
-        force.get(A).x += (dx / d) * pull;
-        force.get(A).y += (dy / d) * pull;
-        force.get(B).x -= (dx / d) * pull;
-        force.get(B).y -= (dy / d) * pull;
-      }
-      for (const c of groups) {
-        const p = pos.get(c);
-        const f = force.get(c);
-        // Toward the middle: weakly for a group with no route that day (it drifts to the edge).
-        const g = linked.has(c) ? 0.012 : 0.005;
-        f.x -= p.x * g;
-        f.y -= p.y * g;
-        const m = Math.hypot(f.x, f.y);
-        const max = 40 * cool;
-        const k = m > max ? max / m : 1;
-        p.x += f.x * k;
-        p.y += f.y * k;
-      }
-    }
-    for (const c of groups) {
-      const p = pos.get(c);
-      c.tx = p.x * SX;
-      c.ty = p.y * SY;
+    const edges = routes.map((r) => ({ a: `g:${r.a}`, b: `g:${r.b}`, overlap: r.overlap }));
+    const sets = galaxies.map((g) => g.members.map((id) => `g:${id}`));
+    const sig = JSON.stringify([view.w, view.h, room.g, groups.map((c) => [c.key, Math.round(c.r)]), news ? Math.round(news.r) : 0, edges, sets]);
+    if (sig === laidFor) return;
+    laidFor = sig;
+    const nodes = groups.map((c) => ({ id: c.key, r: c.r, arc: c.arc }));
+    if (news) nodes.push({ id: news.key, r: news.r, center: true });
+    const at = StarMap.layout({ w: view.w, h: view.h, g: room.g, nodes, edges, galaxies: sets });
+    for (const c of [...groups, news].filter(Boolean)) {
+      const p = at.get(c.key);
+      if (!p) continue;
+      c.tx = p.x;
+      c.ty = p.y;
+      if (c.kind === 'group') c.arc = p.arc;
       if (!c.placed) {
         c.x = c.tx;
         c.y = c.ty;
@@ -334,23 +277,8 @@
     placeLabels();
   }
 
-  /** The view that holds every nebula, below the title in the top-left corner. */
-  function fitView() {
-    let x0 = Infinity;
-    let y0 = Infinity;
-    let x1 = -Infinity;
-    let y1 = -Infinity;
-    for (const c of clouds.values()) {
-      x0 = Math.min(x0, c.tx - c.r * 1.3);
-      x1 = Math.max(x1, c.tx + c.r * 1.3);
-      y0 = Math.min(y0, c.ty - c.r * 1.15);
-      y1 = Math.max(y1, c.ty + c.r * 1.15);
-    }
-    if (!Number.isFinite(x0)) return { x: 0, y: 0, z: 1 };
-    const top = view.w < 700 ? 70 : 92;
-    const z = Math.min(1.25, Math.max(0.25, Math.min(view.w / (x1 - x0 + 40), (view.h - top - 36) / (y1 - y0 + 30))));
-    return { x: (x0 + x1) / 2, y: (y0 + y1) / 2 - (top - 36) / (2 * z), z };
-  }
+  /** The default view (starmap.js): the whole map, leaning toward the group being read; or around that group, when the map is bigger than the stage shows. */
+  const homeView = (active) => StarMap.home(view.w, view.h, room, active ? { x: active.x, y: active.y } : null);
 
   /** A galaxy's disc: around its groups' nebulae (null when fewer than two are on the stage). */
   function galaxyRing(g) {
@@ -430,26 +358,54 @@
     renderDays();
   }
 
-  /** Each label above-right of its nebula, or in the first other spot no other label takes (sized at the fitted zoom). */
+  /** A label's size on the screen: its title in the font drawText uses, or its second line if wider. */
+  function labelSize(c) {
+    ctx.font = `${c.key === activeKey ? 600 : 500} ${c.key === activeKey || c.kind === 'news' ? 14 : 12.5}px ${MONO}`;
+    const title = ctx.measureText(cut(c.title, 26)).width;
+    ctx.font = `10.5px ${MONO}`;
+    const sub = ctx.measureText(mapDay && c.kind === 'group' ? `${n(countOf(c))} on 00/00` : String(c.sub || '')).width;
+    return { w: Math.max(title, sub) + 8, h: c.kind === 'news' && !compact() ? 72 : 30 };
+  }
+
+  /**
+   * Each label above-right of its nebula, or in the first other spot that is free and on the stage
+   * at the default view: clear of the other labels and of what the stage shows over the map (the
+   * title, the day bar, the legend, the zoom).
+   */
   function placeLabels() {
-    const fz = Math.max(0.3, fitView().z);
+    const a = clouds.get(activeKey);
+    const at = StarMap.home(view.w, view.h, room, a ? { x: a.tx, y: a.ty } : null);
+    const z = at.z;
     const boxes = [];
+    // Where the stage is, on the map, at the default view; what lies over it is in the way there.
+    const frame = { x: at.x - view.w / 2 / z, y: at.y - view.h / 2 / z };
+    const s = stage.getBoundingClientRect();
+    for (const e of stage.querySelectorAll('.stage-title, .stage-days, .stage-legend, .stage-zoom')) {
+      const b = e.getBoundingClientRect();
+      if (b.width && b.height) boxes.push({ x: frame.x + (b.left - s.left - 6) / z, y: frame.y + (b.top - s.top - 4) / z, w: (b.width + 12) / z, h: (b.height + 8) / z });
+    }
     const hit = (b) => boxes.some((o) => b.x < o.x + o.w && o.x < b.x + b.w && b.y < o.y + o.h && o.y < b.y + b.h);
-    for (const c of [...clouds.values()].filter(labelled).sort((a, b) => (a.kind === 'news' ? -1 : b.kind === 'news' ? 1 : a.ty - b.ty))) {
-      const w = Math.min(230, 9 * Math.max(Array.from(c.title).length, 14)) / fz;
-      const h = (c.kind === 'news' && !compact() ? 72 : 30) / fz;
-      const spots = [[c.r * 0.28, -c.r * 0.92 - 22 / fz], [c.r * 0.28, c.r * 0.7], [-w - c.r * 0.2, -c.r * 0.6], [c.r * 0.6, -c.r * 0.2], [-w - c.r * 0.2, c.r * 0.5], [-w / 2, c.r * 0.85]];
-      const pick = spots.find(([dx, dy]) => !hit({ x: c.tx + dx, y: c.ty + dy, w, h })) || spots[0];
+    const inside = (b) => b.x >= frame.x + 6 / z && b.x + b.w <= frame.x + (view.w - 6) / z && b.y >= frame.y + 4 / z && b.y + b.h <= frame.y + (view.h - 4) / z;
+    for (const c of [...clouds.values()].filter(labelled).sort((p, q) => (p.kind === 'news' ? -1 : q.kind === 'news' ? 1 : p.key === activeKey ? -1 : q.key === activeKey ? 1 : p.ty - q.ty))) {
+      const size = labelSize(c);
+      const w = size.w / z;
+      const h = size.h / z;
+      const spots = [[c.r * 0.28, -c.r * 0.92 - 22 / z], [c.r * 0.28, c.r * 0.7], [-w - c.r * 0.2, -c.r * 0.6], [c.r * 0.6, -c.r * 0.2], [-w - c.r * 0.2, c.r * 0.5], [-w / 2, c.r * 0.85], [-w / 2, -c.r * 0.95 - h]];
+      const box = ([dx, dy]) => ({ x: c.tx + dx, y: c.ty + dy, w, h });
+      // Nowhere free: the spot that stays on the stage.
+      const pick = spots.find((p) => !hit(box(p)) && inside(box(p))) || spots.find((p) => inside(box(p))) || spots[0];
       c.lx = pick[0];
-      c.ly = pick[1] + 14 / fz;
-      boxes.push({ x: c.tx + pick[0], y: c.ty + pick[1], w, h });
+      c.ly = pick[1] + 14 / z;
+      boxes.push(box(pick));
     }
   }
 
-  /** Sizes, points and sprites, again only for nebulae whose size changed. */
+  /** The room the map has; then sizes, points and sprites (again only for nebulae whose size changed); then where they go. */
   function rebuildClouds(force) {
+    const news = clouds.get('news');
+    room = StarMap.balance(view.w, view.h, [...clouds.values()].filter((c) => c.kind === 'group').map(ownRadius), news ? ownRadius(news) : 0);
     for (const c of clouds.values()) {
-      const r = radiusOf(c);
+      const r = ownRadius(c) * room.k;
       const pts = pointsOf(c);
       if (!force && c.sprite && Math.abs(r - c.r) < c.r * 0.06 && Math.abs(pts - c.n) < c.n * 0.12) continue;
       c.r = r;
@@ -588,8 +544,8 @@
     if (crawler.placed && Math.hypot(to.x - crawler.x, to.y - crawler.y) > 160) warp = { x: crawler.x, y: crawler.y, at: performance.now() };
     lockAt = performance.now();
     activeKey = key;
-    if (compact()) placeLabels();
     showTitle();
+    placeLabels();
     renderTabs();
     wake();
   }
@@ -659,9 +615,9 @@
       cam.ty = user.y;
       cam.tz = user.z;
     } else {
-      const f = fitView();
-      cam.tx = f.x + (active ? (active.x - f.x) * 0.18 : 0) + (still ? 0 : Math.sin(time * 0.07) * 9);
-      cam.ty = f.y + (active ? (active.y - f.y) * 0.18 : 0) + (still ? 0 : Math.cos(time * 0.05) * 6);
+      const f = homeView(active);
+      cam.tx = f.x + (still ? 0 : Math.sin(time * 0.07) * 9);
+      cam.ty = f.y + (still ? 0 : Math.cos(time * 0.05) * 6);
       cam.tz = f.z;
     }
     const kc = still ? 1 : 1 - Math.exp(-dt * 1.4);
@@ -736,8 +692,11 @@
     ctx.globalAlpha = 1;
 
     // Nebulae: the sprite, its colour when it is the news or the group being read, and twinkles.
+    // Those the camera does not see (with their orbits) are not drawn.
+    const seen = { x0: cam.x - W / 2 / z, x1: cam.x + W / 2 / z, y0: cam.y - H / 2 / z, y1: cam.y + H / 2 / z };
+    const inView = (c) => c.x + c.r * 1.7 > seen.x0 && c.x - c.r * 1.7 < seen.x1 && c.y + c.r * 1.7 > seen.y0 && c.y - c.r * 1.7 < seen.y1;
     for (const c of clouds.values()) {
-      if (!c.sprite) continue;
+      if (!c.sprite || !inView(c)) continue;
       const s = c.sprite.size * (1 + (still ? 0 : c.glow * 0.012 * Math.sin(time * 1.3)));
       if (c.kind === 'group') drawOrbit(c, time, still, false);
       // The gas, turning slowly, in the group's own colour (pink while it is read).
@@ -903,7 +862,7 @@
     ctx.globalAlpha = 1;
 
     if (active && !still) {
-      const sz = Math.max(0.8, view.s) * 1.2;
+      const sz = crawlerSize() * crawlerScale();
       const speed = Math.hypot(crawler.vx, crawler.vy);
       if (speed > 14) {
         const back = crawler.heading + Math.PI;
@@ -914,6 +873,7 @@
       }
     }
     ctx.globalCompositeOperation = 'lighter';
+    const tz = crawlerScale();
     for (let i = trail.length - 1; i >= 0; i--) {
       const p = trail[i];
       const age = (t - p.born) / p.life;
@@ -925,7 +885,7 @@
       p.y += p.vy * dt;
       ctx.globalAlpha = 0.7 * (1 - age);
       ctx.fillStyle = age < 0.3 ? C.white : C.cyan;
-      const z = 2.2 * (1 - age) + 0.6;
+      const z = (2.2 * (1 - age) + 0.6) * tz;
       ctx.fillRect(p.x - z / 2, p.y - z / 2, z, z);
     }
     if (warp && !still) {
@@ -1088,9 +1048,15 @@
   function drawText(active) {
     const z = cam.z;
     ctx.textBaseline = 'alphabetic';
+    // A crowded map (more than 12 groups) names only its busiest groups and biggest galaxies at the
+    // default zoom, with the one being read and the one under the pointer; zoomed in, every one.
+    const crowded = order.length > 12 && z < room.zoom * 1.4;
+    const busy = (g) => g.members.reduce((t, id) => t + countOf(clouds.get(`g:${id}`) ?? { count: 0 }), 0);
+    const named = new Set(galaxies.slice().sort((a, b) => b.members.length - a.members.length || busy(b) - busy(a)).slice(0, crowded ? 6 : galaxies.length).map((g) => g.key));
     for (const g of galaxies) {
       const ring = galaxyRing(g);
       if (!ring || !g.topics.length) continue;
+      if (!named.has(g.key) && hover?.galaxy !== g.key && !(active && g.members.includes(active.chatId))) continue;
       const [sx, sy] = toScreen(ring.x, ring.y - ring.r * 0.72);
       const big = z < 0.8;
       ctx.font = `${big ? 600 : 500} ${big ? 12.5 : 10.5}px ${MONO}`;
@@ -1099,8 +1065,9 @@
       const label = `✦ ${g.topics.slice(0, 3).join(' · ')}`;
       ctx.fillText(label, sx - ctx.measureText(label).width / 2, sy - 6);
     }
-    const few = z < 0.6;
-    const biggest = new Set([...clouds.values()].filter((c) => c.kind === 'group').sort((a, b) => countOf(b) - countOf(a)).slice(0, 3).map((c) => c.key));
+    // Zoomed far out, only the three busiest groups are named.
+    const few = crowded || z < 0.6;
+    const biggest = new Set([...clouds.values()].filter((c) => c.kind === 'group').sort((a, b) => countOf(b) - countOf(a)).slice(0, crowded ? 10 : 3).map((c) => c.key));
     for (const c of clouds.values()) {
       if (!labelled(c)) continue;
       if (few && !(c.key === activeKey || c.kind === 'news' || hover?.chatId === c.chatId || biggest.has(c.key))) continue;
@@ -1126,7 +1093,8 @@
       const B = clouds.get(`g:${r.b}`);
       if (!A || !B || !r.topics.length) continue;
       const near = hover && (hover.route === r || hover.chatId === r.a || hover.chatId === r.b);
-      if (!(near || (active && (active.chatId === r.a || active.chatId === r.b)) || z >= 1.35 || strongest.includes(r))) continue;
+      // On a narrow stage, only the route under the pointer (or every one, zoomed in).
+      if (compact() ? !(near || z >= 1.35) : !(near || (active && (active.chatId === r.a || active.chatId === r.b)) || z >= 1.35 || strongest.includes(r))) continue;
       const [mx, my] = routeMid(r, A, B);
       const [sx, sy] = toScreen(0.25 * A.x + 0.5 * mx + 0.25 * B.x, 0.25 * A.y + 0.5 * my + 0.25 * B.y);
       const label = `${r.topics.slice(0, 3).join(' · ')}  ${Math.round(r.overlap * 100)}%`;
@@ -1221,10 +1189,18 @@
   /** A point along two straight segments (foot → knee → hip), 0 at the foot. */
   const alongLeg = (ex, ey, kx, ky, bx, by, q) => (q < 0.5 ? [ex + (kx - ex) * q * 2, ey + (ky - ey) * q * 2] : [kx + (bx - kx) * (q - 0.5) * 2, ky + (by - ky) * (q - 0.5) * 2]);
 
+  /**
+   * How much bigger than the map's scale the crawler is drawn: it stays between 0.85 and 1.25 of its
+   * own size on the screen at any zoom, so it is never lost on a map seen whole, nor huge up close.
+   */
+  const crawlerScale = () => Math.min(1.25, Math.max(0.85, cam.z)) / cam.z;
+  const crawlerSize = () => Math.max(0.8, view.s) * 1.2;
+
   function drawCrawler(t, time, cloud, still) {
     const cx = crawler.x;
     const cy = crawler.y;
-    const s = Math.max(0.8, view.s) * 1.2;
+    const cz = crawlerScale();
+    const s = crawlerSize() * cz;
     const feeding = !still && t < crawler.feedUntil;
     // Legs: each holds a point of the nebula and steps to a new one now and then (in still mode,
     // only when the crawler moves to another group). Jointed: hip, knee, foot; data runs up them
@@ -1261,13 +1237,13 @@
       const ky = (by + ey) / 2 + Math.sin(a + 1.2) * (12 + sway) * s;
       ctx.strokeStyle = C.cyan;
       ctx.globalAlpha = 0.78;
-      ctx.lineWidth = 1.3;
+      ctx.lineWidth = 1.3 * cz;
       ctx.beginPath();
       ctx.moveTo(bx, by);
       ctx.lineTo(kx, ky);
       ctx.stroke();
       ctx.globalAlpha = 0.55;
-      ctx.lineWidth = 0.8;
+      ctx.lineWidth = 0.8 * cz;
       ctx.beginPath();
       ctx.moveTo(kx, ky);
       ctx.lineTo(ex, ey);
@@ -1277,12 +1253,12 @@
       ctx.arc(kx, ky, 1.7 * s, 0, Math.PI * 2);
       ctx.stroke();
       ctx.fillStyle = C.white;
-      ctx.fillRect(ex - 1.4, ey - 1.4, 2.8, 2.8);
+      ctx.fillRect(ex - 1.4 * cz, ey - 1.4 * cz, 2.8 * cz, 2.8 * cz);
       if (!still && u < 1) {
         // A foot landing: a small ring.
         ctx.globalAlpha = 0.6 * (1 - u);
         ctx.beginPath();
-        ctx.arc(ex, ey, 2 + u * 8, 0, Math.PI * 2);
+        ctx.arc(ex, ey, (2 + u * 8) * cz, 0, Math.PI * 2);
         ctx.stroke();
       }
       if (feeding) {
@@ -1290,7 +1266,7 @@
         const [px, py] = alongLeg(ex, ey, kx, ky, bx, by, q);
         ctx.globalAlpha = 1;
         ctx.fillStyle = i % 3 === 0 ? C.pink : C.white;
-        ctx.fillRect(px - 1.3, py - 1.3, 2.6, 2.6);
+        ctx.fillRect(px - 1.3 * cz, py - 1.3 * cz, 2.6 * cz, 2.6 * cz);
       }
     });
     ctx.lineCap = 'butt';
@@ -1298,6 +1274,13 @@
 
     ctx.save();
     ctx.translate(cx, cy);
+    ctx.scale(cz, cz);
+    drawShell(crawlerSize(), time, still, feeding);
+    ctx.restore();
+  }
+
+  /** The crawler's body, at the origin, at size `s`. */
+  function drawShell(s, time, still, feeding) {
     // The glow, and the scanner: a cone of light ahead, sweeping.
     ctx.globalCompositeOperation = 'lighter';
     ctx.drawImage(glowSprite(), -80 * s, -80 * s, 160 * s, 160 * s);
@@ -1415,7 +1398,6 @@
     ctx.fillRect(-5 * s, -5 * s, 10 * s, 10 * s);
     ctx.fillStyle = C.white;
     ctx.fillRect(-1.5 * s, -1.5 * s, 3 * s, 3 * s);
-    ctx.restore();
   }
 
   let glow = null;
@@ -2106,10 +2088,12 @@
   const card = $('stage-card');
   let drag = null;
   const touches = new Map();
+  /** In as far as a nebula's points stay points (2.5×); out as far as the whole map, with a margin. */
+  const zoomLimit = (z) => Math.min(2.5, Math.max(Math.min(room.zoom, 1 / room.g) * 0.7, z));
   /** The owner's view, at once (dragging, zooming at the pointer). */
   function setUser(x, y, z) {
     user.on = true;
-    user.z = Math.min(4, Math.max(0.2, z));
+    user.z = zoomLimit(z);
     user.x = x;
     user.y = y;
     cam.x = cam.tx = user.x;
@@ -2122,15 +2106,15 @@
     user.on = true;
     user.x = x;
     user.y = y;
-    user.z = Math.min(4, Math.max(0.2, z));
+    user.z = zoomLimit(z);
     wake();
   }
   function zoomAt(sx, sy, k) {
     const [wx, wy] = toWorld(sx, sy);
-    const z = Math.min(4, Math.max(0.2, cam.z * k));
+    const z = zoomLimit(cam.z * k);
     setUser(wx - (sx - view.w / 2) / z, wy - (sy - view.h / 2) / z, z);
   }
-  /** Back to the view that holds everything (and follows the crawler). */
+  /** Back to the default view (it follows the crawler). */
   function fit() {
     user.on = false;
     wake();
@@ -2285,10 +2269,10 @@
     if (onControl(e)) return;
     const [sx, sy] = local(e);
     const hit = hitAt(sx, sy);
-    if (hit?.kind === 'cloud') return glideTo(hit.c.x, hit.c.y, Math.max(cam.z * 1.6, 1.6));
+    if (hit?.kind === 'cloud') return glideTo(hit.c.x, hit.c.y, Math.max(cam.z * 1.5, room.zoom * 1.6));
     if (hit?.kind === 'galaxy') {
       const ring = galaxyRing(hit.g);
-      if (ring) return glideTo(ring.x, ring.y, Math.min(4, Math.max(cam.z * 1.3, (view.h * 0.75) / (ring.r * 2 * 0.72))));
+      if (ring) return glideTo(ring.x, ring.y, Math.max(cam.z * 1.3, (view.h * 0.75) / (ring.r * 2 * 0.72)));
     }
     zoomAt(sx, sy, 1.8);
   });
