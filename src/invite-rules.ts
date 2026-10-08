@@ -4,7 +4,7 @@
 // address the account. InviteTracker (invites.ts) applies them; the MCP server reads the status
 // through formatInviteStatus without loading any Telegram code.
 
-import { chatIdOf, parseRef, peerOf, type MtEntity, type MtMessage } from './reader.ts';
+import { chatIdOf, parseRef, peerOf, type MtButton, type MtEntity, type MtMessage } from './reader.ts';
 import type { InviteRow, MembershipRow, Store } from './store.ts';
 import { localDate, localTime } from './transcript.ts';
 
@@ -68,10 +68,50 @@ export interface ChallengeHint {
   sender: { id: string; username: string | null; name: string; bot: boolean; viaBot: boolean };
   why: string[];
   text: string;
-  /** Labels only; a link shows its host. Nothing here is ever pressed or opened. */
+  /** Labels only; a link shows its host. */
   buttons: string[];
+  /**
+   * The same buttons, by row and column, and what the console may do with each, on the owner's
+   * click only: press it here (a plain callback button), open it in the Telegram app (a t.me link to
+   * a bot, a person or a chat), or nothing (pages inside Telegram, logins, phone or location
+   * requests, payments, links to sites: those are done in the app). Callback data never leaves the
+   * service: the console names a button by its place.
+   */
+  keys: ChallengeKey[];
   media: string | null;
+  /** A photo comes with it (often the check's picture): the console can show it. */
+  photo: boolean;
   suspicious: string | null;
+  /** What the owner did about it from the console, and when. */
+  done?: string;
+}
+
+export interface ChallengeKey {
+  row: number;
+  col: number;
+  label: string;
+  kind: 'press' | 'telegram' | 'app';
+  /** For 'telegram': a tg:// link that opens the bot (with its start parameter) or the chat in the app. */
+  open: string | null;
+  /** For a link to a site: its host, shown as text, never opened from here. */
+  host: string | null;
+}
+
+/** A t.me link to a bot, a person or a public chat, as a link the Telegram app opens; null for anything else. */
+export function telegramLink(url: string): string | null {
+  const m = /^(?:https?:\/\/)?(?:www\.)?(?:t|telegram)\.me\/([A-Za-z][A-Za-z0-9_]{3,31})\/?(?:\?start=([A-Za-z0-9_-]{1,64}))?$/i.exec(url.trim());
+  return m ? `tg://resolve?domain=${m[1]}${m[2] ? `&start=${m[2]}` : ''}` : null;
+}
+
+/** What the console may do with a bot's button (see ChallengeHint.keys). */
+export function keyOf(b: MtButton & { requiresPassword?: boolean }, row: number, col: number): ChallengeKey {
+  const label = (b.text ?? '').trim().slice(0, 80) || 'button';
+  if (b.className === 'KeyboardButtonCallback' && !b.requiresPassword) return { row, col, label, kind: 'press', open: null, host: null };
+  if (b.className === 'KeyboardButtonUrl' && b.url) {
+    const open = telegramLink(b.url);
+    return open ? { row, col, label, kind: 'telegram', open, host: null } : { row, col, label, kind: 'app', open: null, host: hostOf(b.url) };
+  }
+  return { row, col, label, kind: 'app', open: null, host: null };
 }
 
 // ── links ──────────────────────────────────────────────────────────────────
@@ -505,9 +545,10 @@ export function matchChallenge(m: MtMessage, self: { id: string; username: strin
   const name = (self.username ?? '').replace(/[^A-Za-z0-9_]/g, '');
   if (name && new RegExp(`@${name}(?![A-Za-z0-9_])`, 'i').test(m.message ?? '')) why.push('it names your @username');
   if (why.length === 0) return null;
+  const photo = m.media?.className === 'MessageMediaPhoto';
   const media = m.media
-    ? m.media.className === 'MessageMediaPhoto'
-      ? '[photo]: see it in your Telegram app'
+    ? photo
+      ? '[photo]'
       : m.media.className === 'MessageMediaDocument'
         ? '[video or file]: see it in your Telegram app'
         : m.media.className === 'MessageMediaWebPage'
@@ -528,7 +569,9 @@ export function matchChallenge(m: MtMessage, self: { id: string; username: strin
     why,
     text: (m.message ?? '').slice(0, 500),
     buttons: buttons.map((b) => (b.url ? `${b.text ?? ''} (link to ${hostOf(b.url)}, not opened here)` : (b.text ?? '')).trim()).filter(Boolean).slice(0, 12),
+    keys: (m.replyMarkup?.rows ?? []).flatMap((r, row) => (r.buttons ?? []).map((b, col) => keyOf(b, row, col))).slice(0, 24),
     media,
+    photo,
     suspicious: viaBot && !bot ? 'posted by a person through an inline bot, not by a group bot: not a real check' : null,
   };
 }

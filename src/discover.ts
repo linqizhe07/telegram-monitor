@@ -188,6 +188,13 @@ export class Discovery {
     return { running: this.current, latest, budget: this.budget(), available: this.d.client() !== null };
   }
 
+  /** Chats the latest searches judged likely scams (a join to one is refused). */
+  likelyScams(): Set<number> {
+    const out = new Set<number>();
+    for (const r of this.d.store.discoveries(20)) for (const a of (r.data as DiscoveryRun).results ?? []) if (a.verdict === 'scam') out.add(a.chatId);
+    return out;
+  }
+
   /** The owner does not want to see this one again. */
   dismiss(chatId: number): { ok: boolean; message: string } {
     const list = this.dismissed();
@@ -205,7 +212,7 @@ export class Discovery {
   }
 
   /** Starts a search (it runs on in the background); the answer says whether it started. */
-  start(topicId: string, query: string | null, by: Asker, kind = 'groups'): { ok: boolean; message: string; id?: number } {
+  start(topicId: string, query: string | null, by: Asker, kind = 'both'): { ok: boolean; message: string; id?: number } {
     if (!this.d.client()) return { ok: false, message: 'The reader account is not signed in.' };
     if (this.current) return { ok: false, message: `A search is already running (${this.current.label}: ${this.current.step}).`, id: this.current.id };
     const q = query?.trim() || null;

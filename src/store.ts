@@ -1384,14 +1384,45 @@ export class Store {
   }
 
   outbox(limit = 50): OutboxRow[] {
-    return this.all('SELECT * FROM outbox ORDER BY id DESC LIMIT ?', limit).map((r) => ({
+    return this.all('SELECT * FROM outbox ORDER BY id DESC LIMIT ?', limit).map((r) => this.toOutbox(r));
+  }
+
+  outboxRow(id: number): OutboxRow | null {
+    const r = this.get('SELECT * FROM outbox WHERE id = ?', id);
+    return r ? this.toOutbox(r) : null;
+  }
+
+  private toOutbox(r: Row): OutboxRow {
+    return {
       id: num(r.id),
       at: num(r.at),
       chatId: num(r.chat_id),
       html: str(r.html),
       delivered: Boolean(r.delivered),
       sourceChatId: numOrNull(r.source_chat_id),
-    }));
+    };
+  }
+
+  /**
+   * Deletes one kept or sent message for good (the owner's delete button). A digest the service
+   * wrote and kept here (recorded as messages -id) goes whole: every part kept, its record and its
+   * votes. A digest that was sent keeps its record, which is what members voted on.
+   */
+  deleteOutbox(id: number): { outbox: number[]; digests: number } {
+    return this.transaction(() => {
+      const parts = new Set([id]);
+      let digests = 0;
+      for (const r of this.all("SELECT id, posted_ids FROM digests WHERE posted_ids LIKE ?", `%-${id}%`)) {
+        const posted = JSON.parse(str(r.posted_ids)) as number[];
+        if (!posted.includes(-id)) continue;
+        for (const p of posted) if (p < 0) parts.add(-p);
+        this.run('DELETE FROM votes WHERE digest_id = ?', num(r.id));
+        this.run('UPDATE feedback SET digest_id = NULL WHERE digest_id = ?', num(r.id));
+        digests += this.run('DELETE FROM digests WHERE id = ?', num(r.id)).changes;
+      }
+      const outbox = [...parts].filter((p) => this.run('DELETE FROM outbox WHERE id = ?', p).changes > 0);
+      return { outbox, digests };
+    });
   }
 
   /** Recent digests of every chat, newest first (for the console). */

@@ -27,15 +27,23 @@ export function newClient(config: Config, session = ''): TelegramClient {
   });
 }
 
-/** Never retried by the door itself: a lookup Telegram rations like a username lookup (see invites.ts). */
-const NO_RETRY = new Set(['messages.CheckChatInvite']);
+/** Never retried by the door itself: a lookup Telegram rations like a username lookup (see invites.ts), and the owner's writes. */
+const NO_RETRY = new Set(['messages.CheckChatInvite', 'channels.JoinChannel', 'messages.ImportChatInvite', 'messages.GetBotCallbackAnswer', 'messages.SendMessage']);
+
+/** The writes the owner can make from the console, one click at a time: joining, and answering a group's check. */
+export type OwnerWrite = 'channels.JoinChannel' | 'messages.ImportChatInvite' | 'messages.GetBotCallbackAnswer' | 'messages.SendMessage';
+
+/** Lets exactly one write through: of this kind, matching this request, within a few seconds (the owner's click). */
+export type PermitWrite = (method: OwnerWrite, matches: (request: Record<string, unknown>) => boolean, ms?: number) => void;
 
 /**
  * The one door every request goes through: all GramJS helpers use `invoke`, file downloads use
  * `invokeWithSender`; only the connection handshake and keep-alive pings bypass it (they carry
  * nothing about any chat). At this door each request is
  *  - refused if it is a write (join, leave, send, press a button, vote, mark read, open a bot
- *    page, pay, or anything unknown): this build only reads, and that is enforced here, in code;
+ *    page, pay, or anything unknown), unless the owner just asked for exactly that one in the
+ *    console (`permit`: a join, or an answer to a group's check, one request per click). Nothing
+ *    else writes, and Claude cannot ask for a permit: that is enforced here, in code;
  *  - paced: an account-wide budget of about one request a second (Telegram's limits are not
  *    published; the last public figure was 30 history requests per 30 seconds);
  *  - held while Telegram has asked the account to wait (FLOOD_WAIT), for every chat at once;
@@ -46,8 +54,21 @@ export function superviseRequests(
   activity: Activity,
   titleOf: (chatId: number) => string | null,
   opts: { intervalMs?: number; burst?: number; readOnly?: boolean } = {},
-): { pausedUntil: () => number } {
+): { pausedUntil: () => number; permit: PermitWrite } {
   const interval = opts.intervalMs ?? 1100;
+  // The owner's clicks: each lets one matching write through, briefly.
+  const permits: { method: string; matches: (r: Record<string, unknown>) => boolean; until: number }[] = [];
+  const permit: PermitWrite = (method, matches, ms = 20_000) => {
+    permits.push({ method, matches, until: Date.now() + ms });
+  };
+  const takePermit = (className: string, req: Record<string, unknown>): boolean => {
+    const now = Date.now();
+    for (let i = permits.length - 1; i >= 0; i--) if (permits[i].until < now) permits.splice(i, 1);
+    const i = permits.findIndex((p) => p.method === className && p.matches(req));
+    if (i < 0) return false;
+    permits.splice(i, 1);
+    return true;
+  };
   let tokens = opts.burst ?? 5;
   let refilledAt = Date.now();
   let pausedUntil = 0;
@@ -81,7 +102,8 @@ export function superviseRequests(
       const req = request as unknown as Record<string, unknown>;
       const kind = classify(request.className, req as { increment?: boolean });
       const target = describeTarget(req, titleOf);
-      if (kind === 'write' && (opts.readOnly ?? true)) {
+      const owners = kind === 'write' && takePermit(request.className, req);
+      if (kind === 'write' && (opts.readOnly ?? true) && !owners) {
         activity.record({
           actor: 'reader',
           kind: 'error',
@@ -98,7 +120,7 @@ export function superviseRequests(
         const started = Date.now();
         try {
           const res = await call(request, ...rest);
-          if (kind !== 'system') activity.record({ actor: 'reader', kind, method: request.className, target, detail: describeCall(request.className, req, res), ms: Date.now() - started });
+          if (kind !== 'system') activity.record({ actor: owners ? 'owner' : 'reader', kind, method: request.className, target, detail: `${describeCall(request.className, req, res)}${owners ? `${describeCall(request.className, req, res) ? ' · ' : ''}the owner's click in the console` : ''}`, ms: Date.now() - started });
           return res;
         } catch (err) {
           const e = err as { errorMessage?: string; message?: string; seconds?: number };
@@ -120,7 +142,7 @@ export function superviseRequests(
   const c = client as unknown as Record<'invoke' | 'invokeWithSender', Call>;
   c.invoke = wrap(c.invoke.bind(client));
   c.invokeWithSender = wrap(c.invokeWithSender.bind(client));
-  return { pausedUntil: () => pausedUntil };
+  return { pausedUntil: () => pausedUntil, permit };
 }
 
 /** @deprecated name kept for scripts: same as superviseRequests. */
@@ -143,6 +165,8 @@ export interface ReaderConnection {
   state: () => { state: ConnectionState; since: number };
   /** Until when (ms epoch) Telegram has asked the account to wait; 0 = not waiting. */
   pausedUntil: () => number;
+  /** Lets one write the owner just asked for through the door (see superviseRequests). */
+  permitWrite: PermitWrite;
   /** Called when Telegram says the account joined, left or was removed from some chat (or a chat it is in changed). */
   onMembershipNotice: (l: (n: MembershipNotice) => void) => void;
   /** Called with the chat id when Telegram pushes a new message in a group or channel the account is in. */
@@ -380,6 +404,7 @@ export async function connectReader(
       lock.release();
     },
     pausedUntil: () => supervisor?.pausedUntil() ?? 0,
+    permitWrite: (method, matches, ms) => supervisor?.permit(method, matches, ms),
     onMembershipNotice: (l: (n: MembershipNotice) => void) => {
       membershipListeners.add(l);
     },

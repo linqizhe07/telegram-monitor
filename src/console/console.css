@@ -468,6 +468,12 @@ table.news-src { min-width: 860px; margin-top: 6px; }
 .digest-item { border: 1px solid var(--line); background: var(--panel); }
 .digest-item > summary { list-style: none; display: flex; align-items: center; gap: 10px; padding: 10px 12px; font-size: 12px; cursor: pointer; }
 .digest-item > summary::-webkit-details-marker { display: none; }
+.digest-row { position: relative; }
+.digest-row > .digest-item > summary { padding-right: 46px; }
+.digest-item > summary > .pill { flex: none; }
+.digest-del { position: absolute; top: 4px; right: 6px; width: 28px; height: 28px; border-color: transparent; color: var(--muted); }
+.digest-del:hover, .digest-del:focus-visible { color: var(--bad); border-color: var(--bad); }
+.digest-del:disabled { opacity: 0.4; cursor: default; }
 .digest-heading { font-family: var(--sans); font-weight: 500; overflow-wrap: anywhere; }
 .digest-at { margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
 .digest-item .body { max-width: 880px; padding: 8px 20px 20px; border-top: 1px solid var(--line); font: 14px/1.7 var(--sans); white-space: pre-wrap; overflow-wrap: anywhere; animation: unfold 0.22s var(--ease) both; }
@@ -525,6 +531,13 @@ details.inv-more summary { font-size: 11px; color: var(--muted); cursor: pointer
 .hints .text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .hints .suspicious { font-size: 11px; font-weight: 700; color: var(--pink); }
 .verify .always { margin: 0; padding-left: 18px; font-size: 11.5px; color: var(--muted); }
+.hints .keys { display: grid; gap: 6px; }
+.hints .key-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.hints .key-app { display: inline-flex; align-items: center; height: 28px; padding: 0 10px; border: 1px dashed var(--line-2); font: 11px var(--mono); color: var(--muted); }
+.hints .check-photo { display: block; max-width: min(360px, 100%); max-height: 240px; border: 1px solid var(--line-2); background: var(--sunk); }
+.hints .answer { display: flex; gap: 8px; flex-wrap: wrap; }
+.hints .answer input { flex: 1 1 200px; min-width: 0; height: 30px; padding: 0 10px; border: 1px solid var(--line-2); background: var(--sunk); font: 13px var(--sans); }
+.hints .done { font: 11px var(--mono); color: var(--teal); }
 
 /* ── toast ─────────────────────────────────────────────────────────────────── */
 

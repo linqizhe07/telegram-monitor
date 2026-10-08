@@ -14,6 +14,7 @@ import {
   perDayOf,
   portalPost,
   scammy,
+  substantive,
   TOPICS,
   typicalViews,
   type Found,
@@ -157,6 +158,21 @@ test('members nobody opens, subscribers who never see a post, a month of silence
   const hidden = Object.fromEntries(drops.map((m) => [m.messageId, 'Claim https://hyperliquid-claim.xyz/r']));
   assert.equal(assess(found({ title: 'HYPE rewards hub' }), seen(drops, { hidden }), HL, OFFICIAL, T0).verdict, 'scam', 'the links behind the buttons give it away');
   assert.notEqual(assess(found({ title: 'HYPE rewards hub' }), seen(drops), HL, OFFICIAL, T0).verdict, 'scam');
+});
+
+test('a channel is judged by what its posts carry: figures, tickers, links or a real paragraph, not one-liners', () => {
+  assert.ok(substantive('HYPE open interest hits $4.2B, up 18% on the week'));
+  assert.ok(substantive('Hyperliquid 永续单日成交量创新高，达到 120 亿美元'));
+  assert.ok(substantive('Fed minutes are out, read them here: https://www.federalreserve.gov/monetarypolicy/fomcminutes20260917.htm'));
+  assert.ok(!substantive('gm'));
+  assert.ok(!substantive('[sticker 🚀] LFG'));
+  assert.ok(!substantive('wow this is huge guys, hyperliquid!!'));
+  const posts = (texts: string[]) => Array.from({ length: 30 }, (_, i) => msg(-1001, `${texts[i % texts.length]} (${i})`, T0 - i * 3600));
+  const wire = assess(found({ title: 'Hyperliquid Wire', type: 'channel', members: 9000 }), seen(posts(['HYPE open interest hits $4.2B, up 18% on the week', 'HLP vault APR at 21% this week, the highest since May', 'BTC funding on Hyperliquid flipped to -0.01% across majors']), { members: 9000, perDay: 8 }), HL, OFFICIAL, T0);
+  assert.ok(wire.good.some((x) => /dense: 100% of its posts carry/.test(x)), wire.good.join(' | '));
+  const memes = assess(found({ title: 'Hyperliquid Memes', type: 'channel', members: 9000 }), seen(posts(['gm hyperliquid fam', 'hype 🚀🚀', 'lfg hyperliquid']), { members: 9000, perDay: 8 }), HL, OFFICIAL, T0);
+  assert.ok(memes.bad.some((x) => /thin: only 0% of its posts say anything/.test(x)), memes.bad.join(' | '));
+  assert.ok(wire.score > memes.score + 20);
 });
 
 test("the project's own channel's discussion group is official; a private group shows only its cover", () => {
@@ -310,12 +326,12 @@ function setup(perHour = 5) {
 
 test('one search (groups and channels): every way in, a look at each within the budget, scams set apart', async () => {
   const { store, tg, pages, discovery, finish } = setup(1);
-  const started = discovery.start('hyperliquid', null, { actor: 'claude', via: ' · via Claude Code' }, 'both');
+  const started = discovery.start('hyperliquid', null, { actor: 'claude', via: ' · via Claude Code' });
   assert.equal(started.ok, true);
   assert.equal(discovery.start('crypto', null, { actor: 'console', via: '' }).ok, false, 'one at a time');
   const run = await finish();
   assert.equal(run.error, null);
-  assert.equal(run.kind, 'both');
+  assert.equal(run.kind, 'both', 'groups and channels by default');
   assert.deepEqual(pages, ['https://hyperliquid.xyz'], "the project's own site, for its official handles");
   const v = Object.fromEntries(run.results.map((r) => [r.username ?? r.title, r.verdict]));
   for (const [name, verdict] of Object.entries({ hl_cn_community: 'good', hyperliquid_chat: 'good', hl_daily_chat: 'good', hl_whales: 'low', hl_private: 'closed', 'HL Alpha Private': 'closed', hl_support_desk: 'scam', hl_rewards: 'scam', hl_vip: 'scam', hype_portal: 'scam' })) {
@@ -357,7 +373,7 @@ test('one search (groups and channels): every way in, a look at each within the 
 test('groups only, then again: channels are only a way in, what was looked at is remembered, and what is new is marked', async () => {
   const { clock, tg, discovery, finish } = setup();
   const by = { actor: 'console', via: '' };
-  assert.equal(discovery.start('hyperliquid', null, by).ok, true, 'groups by default');
+  assert.equal(discovery.start('hyperliquid', null, by, 'groups').ok, true);
   const first = await finish();
   assert.equal(first.kind, 'groups');
   assert.ok(first.results.length > 5);
@@ -370,7 +386,7 @@ test('groups only, then again: channels are only a way in, what was looked at is
   tg.search.hyperliquid.push(tg.LATE);
   clock.t += 2 * 3600;
   tg.requests.length = 0;
-  assert.equal(discovery.start('hyperliquid', null, by).ok, true);
+  assert.equal(discovery.start('hyperliquid', null, by, 'groups').ok, true);
   const second = await finish();
   assert.equal(second.error, null);
   assert.deepEqual(tg.requests.filter((r) => r.startsWith('getMessages')), ['getMessages 28 100'], 'only the new group is looked at again');
@@ -387,7 +403,7 @@ test('groups only, then again: channels are only a way in, what was looked at is
 test('when Telegram asks the account to wait, the search stops there and keeps what it judged', async () => {
   const { tg, discovery, finish } = setup();
   tg.flood.on = 14; // the fourth look
-  assert.equal(discovery.start('hyperliquid', null, { actor: 'console', via: '' }).ok, true);
+  assert.equal(discovery.start('hyperliquid', null, { actor: 'console', via: '' }, 'groups').ok, true);
   const run = await finish();
   assert.match(run.error ?? '', /slow down, so the search stopped here/);
   assert.equal(tg.requests.at(-1), 'getMessages 14 100', 'nothing more after the wait was asked for');

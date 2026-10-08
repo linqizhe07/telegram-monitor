@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { digestFolders, splitHeading } from '../src/digest-folders.ts';
+import { digestFileHeading, digestFolders, splitHeading } from '../src/digest-folders.ts';
 import { Clock, memoryStore, T0 } from './helpers.ts';
 
 const DEFAULTS = { language: 'auto' as const, digestHour: 9, timezone: 'UTC', rsiMode: 'auto' as const };
@@ -37,4 +37,11 @@ test('digests are filed by group: as recorded, through the digest they were post
 test('a digest heading is split off its body', () => {
   assert.deepEqual(splitHeading('<b>X · 1 → 2 &amp; more</b>\n\n## Topics'), { heading: 'X · 1 → 2 & more', body: '## Topics' });
   assert.deepEqual(splitHeading('just a reply'), { heading: 'just a reply', body: 'just a reply' });
+});
+
+test("a digest Claude saved names its file's first line; anything else has no file", () => {
+  assert.equal(digestFileHeading('<b>A &lt;&amp;&gt; B · 10/6 → 10/7 (UTC) · written by Claude</b>\n\n## Topics'), '# A <&> B · 10/6 → 10/7 (UTC) · written by Claude');
+  assert.equal(digestFileHeading('<b>Daily digest</b>\n\nposted by the service'), null);
+  assert.equal(digestFileHeading('pong'), null);
+  assert.equal(digestFileHeading('<b>X · written by Claude</b> and more on the line\n'), null);
 });

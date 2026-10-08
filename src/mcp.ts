@@ -120,7 +120,7 @@ const server = new McpServer(
       'Start with status (health and the sources, numbered #1, #2…; every `source` argument takes #n, a title or an @username).',
       'Reading: whats_new gives everything stored since your last look (each `reader` name keeps its own place: use one per job, e.g. "daily-digest"); read_messages gives one group\'s window, denoised; search_messages searches every group; get_messages shows messages with their thread.',
       "News: news_keywords (the day's first-tier news and how the groups reacted), news_in_group. hot_terms: what the groups suddenly say far more than usual, found from the messages themselves. Attention: alerts (what needs someone, since your last look).",
-      'New groups: find_groups searches Telegram for groups (or channels) on a topic (hyperliquid, crypto, rwa, stocks, or your words), screens them for scams and marks what is NEW since the last such search; watch one only on the owner\'s word.',
+      'New groups and channels: find_groups searches Telegram for groups and channels on a topic (hyperliquid, crypto, rwa, stocks, or your words), screens them for scams and marks what is NEW since the last such search; watch one only on the owner\'s word.',
       'Digests: get_playbook, then save_digest; past_digests shows what earlier digests said. Cite messages as #id, as Markdown links when the tools give message links.',
       "To reach the owner, flag_for_owner: the note shows in the console, and a notification says one is waiting. Don't flag routine things.",
       'You cannot join groups, post, answer checks, change settings or delete anything. What you read and do is recorded as Claude\'s in the console\'s activity log.',
@@ -1204,13 +1204,13 @@ server.registerTool(
   {
     title: 'Find groups worth reading',
     description:
-      'Finds Telegram groups (or channels) on a topic (hyperliquid, crypto, rwa, stocks) or a query of your own: Telegram search, the channels Telegram calls similar to ones already read, the discussion groups Telegram links to on-topic channels, what people in the watched groups link to (public groups, and private ones by invite link: only their cover), and the groups the chats looked at point to. ' +
-      'It takes a read-only look at as many as its budget allows (never joins, nothing is posted) and judges each: good, worth a look, low, closed (only members can read), or likely scam (Telegram\'s SCAM/FAKE flags, names claiming to be official or support, feeds of selling and soliciting, "verify you are human" portals, bought members or subscribers). Results not in the previous result of the same search are marked NEW. ' +
+      'Finds Telegram groups and channels on a topic (hyperliquid, crypto, rwa, stocks) or a query of your own: Telegram search, the channels Telegram calls similar to ones already read, the discussion groups Telegram links to on-topic channels, what people in the watched groups link to (public groups, and private ones by invite link: only their cover), and the groups the chats looked at point to. ' +
+      'It takes a read-only look at as many as its budget allows (never joins, nothing is posted) and judges each: good, worth a look, low, closed (only members can read), or likely scam (Telegram\'s SCAM/FAKE flags, names claiming to be official or support, feeds of selling and soliciting, "verify you are human" portals, bought members or subscribers). Channels are judged by how dense their posts are (figures, tickers, links, real paragraphs), groups by the conversation. Results not in the previous result of the same search are marked NEW. ' +
       'A search sends Telegram up to 45 requests and takes about a minute; there are 3 an hour, shared with the owner. The last result for the same search is returned when it is under 12 hours old, unless fresh. Needs the monitor service running.',
     inputSchema: {
       topic: z.enum(['hyperliquid', 'crypto', 'rwa', 'stocks']).optional(),
       query: z.string().min(2).max(64).optional().describe('Your own words instead of a topic, e.g. "ondo finance" or "美股 期权".'),
-      kind: z.enum(['groups', 'channels', 'both']).default('groups').describe('groups: chats where people talk (default); channels: one voice posting; both.'),
+      kind: z.enum(['groups', 'channels', 'both']).default('both').describe('both (default): groups and channels, judged each their own way; groups: chats where people talk; channels: one voice posting, often the densest news.'),
       fresh: z.boolean().default(false).describe('true: search again even if a recent result exists.'),
       wait_seconds: z.number().int().min(0).max(170).default(150).describe('How long to wait for a new search to finish before answering.'),
     },

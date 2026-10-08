@@ -303,6 +303,21 @@ export function perDayOf(batch: { id: number; date?: number }[], now: number, li
   return ((Math.max(...ids) - Math.min(...ids) + 1) * 86_400) / Math.max(3600, now - oldest);
 }
 
+// Figures (12%, $4.2B, 3,000, 1.5亿), a ticker ($HYPE), a link, a time: what a post that says something carries.
+const FACT = /\d[\d,.]*\s?(%|k\b|m\b|b\b|bn\b|万|亿|美元|usd|usdt)|[$€¥£]\s?\d|\$[A-Za-z]{2,6}\b|https?:\/\/|\b\d{1,2}:\d{2}\b|\b\d{4,}\b|\b\d+(\.\d+)?x\b/i;
+
+/**
+ * Whether a post carries something: figures, a ticker or a link, or a real paragraph; not a
+ * one-liner, a sticker or a bare repost. A Chinese character counts as two and a half letters.
+ */
+export function substantive(text: string): boolean {
+  const t = text.replace(/\[(forwarded[^\]]*|sticker[^\]]*|photo|gif|video|video note|voice[^\]]*|document[^\]]*|audio[^\]]*)\]/gi, '').trim();
+  const han = (t.match(/\p{Script=Han}/gu) ?? []).length;
+  const size = t.length - han + han * 2.5;
+  if (size < 40) return false;
+  return FACT.test(t) || size >= 160;
+}
+
 /** A channel's usual views per post: the median of its latest 30 posts older than six hours (views still grow before that); null under five. */
 export function typicalViews(posts: { date: number; views?: number | null }[], now: number): number | null {
   const v = [...posts]
@@ -417,8 +432,12 @@ export function assess(f: Found, seen: Seen | null, topic: Topic, official: stri
     if (seen.sampled >= 20 && seen.botMessages / seen.sampled >= 0.5) bad.push(`bots write ${pct(seen.botMessages / seen.sampled)} of its messages`);
   } else {
     const activity = clamp(Math.log10(1 + perDay) / Math.log10(31));
-    score = 35 * relevance + 25 * activity + 15 * (1 - noise) + 15 * size + 10 * fresh;
+    // A channel is worth what its posts carry: how many say something, not how many there are.
+    const dense = humans ? sample.filter((m) => substantive(m.text)).length / humans : 0;
+    score = 30 * relevance + 20 * activity + 15 * dense + 10 * (1 - noise) + 15 * size + 10 * fresh;
     if (perDay >= 1) good.push(`${perDay >= 10 ? n(Math.round(perDay)) : perDay.toFixed(1)} posts a day`);
+    if (humans >= 10 && dense >= 0.6) good.push(`dense: ${pct(dense)} of its posts carry figures, tickers, links or a real paragraph`);
+    else if (humans >= 10 && dense < 0.2) bad.push(`thin: only ${pct(dense)} of its posts say anything (the rest are one-liners, stickers or bare reposts)`);
     if (members >= 20_000 && perDay < 0.2) bad.push(`${n(members)} subscribers but it hardly posts`);
     const views = seen.views ?? null;
     if (views !== null && members >= 1000 && views < members * 0.01 && perDay < 50) bad.push(`${n(members)} subscribers but a post is seen by about ${n(views)}: subscribers bought`);

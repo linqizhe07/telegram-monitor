@@ -8,6 +8,7 @@ import { Engine } from './engine.ts';
 import { InviteTracker, type Invoker } from './invites.ts';
 import { AnthropicLlm } from './llm.ts';
 import { NewsRadar } from './news.ts';
+import { OwnerActions } from './owner-actions.ts';
 import { MacNotifier, NullNotifier, type Notifier } from './notify.ts';
 import { connectReader, type ReaderConnection } from './reader-client.ts';
 import { Reader } from './reader.ts';
@@ -190,6 +191,7 @@ async function main(): Promise<void> {
   if (config.news) log(`news radar: ${store.newsSources().filter((s) => s.enabled).length} sources (console → News radar)`);
 
   let consoleServer: ConsoleServer | null = null;
+  const discovery = connection ? new Discovery({ store, activity, now, log, client: () => connection.raw }) : null;
   if (config.consolePort > 0) {
     consoleServer = new ConsoleServer({
       store,
@@ -209,7 +211,9 @@ async function main(): Promise<void> {
       notifier,
       news,
       // Finding groups worth reading: through the same supervised client as the reading.
-      discovery: connection ? new Discovery({ store, activity, now, log, client: () => connection.raw }) : null,
+      discovery,
+      // Joining and answering a group's check, on the owner's click only.
+      owner: connection && invites ? new OwnerActions({ raw: connection.raw, permit: connection.permitWrite, store, activity, tracker: invites, now, likelyScams: () => discovery?.likelyScams() ?? new Set() }) : null,
       digestNow: (chatId) => {
         const chat = store.getChat(chatId);
         return engine.digest(chatId, { kind: 'manual', to: chat?.kind === 'watched' ? (chat.reportChatId ?? undefined) : undefined });
