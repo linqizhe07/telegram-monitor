@@ -7,8 +7,10 @@
 <meta name="console-token" content="__CONSOLE_TOKEN__">
 <title>Group Pulse</title>
 <link rel="stylesheet" href="/console.css">
+<script src="/starmap.js" defer></script>
 <script src="/crawler.js" defer></script>
 <script src="/console.js" defer></script>
+<script src="/pad.js" defer></script>
 </head>
 <body>
 <header class="top">
@@ -20,15 +22,15 @@
     <nav class="nav" id="nav" aria-label="Sections">
       <a href="#crawler">Live</a>
       <a href="#news-panel">Radar</a>
-      <a href="#sources-panel">Sources</a>
-      <a href="#discover-panel">Find</a>
+      <a href="#groups-panel">Groups</a>
       <a href="#activity-panel">Activity</a>
       <a href="#messages-panel">Messages</a>
       <a href="#digests-panel">Digests</a>
+      <a href="#system-panel">System</a>
     </nav>
     <div class="top-right">
-      <button class="icon-btn" id="notify-test" title="Send a test notification to this Mac (nothing is sent to Telegram)" aria-label="Send a test notification" hidden>
-        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.4a4.2 4.2 0 0 0-4.2 4.2v2.5c0 .8-.3 1.5-.9 2.1l-.6.6h11.4l-.6-.6c-.6-.6-.9-1.3-.9-2.1V7.6A4.2 4.2 0 0 0 10 3.4Z"/><path d="M8.3 15.4a1.8 1.8 0 0 0 3.4 0"/></svg>
+      <button class="icon-btn" id="pad-toggle" title="Controller: your hands on Telegram (G)" aria-label="Open the controller" aria-controls="pad" aria-expanded="false">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6.2 6h7.6a3.6 3.6 0 0 1 3.5 2.8l.9 4.3a2.2 2.2 0 0 1-3.8 1.9L12.6 13H7.4l-1.8 2a2.2 2.2 0 0 1-3.8-1.9l.9-4.3A3.6 3.6 0 0 1 6.2 6Z"/><path d="M6.5 8.4v2.6M5.2 9.7h2.6"/><path d="M13.2 9h.01M14.6 10.6h.01"/></svg>
       </button>
       <div class="live" id="live" role="status"><span class="dot" aria-hidden="true"></span><span id="live-text">Connecting</span></div>
     </div>
@@ -40,34 +42,27 @@
 <section class="crawler" id="crawler" aria-label="Live view">
   <div class="hud-top">
     <div class="hud-stats" id="hud-stats"></div>
-    <div class="hud-brand" id="hud-brand">read-only</div>
+    <div class="hud-brand" id="hud-brand">writes only on your click</div>
   </div>
   <div class="hud-tabs" id="hud-tabs" role="tablist" aria-label="Groups"></div>
-  <div class="stage" id="stage">
+  <div class="stage" id="stage" tabindex="0" aria-label="The groups as nebulae, placed by what they talk about: hover for what links them, click one for its messages, pinch or ⌘/Ctrl + scroll to zoom, drag to move, 0 for the default view">
     <canvas id="stage-canvas" aria-hidden="true"></canvas>
     <div class="stage-title">
       <div class="stage-name"><span class="stage-index" id="stage-index">00</span><span id="stage-group">Waiting for the reader</span></div>
       <div class="stage-sub" id="stage-sub"></div>
     </div>
     <div class="stage-legend" aria-label="Tags">
-      <span class="news">⚑ news</span><span class="ticker">ticker</span><span class="number">number</span><span class="link">link</span><span class="ask">ask</span><span class="noise">noise</span>
+      <span class="news">⚑ news</span><span class="ticker">ticker</span><span class="number">number</span><span class="link">link</span><span class="ask">ask</span><span class="noise">noise</span><span class="route" title="Two groups that talked about the same topics that day: the more they share, the closer they sit and the brighter the route">⟷ same topics</span>
     </div>
+    <div class="stage-days" id="stage-days" role="group" aria-label="Day: the nebulae placed by that day's topics"></div>
+    <div class="stage-zoom" id="stage-zoom" role="group" aria-label="Zoom">
+      <button type="button" data-z="out" title="Zoom out (−)" aria-label="Zoom out">−</button>
+      <button type="button" data-z="fit" title="Back to the default view (0)" aria-label="Back to the default view">⌂</button>
+      <button type="button" data-z="in" title="Zoom in (+). Also: pinch, ⌘/Ctrl + scroll, double-click" aria-label="Zoom in">+</button>
+    </div>
+    <div class="stage-card" id="stage-card" role="tooltip" hidden></div>
   </div>
   <div class="instruments">
-    <section class="inst" aria-label="Crawl log">
-      <header><span>Crawl log</span><b class="teal" id="i-log-rate">0 msg/m</b></header>
-      <ol class="inst-log" id="i-log-list"></ol>
-    </section>
-    <section class="inst" aria-label="Groups">
-      <header><span>Nebulae</span><b id="i-groups-n">—</b></header>
-      <ol class="inst-groups" id="i-groups-list"></ol>
-      <footer>messages · <span class="grey-key">removed as noise</span></footer>
-    </section>
-    <section class="inst" aria-label="Keyword detector" title="The crawler's first hand: the day's first-tier news keywords (dashed: how many outlets carry each story; filled: how much your groups talked about it).">
-      <header><span>Keyword detector</span><b class="teal" id="i-radar-n">—</b></header>
-      <svg class="inst-radar" id="i-radar-svg" aria-hidden="true"></svg>
-      <ul class="inst-bars" id="i-radar-bars"></ul>
-    </section>
     <section class="inst" aria-label="Denoiser" title="The crawler's second hand: the same rules the digest uses drop stickers, one-word chatter, bot commands, repeats and scams before anything is read. Last 24 hours, all groups.">
       <header><span>Denoiser</span><b id="i-noise-pct">—</b></header>
       <div class="inst-big"><b id="i-noise-num">—</b><small id="i-noise-of"></small></div>
@@ -86,12 +81,7 @@
       <div class="inst-gauge"><svg id="i-gauge" aria-hidden="true"></svg><div class="gauge-read"><b id="i-gauge-num">—</b><small>posted → stored</small></div></div>
       <footer id="i-speed-note">waiting for the first new message</footer>
     </section>
-    <section class="inst" aria-label="What the reader is doing">
-      <header><span>reader.py</span><b class="pink" id="i-code-rate">0 l/m</b></header>
-      <pre class="inst-code" id="i-code-pre"></pre>
-    </section>
   </div>
-  <div class="hud-status" id="hud-status"></div>
 </section>
 
 <main>
@@ -112,7 +102,7 @@
         <h3 class="col-head">Keywords today</h3>
         <ol class="topics" id="news-topics"></ol>
         <details class="disclosure" id="news-more" hidden>
-          <summary id="news-more-label">Single-source headlines</summary>
+          <summary id="news-more-label">More</summary>
           <ol class="topics single" id="news-single"></ol>
         </details>
       </div>
@@ -129,44 +119,34 @@
         <input id="feed-name" class="short" placeholder="Name (optional)" aria-label="Feed name">
         <button type="submit" class="btn primary" id="feed-btn">Add feed</button>
       </form>
-      <p class="fine">Telegram channels among your sources count as news sources by themselves (add one under Sources: Check, then Watch). Feeds are read from this computer with plain web requests; nothing from your groups is ever sent anywhere.</p>
+      <p class="fine">Telegram channels among your groups count as news sources by themselves (add one under Groups → Find &amp; add). Feeds are read from this computer with plain web requests; nothing from your groups is ever sent anywhere.</p>
     </details>
   </section>
 
-  <section class="panel" id="sources-panel" aria-labelledby="sources-h">
+  <section class="panel" id="groups-panel" aria-labelledby="groups-h">
     <div class="panel-head">
       <div class="titles">
-        <h2 id="sources-h"><span class="idx">03</span>Sources</h2>
-        <p class="sub" title="Everything the account is in shows up here on its own, and new groups appear within about a minute of joining. Reading from outside means the account never joined.">groups and channels this account reads</p>
+        <h2 id="groups-h"><span class="idx">03</span>Groups</h2>
+        <p class="sub" title="Everything the account is in shows up under Reading by itself, within about a minute of joining. Find &amp; add searches Telegram for more, or checks one you name.">what this account reads · find and add more</p>
       </div>
-      <div class="controls">
+      <div class="seg" id="groups-tabs" role="tablist" aria-label="Groups">
+        <button type="button" role="tab" data-g="reading" class="on" aria-selected="true">Reading <span id="groups-n"></span></button>
+        <button type="button" role="tab" data-g="find" aria-selected="false">Find &amp; add</button>
+      </div>
+    </div>
+
+    <div id="groups-reading" role="tabpanel" aria-label="Reading">
+      <div class="tab-controls">
         <label class="switch-label" title="Groups and channels you join in Telegram show up here by themselves">
           <input type="checkbox" role="switch" id="auto-watch"> Read new groups automatically
         </label>
         <button class="btn" id="refresh-list" title="Check the account's chat list now (it also runs every hour, and soon after you join a group)">Refresh from Telegram</button>
       </div>
+      <div class="table-wrap"><table class="grid sources" id="sources"></table></div>
     </div>
-    <div class="table-wrap"><table class="grid sources" id="sources"></table></div>
-    <form class="add" id="add-form" autocomplete="off">
-      <input id="add-input" placeholder="Add a group: @username, t.me link, or invite link" aria-label="Group or channel to check">
-      <button type="submit" class="btn primary" id="probe-btn">Check</button>
-    </form>
-    <p class="fine">Checking is read-only. For a private group, paste its invite link: you join in your Telegram app, this page only looks.</p>
-    <div id="probe-result" hidden></div>
-    <div class="invites" id="invites" hidden>
-      <h3 class="col-head">Private groups · invite links</h3>
-      <ol id="invite-list"></ol>
-      <p class="fine" id="invite-budget"></p>
-    </div>
-  </section>
 
-  <section class="panel" id="discover-panel" aria-labelledby="discover-h">
-    <div class="panel-head">
-      <div class="titles">
-        <h2 id="discover-h"><span class="idx">04</span>Find groups</h2>
-        <p class="sub" title="Telegram's own search, the channels Telegram calls similar to ones you read, the discussion groups Telegram links to on-topic channels, the groups and invite links people in your groups share, and the groups those chats point to. Each promising one gets a read-only look: the account does not join and the group is not told.">Telegram search, similar channels, discussion groups, and what your groups link to · looked at without joining · scams set apart</p>
-      </div>
-      <div class="controls">
+    <div id="groups-find" role="tabpanel" aria-label="Find and add" hidden>
+      <div class="tab-controls">
         <div class="seg" id="discover-kinds" role="group" aria-label="What to find">
           <button type="button" data-kind="groups" title="Chats where people talk">Groups</button>
           <button type="button" data-kind="channels" title="One voice posting">Channels</button>
@@ -179,23 +159,29 @@
           <button type="button" data-topic="stocks">Stocks</button>
         </div>
       </div>
-    </div>
-    <form class="add" id="discover-form" autocomplete="off">
-      <input id="discover-input" placeholder="Or your own words: ondo finance, 美股 期权, perp dex…" aria-label="Find groups about">
-      <button type="submit" class="btn primary" id="discover-btn">Search</button>
-    </form>
-    <p class="fine" id="discover-status" aria-live="polite"></p>
-    <div id="discover-result" hidden>
-      <div class="discover-head">
-        <span id="discover-summary"></span>
-        <button type="button" class="btn" id="discover-again">Search again</button>
+      <form class="add" id="discover-form" autocomplete="off">
+        <input id="discover-input" placeholder="A topic (ondo finance, 美股 期权, perp dex…), or a group: @username, t.me link, invite link" aria-label="Search for groups, or add one">
+        <button type="submit" class="btn primary" id="discover-btn">Search</button>
+      </form>
+      <p class="fine" id="discover-status" aria-live="polite"></p>
+      <div id="probe-result" hidden></div>
+      <div class="invites" id="invites" hidden>
+        <h3 class="col-head">Private groups · invite links</h3>
+        <ol id="invite-list"></ol>
+        <p class="fine" id="invite-budget"></p>
       </div>
-      <div class="table-wrap"><table class="grid discover" id="discover-table"></table></div>
-      <details class="disclosure" id="discover-scams" hidden>
-        <summary id="discover-scams-label"></summary>
-        <ol class="scam-list" id="discover-scam-list"></ol>
-      </details>
-      <ul class="notes" id="discover-notes"></ul>
+      <div id="discover-result" hidden>
+        <div class="discover-head">
+          <span id="discover-summary"></span>
+          <button type="button" class="btn" id="discover-again">Search again</button>
+        </div>
+        <div class="table-wrap"><table class="grid discover" id="discover-table"></table></div>
+        <details class="disclosure" id="discover-scams" hidden>
+          <summary id="discover-scams-label"></summary>
+          <ol class="scam-list" id="discover-scam-list"></ol>
+        </details>
+        <ul class="notes" id="discover-notes"></ul>
+      </div>
     </div>
   </section>
 
@@ -203,8 +189,8 @@
     <section class="panel" id="activity-panel" aria-labelledby="activity-h">
       <div class="panel-head">
         <div class="titles">
-          <h2 id="activity-h"><span class="idx">05</span>Activity</h2>
-          <p class="sub" title="Every request the reader account sends to Telegram, as it happens. A write is anything other people could notice or that changes the account (join, send, mark as read, press a button).">every request to Telegram, live</p>
+          <h2 id="activity-h"><span class="idx">04</span>Activity</h2>
+          <p class="sub" title="Every request the reader account sends to Telegram, as it happens, and what the service and Claude did. A write is anything other people could notice or that changes the account (join, post, react, mark as read, press a button): it happens only on your click.">every request to Telegram, live</p>
         </div>
         <div class="seg" id="filters" role="tablist" aria-label="Filter activity">
           <button data-f="all" class="on">All</button>
@@ -221,7 +207,7 @@
     <section class="panel" id="messages-panel" aria-labelledby="side-h">
       <div class="panel-head">
         <div class="titles">
-          <h2 id="side-h"><span class="idx">06</span>Messages</h2>
+          <h2 id="side-h"><span class="idx">05</span>Messages</h2>
           <p class="sub" id="msg-hint">what Claude reads for the digest</p>
         </div>
         <div class="seg" id="msg-view" role="tablist" aria-label="Messages view">
@@ -230,7 +216,7 @@
         </div>
       </div>
       <div class="msg-bar">
-        <label class="select"><select id="msg-source" aria-label="Source"></select></label>
+        <label class="select"><select id="msg-source" aria-label="Group"></select></label>
         <span class="msg-stat" id="msg-stat"></span>
       </div>
       <ol class="msgs scroll" id="msgs"></ol>
@@ -240,20 +226,25 @@
   <section class="panel" id="digests-panel" aria-labelledby="out-h">
     <div class="panel-head">
       <div class="titles">
-        <h2 id="out-h"><span class="idx">07</span>Digests &amp; outgoing messages</h2>
+        <h2 id="out-h"><span class="idx">06</span>Digests</h2>
         <p class="sub" id="out-hint"></p>
       </div>
     </div>
     <ol class="outbox" id="outbox"></ol>
   </section>
 
-  <section class="panel quiet" id="storage-panel" aria-labelledby="storage-h">
+  <section class="panel quiet" id="system-panel" aria-labelledby="system-h">
     <div class="panel-head">
       <div class="titles">
-        <h2 id="storage-h"><span class="idx">08</span>Storage</h2>
-        <p class="sub" id="storage-now">…</p>
+        <h2 id="system-h"><span class="idx">07</span>System</h2>
+        <p class="sub">the account, notifications and what is stored</p>
+      </div>
+      <div class="controls">
+        <button class="btn" id="notify-test" title="Send a test notification to this Mac (nothing is sent to Telegram)" hidden>Test notification</button>
       </div>
     </div>
+    <ul class="sys-lines" id="sys-status"></ul>
+    <p class="sys-store" id="storage-now">…</p>
     <details class="disclosure">
       <summary>Clear stored data…</summary>
       <div class="clear-box">
@@ -269,5 +260,39 @@
 <footer class="foot"><span>group-pulse · this computer only (127.0.0.1)</span><span id="foot-up"></span></footer>
 <div class="menu-pop" id="row-menu" role="menu" hidden></div>
 <div class="toast" id="toast" role="status" hidden></div>
+<section class="pad" id="pad" role="dialog" aria-modal="true" aria-labelledby="pad-chat-title" hidden>
+  <header class="pad-head">
+    <span class="pad-brand"><span class="pad-dot" id="pad-dot" aria-hidden="true"></span>CONTROLLER<span class="pad-device" id="pad-device">keyboard</span></span>
+    <span class="pad-shoulder" aria-hidden="true">LB</span>
+    <div class="pad-groups" id="pad-groups" role="tablist" aria-label="Groups"></div>
+    <span class="pad-shoulder" aria-hidden="true">RB</span>
+    <button type="button" class="pad-x" id="pad-close" title="Close (Esc, G)" aria-label="Close the controller">✕</button>
+  </header>
+  <div class="pad-main">
+    <section class="pad-chat" aria-label="Messages">
+      <div class="pad-chat-head">
+        <h2 class="pad-chat-title" id="pad-chat-title">—</h2>
+        <div class="pad-chips" id="pad-chips"></div>
+        <div class="seg pad-view" id="pad-view" role="tablist" aria-label="View (SELECT, V)">
+          <button type="button" data-v="all" class="on" title="Every stored message">All</button>
+          <button type="button" data-v="signal" title="Noise removed, on-topic only">Signal</button>
+        </div>
+      </div>
+      <ol class="pad-list" id="pad-list" aria-label="Messages: up and down to pick one"></ol>
+      <form class="pad-compose" id="pad-compose" autocomplete="off" hidden>
+        <div class="pad-reply" id="pad-reply"></div>
+        <textarea id="pad-text" rows="2" maxlength="4096" aria-label="Message" placeholder="Write here. Enter arms it, Enter again sends it · Shift+Enter: a new line · Esc: back"></textarea>
+        <div class="pad-arm" id="pad-arm"><span id="pad-arm-text"></span><span class="pad-count" id="pad-count"></span><i class="pad-arm-bar" id="pad-arm-bar"></i></div>
+      </form>
+    </section>
+    <aside class="pad-side" aria-label="The picked message and what can be done">
+      <div class="pad-sel" id="pad-sel"></div>
+      <div class="pad-layer" id="pad-layer" hidden></div>
+      <ol class="pad-actions" id="pad-actions"></ol>
+      <div class="pad-status" id="pad-status" role="status" aria-live="polite"></div>
+    </aside>
+  </div>
+  <footer class="pad-prompts" id="pad-prompts" aria-label="Buttons"></footer>
+</section>
 </body>
 </html>

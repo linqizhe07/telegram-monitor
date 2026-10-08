@@ -73,6 +73,16 @@
   const ctx = canvas.getContext('2d', { alpha: false });
   const view = { w: 0, h: 0, dpr: 1, s: 1 };
   const cam = { x: 0, y: 0, z: 1, tx: 0, ty: 0, tz: 1 };
+  /**
+   * The room the map has (starmap.js): `k` scales the nebulae, `g` the world (1: the stage), `zoom`
+   * is the default view's. The stage is the world while the groups fit on it.
+   */
+  let room = { k: 1, g: 1, zoom: 1, fill: 0 };
+  const StarMap = window.StarMap;
+  /** Gas colours for the nebulae (each group keeps its own), the news, and the group being read. */
+  const HUES = ['92,200,236', '112,128,255', '170,112,255', '79,209,176', '90,160,255'];
+  const NEWS_RGB = '92,200,236';
+  const PINK_RGB = '255,92,138';
 
   /** A nebula: one group, or the news. */
   const clouds = new Map();
@@ -83,19 +93,30 @@
     let c = clouds.get(key);
     if (!c) {
       c = { key, kind, title, chatId: kind === 'group' ? Number(key.slice(2)) : null, seed: hash(key), count: 0, sub: '', x: 0, y: 0, tx: 0, ty: 0, r: 40, n: 0, pts: null, sprite: null, tint: null, tintColor: '', glow: 0, channel: false };
+      // Its gas colour, spin and orbit come from a second seed: the points' shape stays as it was.
+      const R2 = rng(hash(`${key}·look`));
+      c.hue = kind === 'news' ? NEWS_RGB : HUES[Math.floor(R2() * HUES.length)];
+      c.spin = (0.01 + R2() * 0.018) * (R2() < 0.5 ? -1 : 1);
+      c.tilt = (R2() - 0.5) * 0.9;
+      c.orbitDir = R2() < 0.5 ? -1 : 1;
+      c.heat = 0;
+      c.base = 0;
       clouds.set(key, c);
     }
     c.title = title;
     return c;
   }
 
-  function radiusOf(c) {
-    const base = c.kind === 'news' ? 118 : Math.min(148, 44 + 1.15 * Math.sqrt(c.count));
+  /** A group's messages: its last 24 hours, or that day's when another day is shown. */
+  const countOf = (c) => (mapDay && c.kind === 'group' ? dayCount.get(c.chatId) ?? 0 : c.count);
+  /** A nebula's own size on this stage; the map scales it by `room.k` (starmap.js). */
+  function ownRadius(c) {
+    const base = c.kind === 'news' ? 118 : Math.min(148, 44 + 1.15 * Math.sqrt(countOf(c)));
     return base * view.s;
   }
   function pointsOf(c) {
-    const raw = c.kind === 'news' ? 520 + c.count * 7 : 260 + c.count * 0.32;
-    return Math.round(Math.min(2800, raw) * Math.max(0.35, Math.min(1, view.s)));
+    const raw = c.kind === 'news' ? 520 + c.count * 7 : 260 + countOf(c) * 0.32;
+    return Math.round(Math.min(2800, raw) * Math.max(0.35, Math.min(1, view.s * room.k)));
   }
 
   function makeCloud(c) {
@@ -105,6 +126,8 @@
     const arms = 3 + Math.floor(R() * 3);
     const armA = Array.from({ length: arms }, () => R() * Math.PI * 2);
     const curl = (R() - 0.5) * 2.4;
+    c.arms = armA;
+    c.curl = curl;
     for (let i = 0; i < c.n; i++) {
       const k = R();
       let x;
@@ -198,6 +221,7 @@
     g.fillRect(-c.r, -c.r, c.r * 2, c.r * 2);
     c.sprite = { canvas: cv, size };
     c.tint = null;
+    c.gasCache = null;
   }
 
   /** The same sprite in one colour (its alpha kept), for the group being read and for the news. */
@@ -221,49 +245,29 @@
   const compact = () => view.w < 700;
   const labelled = (c) => !compact() || c.key === activeKey || c.kind === 'news';
 
-  /** Groups on an ellipse around the news, pushed apart where they overlap. */
+  /**
+   * Where each nebula goes (starmap.js): on a ring around the news, as in the first view, the groups
+   * that share topics that day side by side and as close as they share, each one otherwise kept
+   * where it was. Laid out again only when something it depends on changed.
+   */
+  let laidFor = '';
   function layout() {
     const groups = order.map((k) => clouds.get(k)).filter(Boolean);
-    const rx = Math.max(150, view.w * 0.37);
-    const ry = Math.max(110, view.h * 0.31);
-    groups.forEach((c, i) => {
-      const a = -Math.PI * 0.86 + (i / Math.max(1, groups.length)) * Math.PI * 2;
-      c.tx = Math.cos(a) * rx;
-      c.ty = Math.sin(a) * ry;
-    });
-    const all = [...groups, clouds.get('news')].filter(Boolean);
-    for (let it = 0; it < 60; it++) {
-      for (let i = 0; i < all.length; i++) {
-        for (let j = i + 1; j < all.length; j++) {
-          const a = all[i];
-          const b = all[j];
-          const dx = b.tx - a.tx;
-          const dy = b.ty - a.ty;
-          const d = Math.hypot(dx, dy) || 1;
-          const want = (a.r + b.r) * 0.95;
-          if (d >= want) continue;
-          const push = (want - d) / 2;
-          const ux = dx / d;
-          const uy = dy / d;
-          if (a.kind !== 'news') {
-            a.tx -= ux * push;
-            a.ty -= uy * push;
-          }
-          if (b.kind !== 'news') {
-            b.tx += ux * push;
-            b.ty += uy * push;
-          }
-        }
-      }
-    }
-    const limX = view.w / 2 - 30;
-    const limY = view.h / 2 - 24;
-    // The title sits in the top-left corner: no nebula centre goes under it.
-    const title = titleBox();
-    for (const c of groups) {
-      c.tx = Math.max(-limX + c.r * 0.6, Math.min(limX - c.r * 0.6, c.tx));
-      c.ty = Math.max(-limY + c.r * 0.5, Math.min(limY - c.r * 0.5, c.ty));
-      if (c.tx < title.x + title.w && c.ty < title.y + title.h + c.r * 0.3) c.ty = title.y + title.h + c.r * 0.3;
+    const news = clouds.get('news');
+    const edges = routes.map((r) => ({ a: `g:${r.a}`, b: `g:${r.b}`, overlap: r.overlap }));
+    const sets = galaxies.map((g) => g.members.map((id) => `g:${id}`));
+    const sig = JSON.stringify([view.w, view.h, room.g, groups.map((c) => [c.key, Math.round(c.r)]), news ? Math.round(news.r) : 0, edges, sets]);
+    if (sig === laidFor) return;
+    laidFor = sig;
+    const nodes = groups.map((c) => ({ id: c.key, r: c.r, arc: c.arc }));
+    if (news) nodes.push({ id: news.key, r: news.r, center: true });
+    const at = StarMap.layout({ w: view.w, h: view.h, g: room.g, nodes, edges, galaxies: sets });
+    for (const c of [...groups, news].filter(Boolean)) {
+      const p = at.get(c.key);
+      if (!p) continue;
+      c.tx = p.x;
+      c.ty = p.y;
+      if (c.kind === 'group') c.arc = p.arc;
       if (!c.placed) {
         c.x = c.tx;
         c.y = c.ty;
@@ -273,36 +277,135 @@
     placeLabels();
   }
 
-  /** Each label above-right of its nebula, or in the first other spot that is free and on the stage. */
+  /** The default view (starmap.js): the whole map, leaning toward the group being read; or around that group, when the map is bigger than the stage shows. */
+  const homeView = (active) => StarMap.home(view.w, view.h, room, active ? { x: active.x, y: active.y } : null);
+
+  /** A galaxy's disc: around its groups' nebulae (null when fewer than two are on the stage). */
+  function galaxyRing(g) {
+    const cs = g.members.map((id) => clouds.get(`g:${id}`)).filter(Boolean);
+    if (cs.length < 2) return null;
+    const x = cs.reduce((t, c) => t + c.x, 0) / cs.length;
+    const y = cs.reduce((t, c) => t + c.y, 0) / cs.length;
+    const r = Math.max(...cs.map((c) => Math.hypot(c.x - x, (c.y - y) / 0.72) + c.r * 1.25)) + 18;
+    return { x, y, r };
+  }
+  const routeMid = (r, A, B) => [(A.x + B.x) / 2 + r.bend * (B.y - A.y) * 0.5, (A.y + B.y) / 2 - r.bend * (B.x - A.x) * 0.5];
+  const toScreen = (x, y) => [view.w / 2 + (x - cam.x) * cam.z, view.h / 2 + (y - cam.y) * cam.z];
+  const toWorld = (sx, sy) => [cam.x + (sx - view.w / 2) / cam.z, cam.y + (sy - view.h / 2) / cam.z];
+
+  // ── the day's map: loading it, and the day bar ─────────────────────────
+
+  async function loadMap(day = mapDay) {
+    try {
+      const v = await get(`/api/map${day ? `?day=${encodeURIComponent(day)}` : ''}`);
+      mapView = v;
+      const was = mapDay;
+      mapDay = v.map.day === v.today ? '' : v.map.day;
+      dayCount.clear();
+      for (const node of v.map.nodes) dayCount.set(node.chatId, node.messages);
+      routes.length = 0;
+      for (const e of v.map.edges) routes.push({ ...e, bend: ((hash(`${e.a}:${e.b}`) % 100) / 100 - 0.5) * 0.6, ph: (hash(`${e.a}:${e.b}`) % 1000) / 1000 });
+      galaxies = v.map.galaxies.map((g) => ({ ...g, key: g.members.join(':') }));
+      nodeTopics.clear();
+      for (const node of v.map.nodes) nodeTopics.set(node.chatId, node.topics);
+      if (view.w) rebuildClouds(false);
+      void was;
+      renderDays();
+      wake();
+    } catch {
+      // the console is restarting; the next look tries again
+    }
+  }
+  /** Each group's own topics that day (for its card). */
+  const nodeTopics = new Map();
+  setInterval(() => !document.hidden && !mapDay && loadMap(''), 5 * 60_000);
+
+  let playing = 0;
+  function renderDays() {
+    const box = $('stage-days');
+    if (!box || !mapView) return;
+    // The kept days that have messages (today always).
+    const days = mapView.days.filter((d) => d.messages > 0 || d.day === mapView.today).reverse();
+    const shown = mapDay || mapView.today;
+    const sig = JSON.stringify([days, shown, Boolean(playing)]);
+    if (box.__sig === sig) return;
+    box.__sig = sig;
+    const label = (d) => (d.day === mapView.today ? 'Today' : d.day.slice(5).replace('-', '/'));
+    box.replaceChildren(
+      el('button', { type: 'button', class: `play${playing ? ' on' : ''}`, title: playing ? 'Stop' : 'Play the days: how the groups drew together and apart', 'aria-label': playing ? 'Stop playing the days' : 'Play the days', onclick: () => (playing ? stopPlay() : play()) }, playing ? '■' : '▶'),
+      ...days.map((d) => el('button', { type: 'button', class: d.day === shown ? 'on' : '', title: `${d.day} · ${n(d.messages)} messages · the nebulae placed by that day's topics`, 'aria-pressed': d.day === shown ? 'true' : 'false', onclick: () => {
+        stopPlay();
+        loadMap(d.day === mapView.today ? '' : d.day);
+      } }, label(d))),
+    );
+  }
+  function play() {
+    if (!mapView) return;
+    const days = mapView.days.filter((d) => d.messages > 0 || d.day === mapView.today).reverse().map((d) => d.day);
+    let i = 0;
+    const step = () => {
+      const d = days[i++];
+      if (!d) return stopPlay();
+      loadMap(d === mapView.today ? '' : d);
+      playing = setTimeout(step, 2600);
+    };
+    playing = 1;
+    step();
+  }
+  function stopPlay() {
+    if (playing) clearTimeout(playing);
+    playing = 0;
+    renderDays();
+  }
+
+  /** A label's size on the screen: its title in the font drawText uses, or its second line if wider. */
+  function labelSize(c) {
+    ctx.font = `${c.key === activeKey ? 600 : 500} ${c.key === activeKey || c.kind === 'news' ? 14 : 12.5}px ${MONO}`;
+    const title = ctx.measureText(cut(c.title, 26)).width;
+    ctx.font = `10.5px ${MONO}`;
+    const sub = ctx.measureText(mapDay && c.kind === 'group' ? `${n(countOf(c))} on 00/00` : String(c.sub || '')).width;
+    return { w: Math.max(title, sub) + 8, h: c.kind === 'news' && !compact() ? 72 : 30 };
+  }
+
+  /**
+   * Each label above-right of its nebula, or in the first other spot that is free and on the stage
+   * at the default view: clear of the other labels and of what the stage shows over the map (the
+   * title, the day bar, the legend, the zoom).
+   */
   function placeLabels() {
-    const all = [...clouds.values()].filter(labelled);
-    const boxes = [titleBox()];
+    const a = clouds.get(activeKey);
+    const at = StarMap.home(view.w, view.h, room, a ? { x: a.tx, y: a.ty } : null);
+    const z = at.z;
+    const boxes = [];
+    // Where the stage is, on the map, at the default view; what lies over it is in the way there.
+    const frame = { x: at.x - view.w / 2 / z, y: at.y - view.h / 2 / z };
+    const s = stage.getBoundingClientRect();
+    for (const e of stage.querySelectorAll('.stage-title, .stage-days, .stage-legend, .stage-zoom')) {
+      const b = e.getBoundingClientRect();
+      if (b.width && b.height) boxes.push({ x: frame.x + (b.left - s.left - 6) / z, y: frame.y + (b.top - s.top - 4) / z, w: (b.width + 12) / z, h: (b.height + 8) / z });
+    }
     const hit = (b) => boxes.some((o) => b.x < o.x + o.w && o.x < b.x + b.w && b.y < o.y + o.h && o.y < b.y + b.h);
-    const inside = (b) => b.x >= -view.w / 2 + 6 && b.x + b.w <= view.w / 2 - 6 && b.y >= -view.h / 2 + 4 && b.y + b.h <= view.h / 2 - 4;
-    for (const c of all.slice().sort((a, b) => (a.kind === 'news' ? -1 : b.kind === 'news' ? 1 : a.ty - b.ty))) {
-      const w = Math.min(230, 9 * Math.max(Array.from(c.title).length, 14));
-      const h = c.kind === 'news' && !compact() ? 72 : 30;
-      const spots = [[c.r * 0.28, -c.r * 0.92 - 22], [c.r * 0.28, c.r * 0.7], [-w - c.r * 0.2, -c.r * 0.6], [c.r * 0.6, -c.r * 0.2], [-w - c.r * 0.2, c.r * 0.5], [-w / 2, c.r * 0.85]];
-      let pick = null;
-      for (const [dx, dy] of spots) {
-        const b = { x: c.tx + dx, y: c.ty + dy, w, h };
-        if (!hit(b) && inside(b)) {
-          pick = [dx, dy];
-          break;
-        }
-      }
+    const inside = (b) => b.x >= frame.x + 6 / z && b.x + b.w <= frame.x + (view.w - 6) / z && b.y >= frame.y + 4 / z && b.y + b.h <= frame.y + (view.h - 4) / z;
+    for (const c of [...clouds.values()].filter(labelled).sort((p, q) => (p.kind === 'news' ? -1 : q.kind === 'news' ? 1 : p.key === activeKey ? -1 : q.key === activeKey ? 1 : p.ty - q.ty))) {
+      const size = labelSize(c);
+      const w = size.w / z;
+      const h = size.h / z;
+      const spots = [[c.r * 0.28, -c.r * 0.92 - 22 / z], [c.r * 0.28, c.r * 0.7], [-w - c.r * 0.2, -c.r * 0.6], [c.r * 0.6, -c.r * 0.2], [-w - c.r * 0.2, c.r * 0.5], [-w / 2, c.r * 0.85], [-w / 2, -c.r * 0.95 - h]];
+      const box = ([dx, dy]) => ({ x: c.tx + dx, y: c.ty + dy, w, h });
       // Nowhere free: the spot that stays on the stage.
-      if (!pick) pick = spots.find(([dx, dy]) => inside({ x: c.tx + dx, y: c.ty + dy, w, h })) || spots[0];
+      const pick = spots.find((p) => !hit(box(p)) && inside(box(p))) || spots.find((p) => inside(box(p))) || spots[0];
       c.lx = pick[0];
-      c.ly = pick[1] + 14;
-      boxes.push({ x: c.tx + pick[0], y: c.ty + pick[1], w, h });
+      c.ly = pick[1] + 14 / z;
+      boxes.push(box(pick));
     }
   }
 
-  /** Sizes, points and sprites, again only for nebulae whose size changed. */
+  /** The room the map has; then sizes, points and sprites (again only for nebulae whose size changed); then where they go. */
   function rebuildClouds(force) {
+    const news = clouds.get('news');
+    room = StarMap.balance(view.w, view.h, [...clouds.values()].filter((c) => c.kind === 'group').map(ownRadius), news ? ownRadius(news) : 0);
     for (const c of clouds.values()) {
-      const r = radiusOf(c);
+      const r = ownRadius(c) * room.k;
       const pts = pointsOf(c);
       if (!force && c.sprite && Math.abs(r - c.r) < c.r * 0.06 && Math.abs(pts - c.n) < c.n * 0.12) continue;
       c.r = r;
@@ -328,6 +431,7 @@
     const s = Math.max(0.42, Math.min(1.15, Math.min(w / 1200, h / 540)));
     const scaleChanged = Math.abs(s - view.s) > 0.04;
     view.s = s;
+    buildSky();
     rebuildClouds(dprChanged || scaleChanged);
     if (calm.matches && shouldRun()) draw(performance.now());
     wake();
@@ -348,7 +452,7 @@
 
   // ── the crawler ────────────────────────────────────────────────────────
 
-  const crawler = { x: 0, y: 0, vx: 0, vy: 0, heading: 0, legs: [], placed: false };
+  const crawler = { x: 0, y: 0, vx: 0, vy: 0, heading: 0, legs: [], placed: false, feedUntil: 0 };
   for (let i = 0; i < 16; i++) crawler.legs.push({ ax: 0, ay: 0, fx: 0, fy: 0, next: 0, from: 0, key: null });
 
   /** What the detector's hand holds: the words of the messages just read. */
@@ -356,6 +460,27 @@
   const pings = [];
   /** One per group and story in today's radar view; drawn bright for a while after a new match. */
   const links = [];
+  /**
+   * The day's map (src/constellation.ts): a route between two groups whose topics overlap (it
+   * names them), and the galaxies such groups form. The day shown ('' = today, live), the days kept,
+   * and each group's messages that day (its size, on a day that is not today).
+   */
+  const routes = [];
+  let galaxies = [];
+  let mapDay = '';
+  let mapView = null;
+  const dayCount = new Map();
+  /** What the pointer is over (a nebula, a route or a galaxy), and the owner's own view (zoom, pan). */
+  let hover = null;
+  const user = { on: false, x: 0, y: 0, z: 1 };
+  /** How hard the news nebula's jets burn: 1 when news just came in, fading. */
+  let newsFlare = 0;
+  /** When the crawler locked on to its group (the lock closes in), and the jump that took it there. */
+  let lockAt = 0;
+  let warp = null;
+  /** Plasma behind the crawler as it moves, and the data it draws in from a nebula as it reads. */
+  const trail = [];
+  const streams = [];
   const KIND = {
     news: { color: C.pink, filled: true, label: 'news' },
     ticker: { color: C.cyan, label: 'ticker' },
@@ -414,9 +539,13 @@
 
   function focus(key) {
     if (!clouds.has(key) || key === activeKey) return;
+    const to = clouds.get(key);
+    // A long way to the next group: the crawler jumps, and leaves a streak behind.
+    if (crawler.placed && Math.hypot(to.x - crawler.x, to.y - crawler.y) > 160) warp = { x: crawler.x, y: crawler.y, at: performance.now() };
+    lockAt = performance.now();
     activeKey = key;
-    if (compact()) placeLabels();
     showTitle();
+    placeLabels();
     renderTabs();
     wake();
   }
@@ -426,7 +555,6 @@
   let raf = 0;
   let onScreen = true;
   let last = performance.now();
-  let frames = 0;
   let stillTimer = 0;
 
   function shouldRun() {
@@ -466,11 +594,14 @@
   function draw(t) {
     const dt = Math.min(0.05, Math.max(0.001, (t - last) / 1000));
     last = t;
-    frames++;
     const time = t / 1000;
     const still = calm.matches;
     const active = clouds.get(activeKey);
     const newsCloud = clouds.get('news');
+    // What just happened fades: a group's burst of messages, the news' flare.
+    const cool = Math.exp(-dt / 90);
+    for (const c of clouds.values()) c.heat *= cool;
+    newsFlare *= Math.exp(-dt / 2.5);
 
     // Nebulae glide to their places; the camera leans toward the group being read.
     const k = still ? 1 : 1 - Math.exp(-dt * 2.2);
@@ -479,12 +610,19 @@
       c.y = ease(c.y, c.ty, k);
       c.glow = ease(c.glow, c.key === activeKey ? 1 : 0, still ? 1 : 1 - Math.exp(-dt * 3));
     }
-    cam.tx = active ? active.x * 0.28 : 0;
-    cam.ty = active ? active.y * 0.28 : 0;
-    cam.tz = 1.03;
+    if (user.on) {
+      cam.tx = user.x;
+      cam.ty = user.y;
+      cam.tz = user.z;
+    } else {
+      const f = homeView(active);
+      cam.tx = f.x + (still ? 0 : Math.sin(time * 0.07) * 9);
+      cam.ty = f.y + (still ? 0 : Math.cos(time * 0.05) * 6);
+      cam.tz = f.z;
+    }
     const kc = still ? 1 : 1 - Math.exp(-dt * 1.4);
-    cam.x = ease(cam.x, cam.tx + (still ? 0 : Math.sin(time * 0.07) * 9), kc);
-    cam.y = ease(cam.y, cam.ty + (still ? 0 : Math.cos(time * 0.05) * 6), kc);
+    cam.x = ease(cam.x, cam.tx, kc);
+    cam.y = ease(cam.y, cam.ty, kc);
     cam.z = ease(cam.z, cam.tz, kc);
 
     // The crawler walks to the group it reads, then wanders inside it.
@@ -522,13 +660,60 @@
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = C.bg;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+    drawSky(time, still);
     const z = cam.z;
     ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * (W / 2 - cam.x * z), dpr * (H / 2 - cam.y * z));
 
+    // Galaxies: groups whose topics overlap, held in one soft disc.
+    for (const g of galaxies) {
+      const ring = galaxyRing(g);
+      if (!ring) continue;
+      ctx.save();
+      ctx.translate(ring.x, ring.y);
+      const halo = ctx.createRadialGradient(0, 0, ring.r * 0.15, 0, 0, ring.r);
+      const on = hover && hover.galaxy === g.key;
+      halo.addColorStop(0, `rgba(79,209,176,${on ? 0.08 : 0.05})`);
+      halo.addColorStop(0.7, `rgba(112,128,255,${on ? 0.05 : 0.03})`);
+      halo.addColorStop(1, 'rgba(112,128,255,0)');
+      ctx.fillStyle = halo;
+      ctx.scale(1, 0.72);
+      ctx.beginPath();
+      ctx.arc(0, 0, ring.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = C.teal;
+      ctx.globalAlpha = on ? 0.4 : 0.16;
+      ctx.lineWidth = 0.8 / 0.72;
+      ctx.setLineDash([2, 10]);
+      ctx.lineDashOffset = still ? 0 : -time * 4;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+
     // Nebulae: the sprite, its colour when it is the news or the group being read, and twinkles.
+    // Those the camera does not see (with their orbits) are not drawn.
+    const seen = { x0: cam.x - W / 2 / z, x1: cam.x + W / 2 / z, y0: cam.y - H / 2 / z, y1: cam.y + H / 2 / z };
+    const inView = (c) => c.x + c.r * 1.7 > seen.x0 && c.x - c.r * 1.7 < seen.x1 && c.y + c.r * 1.7 > seen.y0 && c.y - c.r * 1.7 < seen.y1;
     for (const c of clouds.values()) {
-      if (!c.sprite) continue;
+      if (!c.sprite || !inView(c)) continue;
       const s = c.sprite.size * (1 + (still ? 0 : c.glow * 0.012 * Math.sin(time * 1.3)));
+      if (c.kind === 'group') drawOrbit(c, time, still, false);
+      // The gas, turning slowly, in the group's own colour (pink while it is read).
+      const gas = gasOf(c, c.hue);
+      if (gas) {
+        ctx.save();
+        ctx.translate(c.x, c.y);
+        ctx.rotate(still ? 0 : time * c.spin);
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = c.kind === 'news' ? 0.85 : 0.5 * (1 - c.glow * 0.6) + 0.15;
+        ctx.drawImage(gas.canvas, -s / 2, -s / 2, s, s);
+        if (c.glow > 0.02 && c.kind !== 'news') {
+          ctx.globalAlpha = c.glow * 0.75;
+          ctx.drawImage(gasOf(c, PINK_RGB).canvas, -s / 2, -s / 2, s, s);
+        }
+        ctx.restore();
+      }
       ctx.globalAlpha = c.kind === 'news' ? 0.45 : 0.5 + c.glow * 0.2;
       ctx.drawImage(c.sprite.canvas, c.x - s / 2, c.y - s / 2, s, s);
       const tint = c.kind === 'news' ? 0.85 : c.channel ? 0.35 * (1 - c.glow) + c.glow : c.glow;
@@ -546,8 +731,87 @@
           ctx.fillRect(c.x + c.pts[p.i * 3] - 0.9, c.y + c.pts[p.i * 3 + 1] - 0.9, 1.8, 1.8);
         }
       }
+      // The core: a star with spikes, brighter the busier the group is.
+      const core = c.r * (c.kind === 'news' ? 0.95 : 0.55 + 0.05 * (c.base + c.heat));
+      ctx.save();
+      ctx.translate(c.x, c.y);
+      ctx.rotate(still ? 0 : time * 0.03 + c.tilt);
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = Math.min(0.95, (c.kind === 'news' ? 0.55 + newsFlare * 0.4 : 0.35 + c.glow * 0.35) * (still ? 1 : 0.9 + 0.1 * Math.sin(time * 2 + c.tilt * 7)));
+      ctx.drawImage(spikeSprite(), -core, -core, core * 2, core * 2);
+      ctx.restore();
+      if (c.kind === 'group') drawOrbit(c, time, still, true);
     }
     ctx.globalAlpha = 1;
+
+    // Routes: two groups whose topics overlap that day; the more they share, the brighter.
+    for (const r of routes) {
+      const A = clouds.get(`g:${r.a}`);
+      const B = clouds.get(`g:${r.b}`);
+      if (!A || !B) continue;
+      const [mx, my] = routeMid(r, A, B);
+      const near = hover && (hover.route === r || hover.chatId === r.a || hover.chatId === r.b);
+      const lit = near || (active && (active.chatId === r.a || active.chatId === r.b));
+      ctx.strokeStyle = C.teal;
+      ctx.globalAlpha = Math.min(0.75, 0.16 + r.overlap * 2.4) * (lit ? 1.5 : 1);
+      ctx.lineWidth = (0.6 + Math.min(2.4, r.overlap * 9)) / Math.max(0.5, cam.z);
+      ctx.beginPath();
+      ctx.moveTo(A.x, A.y);
+      ctx.quadraticCurveTo(mx, my, B.x, B.y);
+      ctx.stroke();
+      if (!still) {
+        // Packets: as many as the overlap is strong.
+        const packets = 1 + Math.min(3, Math.floor(r.overlap * 12));
+        for (let q = 0; q < packets; q++) {
+          const u = (time * 0.07 + r.ph + q / packets) % 1;
+          const px = (1 - u) * (1 - u) * A.x + 2 * (1 - u) * u * mx + u * u * B.x;
+          const py = (1 - u) * (1 - u) * A.y + 2 * (1 - u) * u * my + u * u * B.y;
+          ctx.globalAlpha = 0.9;
+          ctx.fillStyle = q % 2 ? C.white : C.teal;
+          const z = 2.6 / Math.max(0.5, cam.z);
+          ctx.fillRect(px - z / 2, py - z / 2, z, z);
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // The news as a quasar: twin jets that flare when news comes in, and its accretion rings.
+    if (newsCloud && newsCloud.sprite) {
+      const q = newsCloud;
+      ctx.save();
+      ctx.translate(q.x, q.y);
+      ctx.rotate(-0.32);
+      ctx.globalCompositeOperation = 'lighter';
+      const len = q.r * (1.2 + newsFlare * 0.9) * (still ? 1 : 0.96 + 0.04 * Math.sin(time * 6));
+      for (const dir of [-1, 1]) {
+        const jet = ctx.createLinearGradient(0, 0, 0, dir * len);
+        jet.addColorStop(0, `rgba(${NEWS_RGB},${0.4 + newsFlare * 0.45})`);
+        jet.addColorStop(0.6, `rgba(${NEWS_RGB},${0.08 + newsFlare * 0.15})`);
+        jet.addColorStop(1, `rgba(${NEWS_RGB},0)`);
+        ctx.fillStyle = jet;
+        const w = 1.8 + newsFlare * 2.6;
+        ctx.beginPath();
+        ctx.moveTo(-w, 0);
+        ctx.lineTo(w, 0);
+        ctx.lineTo(0.5, dir * len);
+        ctx.lineTo(-0.5, dir * len);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.strokeStyle = C.cyan;
+      ctx.lineWidth = 0.8;
+      for (const [rx, ry, a, sp] of [[q.r * 0.6, q.r * 0.15, 0.45, 26], [q.r * 0.86, q.r * 0.22, 0.22, -14], [q.r * 1.1, q.r * 0.28, 0.1, 8]]) {
+        ctx.globalAlpha = Math.min(0.85, a + newsFlare * 0.3);
+        ctx.setLineDash([5, 9]);
+        ctx.lineDashOffset = still ? 0 : time * sp;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
 
     // Links: a group that talked about one of today's stories, to the news nebula.
     if (newsCloud) {
@@ -578,26 +842,7 @@
       ctx.globalAlpha = 1;
     }
 
-    // Labels.
-    ctx.textBaseline = 'alphabetic';
-    for (const c of clouds.values()) {
-      if (!labelled(c)) continue;
-      const lx = c.x + (c.lx ?? c.r * 0.28);
-      const ly = c.y + (c.ly ?? -c.r * 0.92 - 8);
-      ctx.font = `${c.key === activeKey ? 600 : 500} ${c.key === activeKey || c.kind === 'news' ? 14 : 12.5}px ${MONO}`;
-      ctx.fillStyle = c.kind === 'news' ? C.cyan : c.key === activeKey ? C.pink : C.ink;
-      ctx.globalAlpha = c.key === activeKey || c.kind === 'news' ? 1 : 0.82;
-      ctx.fillText(cut(c.title, 26), lx, ly);
-      ctx.font = `10.5px ${MONO}`;
-      ctx.fillStyle = C.muted;
-      ctx.fillText(c.sub, lx, ly + 14);
-      if (c.kind === 'news' && c.words && !compact()) {
-        ctx.fillStyle = C.cyan;
-        ctx.globalAlpha = 0.75;
-        c.words.forEach((w, i) => ctx.fillText(w, lx, ly + 30 + i * 13));
-      }
-    }
-    ctx.globalAlpha = 1;
+    if (active) drawLock(active, t, time, still);
 
     // Pings.
     for (let i = pings.length - 1; i >= 0; i--) {
@@ -616,46 +861,87 @@
     }
     ctx.globalAlpha = 1;
 
-    if (active) drawCrawler(t, time, active, still);
-
-    // The denoiser's hand: grab, hold, pull to the crawler, shred.
-    ctx.font = `11px ${MONO}`;
-    for (let i = noise.length - 1; i >= 0; i--) {
-      const q = noise[i];
-      const age = Math.max(0, t - q.born);
-      // Reduced motion: no pull, the tag just stands there for as long and then goes.
-      const u = still ? (age >= q.hold + q.pull ? 1 : 0) : Math.max(0, Math.min(1, (age - q.hold) / q.pull));
-      const e = u * u * (3 - 2 * u);
-      q.x = ease(q.sx, crawler.x - q.w / 2, e);
-      q.y = ease(q.sy, crawler.y - q.h / 2, e);
-      if (u >= 1) {
-        if (!still) shred(crawler.x, crawler.y);
-        noise.splice(i, 1);
+    if (active && !still) {
+      const sz = crawlerSize() * crawlerScale();
+      const speed = Math.hypot(crawler.vx, crawler.vy);
+      if (speed > 14) {
+        const back = crawler.heading + Math.PI;
+        for (let k = 0; k < 2; k++) {
+          trail.push({ x: crawler.x + Math.cos(back) * 20 * sz + (Math.random() - 0.5) * 8, y: crawler.y + Math.sin(back) * 14 * sz + (Math.random() - 0.5) * 8, vx: Math.cos(back) * 24 + (Math.random() - 0.5) * 30, vy: Math.sin(back) * 24 + (Math.random() - 0.5) * 30, born: t, life: 450 + Math.random() * 550 });
+        }
+        while (trail.length > 140) trail.shift();
+      }
+    }
+    ctx.globalCompositeOperation = 'lighter';
+    const tz = crawlerScale();
+    for (let i = trail.length - 1; i >= 0; i--) {
+      const p = trail[i];
+      const age = (t - p.born) / p.life;
+      if (age >= 1 || still) {
+        trail.splice(i, 1);
         continue;
       }
-      const alpha = Math.min(1, age / 200) * (1 - e * 0.7);
-      ctx.globalAlpha = alpha * 0.8;
-      ctx.strokeStyle = '#8994a0';
-      ctx.lineWidth = 0.8;
-      ctx.beginPath();
-      ctx.moveTo(crawler.x, crawler.y);
-      ctx.lineTo(q.x + q.w / 2, q.y + q.h / 2);
-      ctx.stroke();
-      // the claw
-      ctx.beginPath();
-      ctx.moveTo(q.x - 4, q.y - 3);
-      ctx.lineTo(q.x + 2, q.y + q.h / 2);
-      ctx.lineTo(q.x - 4, q.y + q.h + 3);
-      ctx.stroke();
-      ctx.globalAlpha = alpha;
-      ctx.fillStyle = 'rgba(12, 15, 19, 0.9)';
-      ctx.fillRect(q.x, q.y, q.w, q.h);
-      ctx.strokeStyle = C.faint;
-      ctx.strokeRect(q.x + 0.5, q.y + 0.5, q.w - 1, q.h - 1);
-      ctx.fillStyle = C.muted;
-      ctx.fillText(q.label, q.x + 6, q.y + 12);
-      ctx.fillRect(q.x + 5, q.y + 8, q.w - 10, 1); // struck through: it will not be read
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      ctx.globalAlpha = 0.7 * (1 - age);
+      ctx.fillStyle = age < 0.3 ? C.white : C.cyan;
+      const z = (2.2 * (1 - age) + 0.6) * tz;
+      ctx.fillRect(p.x - z / 2, p.y - z / 2, z, z);
     }
+    if (warp && !still) {
+      const age = (t - warp.at) / 650;
+      if (age >= 1) warp = null;
+      else {
+        const grad = ctx.createLinearGradient(warp.x, warp.y, crawler.x, crawler.y);
+        grad.addColorStop(0, `rgba(${NEWS_RGB},0)`);
+        grad.addColorStop(1, `rgba(${NEWS_RGB},${0.55 * (1 - age)})`);
+        ctx.strokeStyle = grad;
+        ctx.lineWidth = 2.2 * (1 - age) + 0.4;
+        ctx.beginPath();
+        ctx.moveTo(warp.x, warp.y);
+        ctx.lineTo(crawler.x, crawler.y);
+        ctx.stroke();
+        ctx.strokeStyle = C.cyan;
+        ctx.lineWidth = 0.8;
+        for (let k = 1; k <= 4; k++) {
+          const f = k / 5;
+          ctx.globalAlpha = 0.32 * (1 - age) * f;
+          ctx.beginPath();
+          ctx.ellipse(warp.x + (crawler.x - warp.x) * f, warp.y + (crawler.y - warp.y) * f, 24 * f + 8, (24 * f + 8) * 0.68, crawler.heading, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      }
+    }
+    for (let i = streams.length - 1; i >= 0; i--) {
+      const p = streams[i];
+      const u = (t - p.born) / p.dur;
+      if (u >= 1 || still) {
+        streams.splice(i, 1);
+        continue;
+      }
+      if (u < 0) continue;
+      const e = u * u;
+      const mx = (p.sx + crawler.x) / 2 + p.bend * (crawler.y - p.sy);
+      const my = (p.sy + crawler.y) / 2 - p.bend * (crawler.x - p.sx);
+      const at = (v) => [(1 - v) * (1 - v) * p.sx + 2 * (1 - v) * v * mx + v * v * crawler.x, (1 - v) * (1 - v) * p.sy + 2 * (1 - v) * v * my + v * v * crawler.y];
+      const [x1, y1] = at(e);
+      const [x0, y0] = at(Math.max(0, e - 0.08));
+      ctx.globalAlpha = 0.85 * Math.min(1, u * 4);
+      ctx.strokeStyle = p.color;
+      ctx.lineWidth = 0.9;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+      ctx.fillStyle = p.color;
+      ctx.fillRect(x1 - 1.2, y1 - 1.2, 2.4, 2.4);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+
+    if (active) drawCrawler(t, time, active, still);
+
+    // Shredded noise: dust in the world.
     ctx.fillStyle = '#9aa5b0';
     for (let i = dust.length - 1; i >= 0; i--) {
       const d = dust[i];
@@ -671,6 +957,52 @@
     }
     ctx.globalAlpha = 1;
 
+    // ── on top, at their own size whatever the zoom: boxes, labels, what routes and galaxies mean ──
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const [csx, csy] = toScreen(crawler.x, crawler.y);
+    ctx.font = `11px ${MONO}`;
+    // The denoiser's hand: grab, hold, pull to the crawler, shred.
+    for (let i = noise.length - 1; i >= 0; i--) {
+      const q = noise[i];
+      const age = Math.max(0, t - q.born);
+      // Reduced motion: no pull, the tag just stands there for as long and then goes.
+      const u = still ? (age >= q.hold + q.pull ? 1 : 0) : Math.max(0, Math.min(1, (age - q.hold) / q.pull));
+      const e = u * u * (3 - 2 * u);
+      q.x = ease(q.sx, crawler.x - q.w / 2, e);
+      q.y = ease(q.sy, crawler.y - q.h / 2, e);
+      if (u >= 1) {
+        if (!still) shred(crawler.x, crawler.y);
+        noise.splice(i, 1);
+        continue;
+      }
+      const [bx, by] = toScreen(q.x + q.w / 2, q.y + q.h / 2);
+      const x = bx - q.w / 2;
+      const y = by - q.h / 2;
+      const alpha = Math.min(1, age / 200) * (1 - e * 0.7);
+      ctx.globalAlpha = alpha * 0.8;
+      ctx.strokeStyle = '#8994a0';
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.moveTo(csx, csy);
+      ctx.lineTo(bx, by);
+      ctx.stroke();
+      // the claw
+      ctx.beginPath();
+      ctx.moveTo(x - 4, y - 3);
+      ctx.lineTo(x + 2, y + q.h / 2);
+      ctx.lineTo(x - 4, y + q.h + 3);
+      ctx.stroke();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = 'rgba(12, 15, 19, 0.9)';
+      ctx.fillRect(x, y, q.w, q.h);
+      ctx.strokeStyle = C.faint;
+      ctx.strokeRect(x + 0.5, y + 0.5, q.w - 1, q.h - 1);
+      ctx.fillStyle = C.muted;
+      ctx.fillText(q.label, x + 6, y + 12);
+      ctx.fillRect(x + 5, y + 8, q.w - 10, 1); // struck through: it will not be read
+    }
+    ctx.globalAlpha = 1;
+
     // The detector's hand: tags, each with a tentacle back to the crawler.
     for (let i = tags.length - 1; i >= 0; i--) {
       const g = tags[i];
@@ -683,39 +1015,197 @@
         g.x += g.vx * dt;
         g.y += g.vy * dt;
       }
+      const [bx, by] = toScreen(g.x + g.w / 2, g.y + g.h / 2);
+      const x = bx - g.w / 2;
+      const y = by - g.h / 2;
       const alpha = Math.min(1, age / 250) * Math.min(1, (g.ttl - age) / 700);
       ctx.globalAlpha = alpha * 0.5;
       ctx.strokeStyle = g.color;
       ctx.lineWidth = 0.6;
       ctx.setLineDash([2, 3]);
       ctx.beginPath();
-      ctx.moveTo(crawler.x, crawler.y);
-      ctx.lineTo(g.x + g.w / 2, g.y + g.h / 2);
+      ctx.moveTo(csx, csy);
+      ctx.lineTo(bx, by);
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.globalAlpha = alpha;
       ctx.fillStyle = g.filled ? g.color : 'rgba(4, 5, 7, 0.86)';
-      ctx.fillRect(g.x, g.y, g.w, g.h);
+      ctx.fillRect(x, y, g.w, g.h);
       ctx.strokeStyle = g.color;
       ctx.lineWidth = 1;
-      ctx.strokeRect(g.x + 0.5, g.y + 0.5, g.w - 1, g.h - 1);
+      ctx.strokeRect(x + 0.5, y + 0.5, g.w - 1, g.h - 1);
       ctx.fillStyle = g.filled ? '#140409' : g.color;
-      ctx.fillText(g.label, g.x + 6, g.y + 12);
+      ctx.fillText(g.label, x + 6, y + 12);
     }
     ctx.globalAlpha = 1;
+    drawText(active);
 
-    if (frames % 15 === 0) setText(hud.frame, String(frames).padStart(4, '0'));
     // A still picture still has to take tags away when their time is up.
     if (still && (tags.length || noise.length)) wake();
   }
 
+  /** Everything read rather than seen, at its own size whatever the zoom: galaxies' names, the nebulae's labels, what routes share, the lock. */
+  function drawText(active) {
+    const z = cam.z;
+    ctx.textBaseline = 'alphabetic';
+    // A crowded map (more than 12 groups) names only its busiest groups and biggest galaxies at the
+    // default zoom, with the one being read and the one under the pointer; zoomed in, every one.
+    const crowded = order.length > 12 && z < room.zoom * 1.4;
+    const busy = (g) => g.members.reduce((t, id) => t + countOf(clouds.get(`g:${id}`) ?? { count: 0 }), 0);
+    const named = new Set(galaxies.slice().sort((a, b) => b.members.length - a.members.length || busy(b) - busy(a)).slice(0, crowded ? 6 : galaxies.length).map((g) => g.key));
+    for (const g of galaxies) {
+      const ring = galaxyRing(g);
+      if (!ring || !g.topics.length) continue;
+      if (!named.has(g.key) && hover?.galaxy !== g.key && !(active && g.members.includes(active.chatId))) continue;
+      const [sx, sy] = toScreen(ring.x, ring.y - ring.r * 0.72);
+      const big = z < 0.8;
+      ctx.font = `${big ? 600 : 500} ${big ? 12.5 : 10.5}px ${MONO}`;
+      ctx.fillStyle = C.teal;
+      ctx.globalAlpha = hover && hover.galaxy === g.key ? 1 : big ? 0.92 : 0.62;
+      const label = `✦ ${g.topics.slice(0, 3).join(' · ')}`;
+      ctx.fillText(label, sx - ctx.measureText(label).width / 2, sy - 6);
+    }
+    // Zoomed far out, only the three busiest groups are named.
+    const few = crowded || z < 0.6;
+    const biggest = new Set([...clouds.values()].filter((c) => c.kind === 'group').sort((a, b) => countOf(b) - countOf(a)).slice(0, crowded ? 10 : 3).map((c) => c.key));
+    for (const c of clouds.values()) {
+      if (!labelled(c)) continue;
+      if (few && !(c.key === activeKey || c.kind === 'news' || hover?.chatId === c.chatId || biggest.has(c.key))) continue;
+      const [lx, ly] = toScreen(c.x + (c.lx ?? c.r * 0.28), c.y + (c.ly ?? -c.r * 0.92 - 8));
+      ctx.font = `${c.key === activeKey ? 600 : 500} ${c.key === activeKey || c.kind === 'news' ? 14 : 12.5}px ${MONO}`;
+      ctx.fillStyle = c.kind === 'news' ? C.cyan : c.key === activeKey ? C.pink : C.ink;
+      ctx.globalAlpha = c.key === activeKey || c.kind === 'news' || hover?.chatId === c.chatId ? 1 : 0.82;
+      ctx.fillText(cut(c.title, 26), lx, ly);
+      ctx.font = `10.5px ${MONO}`;
+      ctx.fillStyle = C.muted;
+      ctx.fillText(mapDay && c.kind === 'group' ? `${n(countOf(c))} on ${mapDay.slice(5).replace('-', '/')}` : c.sub, lx, ly + 14);
+      if (c.kind === 'news' && c.words && !compact()) {
+        ctx.fillStyle = C.cyan;
+        ctx.globalAlpha = 0.75;
+        c.words.forEach((w, i) => ctx.fillText(w, lx, ly + 30 + i * 13));
+      }
+    }
+    // What a route stands for: the topics two groups share, and how much.
+    const strongest = routes.slice(0, 2);
+    ctx.font = `10.5px ${MONO}`;
+    for (const r of routes) {
+      const A = clouds.get(`g:${r.a}`);
+      const B = clouds.get(`g:${r.b}`);
+      if (!A || !B || !r.topics.length) continue;
+      const near = hover && (hover.route === r || hover.chatId === r.a || hover.chatId === r.b);
+      // On a narrow stage, only the route under the pointer (or every one, zoomed in).
+      if (compact() ? !(near || z >= 1.35) : !(near || (active && (active.chatId === r.a || active.chatId === r.b)) || z >= 1.35 || strongest.includes(r))) continue;
+      const [mx, my] = routeMid(r, A, B);
+      const [sx, sy] = toScreen(0.25 * A.x + 0.5 * mx + 0.25 * B.x, 0.25 * A.y + 0.5 * my + 0.25 * B.y);
+      const label = `${r.topics.slice(0, 3).join(' · ')}  ${Math.round(r.overlap * 100)}%`;
+      const w = ctx.measureText(label).width + 10;
+      ctx.globalAlpha = near ? 1 : 0.88;
+      ctx.fillStyle = 'rgba(4, 6, 9, 0.84)';
+      ctx.fillRect(sx - w / 2, sy - 9, w, 16);
+      ctx.strokeStyle = near ? C.teal : 'rgba(79, 209, 176, 0.45)';
+      ctx.lineWidth = 0.8;
+      ctx.strokeRect(sx - w / 2 + 0.5, sy - 8.5, w - 1, 15);
+      ctx.fillStyle = C.teal;
+      ctx.fillText(label, sx - w / 2 + 5, sy + 3);
+    }
+    if (active && lockCorner) {
+      const [sx, sy] = toScreen(lockCorner.x, lockCorner.y);
+      ctx.font = `10px ${MONO}`;
+      ctx.fillStyle = C.pink;
+      ctx.globalAlpha = 0.8 * lockCorner.e;
+      ctx.fillText(`◢ LOCK${lockCorner.live ? ' · LIVE' : ''}`, sx, sy - 6);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /** Where the lock's top-left bracket is (its readout goes above it, drawn with the other text). */
+  let lockCorner = null;
+
+  /** The lock on the group being read: brackets that close in when the crawler arrives, a turning scale, a radar sweep. */
+  function drawLock(a, t, time, still) {
+    const u = still ? 1 : Math.min(1, (t - lockAt) / 520);
+    const e = 1 - Math.pow(1 - u, 3);
+    const sc = 1 + (1 - e) * 0.7;
+    const hw = a.r * 1.08 * sc;
+    const hh = a.r * 0.86 * sc;
+    const L = Math.max(8, Math.min(18, a.r * 0.22));
+    ctx.save();
+    ctx.translate(a.x, a.y);
+    ctx.strokeStyle = C.pink;
+    ctx.lineWidth = 1.1;
+    ctx.globalAlpha = 0.2 + 0.5 * e;
+    for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+      ctx.beginPath();
+      ctx.moveTo(sx * hw, sy * (hh - L));
+      ctx.lineTo(sx * hw, sy * hh);
+      ctx.lineTo(sx * (hw - L), sy * hh);
+      ctx.stroke();
+    }
+    // Hairlines from the brackets toward the edges of the stage, very faint.
+    ctx.globalAlpha = 0.06 * e;
+    ctx.beginPath();
+    ctx.moveTo(-hw - 6, 0);
+    ctx.lineTo(-hw - a.r * 1.6, 0);
+    ctx.moveTo(hw + 6, 0);
+    ctx.lineTo(hw + a.r * 1.6, 0);
+    ctx.stroke();
+    // The radar sweep.
+    if (!still) {
+      ctx.save();
+      ctx.scale(1, 0.74);
+      const rr = a.r * 1.22;
+      const th = time * 1.15;
+      const sweep = ctx.createRadialGradient(0, 0, a.r * 0.2, 0, 0, rr);
+      sweep.addColorStop(0, 'rgba(255,92,138,0)');
+      sweep.addColorStop(1, 'rgba(255,92,138,0.16)');
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = e;
+      ctx.fillStyle = sweep;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, rr, th - 0.55, th);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+    // A turning scale.
+    ctx.rotate(still ? 0 : time * 0.12);
+    ctx.globalAlpha = 0.18 * e;
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    const rr = a.r * 1.24;
+    for (let i = 0; i < 72; i++) {
+      const ang = (i / 72) * Math.PI * 2;
+      const len = i % 9 === 0 ? 7 : 3;
+      ctx.moveTo(Math.cos(ang) * rr, Math.sin(ang) * rr * 0.74);
+      ctx.lineTo(Math.cos(ang) * (rr + len), Math.sin(ang) * (rr + len) * 0.74);
+    }
+    ctx.stroke();
+    ctx.restore();
+    lockCorner = { x: a.x - hw, y: a.y - hh, e, live: a.heat > 0.6 };
+    ctx.globalAlpha = 1;
+  }
+
+  /** A point along two straight segments (foot → knee → hip), 0 at the foot. */
+  const alongLeg = (ex, ey, kx, ky, bx, by, q) => (q < 0.5 ? [ex + (kx - ex) * q * 2, ey + (ky - ey) * q * 2] : [kx + (bx - kx) * (q - 0.5) * 2, ky + (by - ky) * (q - 0.5) * 2]);
+
+  /**
+   * How much bigger than the map's scale the crawler is drawn: it stays between 0.85 and 1.25 of its
+   * own size on the screen at any zoom, so it is never lost on a map seen whole, nor huge up close.
+   */
+  const crawlerScale = () => Math.min(1.25, Math.max(0.85, cam.z)) / cam.z;
+  const crawlerSize = () => Math.max(0.8, view.s) * 1.2;
+
   function drawCrawler(t, time, cloud, still) {
     const cx = crawler.x;
     const cy = crawler.y;
-    const s = Math.max(0.8, view.s) * 1.2;
+    const cz = crawlerScale();
+    const s = crawlerSize() * cz;
+    const feeding = !still && t < crawler.feedUntil;
     // Legs: each holds a point of the nebula and steps to a new one now and then (in still mode,
-    // only when the crawler moves to another group).
-    ctx.lineWidth = 0.8;
+    // only when the crawler moves to another group). Jointed: hip, knee, foot; data runs up them
+    // while it reads.
+    ctx.lineCap = 'round';
     crawler.legs.forEach((leg, i) => {
       if (!leg.placed || leg.key !== cloud.key || (!still && t > leg.next)) {
         const j = Math.floor(Math.random() * cloud.n);
@@ -743,34 +1233,102 @@
       const bx = cx + Math.cos(a) * 22 * s;
       const by = cy + Math.sin(a) * 15 * s;
       const sway = still ? 0 : Math.sin(time * 3 + i) * 6;
-      const kx = (bx + ex) / 2 + Math.cos(a + 1.2) * (10 + sway) * s;
-      const ky = (by + ey) / 2 + Math.sin(a + 1.2) * (10 + sway) * s;
+      const kx = (bx + ex) / 2 + Math.cos(a + 1.2) * (12 + sway) * s;
+      const ky = (by + ey) / 2 + Math.sin(a + 1.2) * (12 + sway) * s;
       ctx.strokeStyle = C.cyan;
-      ctx.globalAlpha = 0.62;
+      ctx.globalAlpha = 0.78;
+      ctx.lineWidth = 1.3 * cz;
       ctx.beginPath();
       ctx.moveTo(bx, by);
-      ctx.quadraticCurveTo(kx, ky, ex, ey);
+      ctx.lineTo(kx, ky);
+      ctx.stroke();
+      ctx.globalAlpha = 0.55;
+      ctx.lineWidth = 0.8 * cz;
+      ctx.beginPath();
+      ctx.moveTo(kx, ky);
+      ctx.lineTo(ex, ey);
       ctx.stroke();
       ctx.globalAlpha = 0.9;
-      ctx.fillStyle = C.cyan;
-      for (const q of [0.35, 0.65]) {
-        const px = (1 - q) * (1 - q) * bx + 2 * (1 - q) * q * kx + q * q * ex;
-        const py = (1 - q) * (1 - q) * by + 2 * (1 - q) * q * ky + q * q * ey;
-        ctx.fillRect(px - 1, py - 1, 2, 2);
-      }
+      ctx.beginPath();
+      ctx.arc(kx, ky, 1.7 * s, 0, Math.PI * 2);
+      ctx.stroke();
       ctx.fillStyle = C.white;
-      ctx.fillRect(ex - 1.5, ey - 1.5, 3, 3);
+      ctx.fillRect(ex - 1.4 * cz, ey - 1.4 * cz, 2.8 * cz, 2.8 * cz);
+      if (!still && u < 1) {
+        // A foot landing: a small ring.
+        ctx.globalAlpha = 0.6 * (1 - u);
+        ctx.beginPath();
+        ctx.arc(ex, ey, (2 + u * 8) * cz, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      if (feeding) {
+        const q = (t / 420 + i * 0.137) % 1;
+        const [px, py] = alongLeg(ex, ey, kx, ky, bx, by, q);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = i % 3 === 0 ? C.pink : C.white;
+        ctx.fillRect(px - 1.3 * cz, py - 1.3 * cz, 2.6 * cz, 2.6 * cz);
+      }
     });
+    ctx.lineCap = 'butt';
     ctx.globalAlpha = 1;
-    // Body: a glow, a ring of cilia, the shell and the core.
+
     ctx.save();
     ctx.translate(cx, cy);
+    ctx.scale(cz, cz);
+    drawShell(crawlerSize(), time, still, feeding);
+    ctx.restore();
+  }
+
+  /** The crawler's body, at the origin, at size `s`. */
+  function drawShell(s, time, still, feeding) {
+    // The glow, and the scanner: a cone of light ahead, sweeping.
     ctx.globalCompositeOperation = 'lighter';
-    ctx.drawImage(glowSprite(), -70 * s, -70 * s, 140 * s, 140 * s);
+    ctx.drawImage(glowSprite(), -80 * s, -80 * s, 160 * s, 160 * s);
+    const sweep = crawler.heading + (still ? 0 : Math.sin(time * 1.6) * 0.38);
+    const reach = 125 * s;
+    const cone = ctx.createRadialGradient(0, 0, 10 * s, 0, 0, reach);
+    cone.addColorStop(0, 'rgba(92,200,236,0.24)');
+    cone.addColorStop(1, 'rgba(92,200,236,0)');
+    ctx.fillStyle = cone;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.arc(0, 0, reach, sweep - 0.27, sweep + 0.27);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(92,200,236,0.3)';
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    for (const edge of [-0.27, 0.27]) {
+      ctx.moveTo(Math.cos(sweep + edge) * 12 * s, Math.sin(sweep + edge) * 12 * s);
+      ctx.lineTo(Math.cos(sweep + edge) * reach, Math.sin(sweep + edge) * reach);
+    }
+    ctx.stroke();
     ctx.globalCompositeOperation = 'source-over';
-    ctx.rotate(crawler.heading);
+    // Two rings turning against each other: a dashed one outside, a segmented one inside.
     ctx.strokeStyle = C.cyan;
-    ctx.globalAlpha = 0.65;
+    ctx.globalAlpha = 0.5;
+    ctx.lineWidth = 0.7;
+    ctx.setLineDash([3, 5]);
+    ctx.lineDashOffset = still ? 0 : -time * 18;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 40 * s, 27 * s, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.save();
+    ctx.scale(1, 0.68);
+    ctx.rotate(still ? 0 : -time * 0.7);
+    ctx.globalAlpha = 0.75;
+    ctx.lineWidth = 2 * s;
+    for (let i = 0; i < 8; i++) {
+      const a0 = (i / 8) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, 31 * s, a0, a0 + 0.42);
+      ctx.stroke();
+    }
+    ctx.restore();
+    // The shell turns to where it goes: cilia, a hexagon with a lattice, an inner hexagon, antennae.
+    ctx.rotate(crawler.heading);
+    ctx.globalAlpha = 0.55;
     ctx.lineWidth = 0.7;
     ctx.beginPath();
     for (let i = 0; i < 44; i++) {
@@ -781,28 +1339,65 @@
       ctx.lineTo(Math.cos(a) * r2, Math.sin(a) * r2 * 0.68);
     }
     ctx.stroke();
+    const hex = (r) => {
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2;
+        const x = Math.cos(a) * r;
+        const y = Math.sin(a) * r * 0.68;
+        if (i) ctx.lineTo(x, y);
+        else ctx.moveTo(x, y);
+      }
+      ctx.closePath();
+    };
     ctx.globalAlpha = 1;
-    ctx.fillStyle = 'rgba(8, 26, 34, 0.92)';
-    ctx.beginPath();
-    ctx.ellipse(0, 0, 24 * s, 16 * s, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(8, 26, 34, 0.94)';
+    hex(25 * s);
     ctx.fill();
     ctx.lineWidth = 1.4;
     ctx.stroke();
     ctx.save();
     ctx.clip();
-    ctx.globalAlpha = 0.35;
+    ctx.globalAlpha = 0.26;
     ctx.lineWidth = 0.6;
     ctx.beginPath();
-    for (let x = -30; x <= 30; x += 4.5) {
-      ctx.moveTo(x * s, -18 * s);
-      ctx.lineTo((x + 10) * s, 18 * s);
+    for (const ang of [0, Math.PI / 3, (2 * Math.PI) / 3]) {
+      const dx = Math.cos(ang);
+      const dy = Math.sin(ang);
+      for (let k = -30; k <= 30; k += 6) {
+        const ox = -dy * k * s;
+        const oy = dx * k * s;
+        ctx.moveTo(ox - dx * 40 * s, oy - dy * 40 * s);
+        ctx.lineTo(ox + dx * 40 * s, oy + dy * 40 * s);
+      }
     }
     ctx.stroke();
     ctx.restore();
+    ctx.globalAlpha = 0.6;
+    ctx.lineWidth = 0.8;
+    hex(13 * s);
+    ctx.stroke();
+    ctx.globalAlpha = 0.85;
+    for (const side of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(19 * s, side * 6 * s);
+      ctx.lineTo(37 * s, side * 13 * s);
+      ctx.stroke();
+      ctx.fillStyle = still || Math.sin(time * 5 + side) > 0 ? C.pink : C.cyan;
+      ctx.fillRect(37 * s - 1.6, side * 13 * s - 1.6, 3.2, 3.2);
+    }
+    // The heart: pink, pulsing (harder while it reads), turning.
+    ctx.globalCompositeOperation = 'lighter';
+    const beat = still ? 0.6 : 0.5 + 0.5 * Math.sin(time * (feeding ? 9 : 4));
+    ctx.globalAlpha = Math.min(1, 0.3 + beat * 0.35 + (feeding ? 0.3 : 0));
+    ctx.drawImage(heartSprite(), -17 * s, -17 * s, 34 * s, 34 * s);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
     ctx.rotate(still ? 0.6 : time * 0.9);
     ctx.fillStyle = C.pink;
     ctx.fillRect(-5 * s, -5 * s, 10 * s, 10 * s);
-    ctx.restore();
+    ctx.fillStyle = C.white;
+    ctx.fillRect(-1.5 * s, -1.5 * s, 3 * s, 3 * s);
   }
 
   let glow = null;
@@ -818,6 +1413,213 @@
     g.fillStyle = grad;
     g.fillRect(0, 0, 128, 128);
     return glow;
+  }
+
+  // ── deep space: what the nebulae float in ──────────────────────────────
+
+  /** Two layers of stars and a galactic band, drawn once per size; a few bright stars breathe. */
+  const sky = { layers: [], bright: [], w: 0, h: 0 };
+  const SKY_PAD = 140;
+  function buildSky() {
+    const W = Math.ceil(view.w + SKY_PAD * 2);
+    const H = Math.ceil(view.h + SKY_PAD * 2);
+    if (!view.w || (sky.w === W && sky.h === H)) return;
+    const R = rng(0x5eed51);
+    const layer = () => {
+      const cv = document.createElement('canvas');
+      cv.width = W;
+      cv.height = H;
+      return [cv, cv.getContext('2d')];
+    };
+    const [far, g0] = layer();
+    // Far clouds of colour, very faint.
+    for (const [fx, fy, fr, rgb, a] of [[0.2, 0.72, 0.42, '70,110,210', 0.08], [0.8, 0.26, 0.48, '125,80,200', 0.07], [0.56, 0.52, 0.36, '40,150,170', 0.05], [0.93, 0.85, 0.3, '200,70,130', 0.035]]) {
+      const x = W * fx;
+      const y = H * fy;
+      const r = Math.max(W, H) * fr;
+      const grad = g0.createRadialGradient(x, y, 0, x, y, r);
+      grad.addColorStop(0, `rgba(${rgb},${a})`);
+      grad.addColorStop(1, `rgba(${rgb},0)`);
+      g0.fillStyle = grad;
+      g0.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    // The galactic band: a river of dust across the stage.
+    const band = (x) => H * 0.66 - (x - W / 2) * 0.32;
+    for (let i = 0; i < 3200; i++) {
+      const x = R() * W;
+      const y = band(x) + gauss(R) * H * 0.085;
+      g0.fillStyle = `rgba(205,218,236,${0.03 + R() * 0.12})`;
+      g0.fillRect(x, y, R() < 0.9 ? 0.8 : 1.3, R() < 0.9 ? 0.8 : 1.3);
+    }
+    for (let i = 0; i < 900; i++) {
+      g0.fillStyle = `rgba(220,230,242,${0.1 + R() * 0.22})`;
+      g0.fillRect(R() * W, R() * H, 0.8, 0.8);
+    }
+    const [mid, g1] = layer();
+    for (let i = 0; i < 260; i++) {
+      const tint = R();
+      g1.fillStyle = tint < 0.08 ? 'rgba(150,200,255,0.6)' : tint < 0.12 ? 'rgba(255,200,170,0.55)' : `rgba(232,238,246,${0.25 + R() * 0.4})`;
+      const z = 0.9 + R() * 0.9;
+      g1.fillRect(R() * W, R() * H, z, z);
+    }
+    sky.layers = [far, mid];
+    sky.bright = Array.from({ length: 36 }, () => ({ x: R() * W, y: R() * H, z: 0.9 + R() * 1.5, ph: R() * 6.283, sp: 0.35 + R() * 1.1, color: R() < 0.18 ? C.cyan : R() < 0.1 ? '#ffd1de' : C.white }));
+    sky.w = W;
+    sky.h = H;
+  }
+
+  /** The sky, in screen space, sliding a little against the camera (parallax). */
+  function drawSky(time, still) {
+    if (!sky.layers.length) return;
+    const dpr = view.dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    [0.035, 0.09].forEach((f, i) => ctx.drawImage(sky.layers[i], -SKY_PAD - cam.x * f, -SKY_PAD - cam.y * f, sky.w, sky.h));
+    for (const b of sky.bright) {
+      const a = still ? 0.6 : 0.3 + 0.4 * (0.5 + 0.5 * Math.sin(time * b.sp + b.ph));
+      const x = b.x - SKY_PAD - cam.x * 0.16;
+      const y = b.y - SKY_PAD - cam.y * 0.16;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = b.color;
+      ctx.fillRect(x - b.z / 2, y - b.z / 2, b.z, b.z);
+      ctx.globalAlpha = a * 0.32;
+      ctx.fillRect(x - b.z * 3.2, y - 0.25, b.z * 6.4, 0.5);
+      ctx.fillRect(x - 0.25, y - b.z * 3.2, 0.5, b.z * 6.4);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ── a nebula's body: gas, core, orbit ──────────────────────────────────
+
+  /** The nebula's gas in one colour: soft clouds along its arms, with dark lanes. Half resolution (it is soft). */
+  function gasOf(c, rgb) {
+    if (!c.sprite) return null;
+    c.gasCache ??= new Map();
+    const kept = c.gasCache.get(rgb);
+    if (kept) return kept;
+    const size = c.sprite.size;
+    const res = Math.max(0.5, view.dpr * 0.5);
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = Math.ceil(size * res);
+    const g = cv.getContext('2d');
+    g.setTransform(res, 0, 0, res, (size / 2) * res, (size / 2) * res);
+    g.globalCompositeOperation = 'lighter';
+    const R = rng(c.seed ^ 0x2545f491);
+    const r = c.r;
+    const blob = (x, y, rad, a) => {
+      const grad = g.createRadialGradient(x, y, 0, x, y, rad);
+      grad.addColorStop(0, `rgba(${rgb},${a})`);
+      grad.addColorStop(0.45, `rgba(${rgb},${a * 0.4})`);
+      grad.addColorStop(1, `rgba(${rgb},0)`);
+      g.fillStyle = grad;
+      g.fillRect(x - rad, y - rad, rad * 2, rad * 2);
+    };
+    blob(0, 0, r * 0.78, 0.13);
+    blob(0, 0, r * 0.3, 0.2);
+    const curl = c.curl ?? 1;
+    for (const a0 of c.arms ?? [0, 2.1, 4.2]) {
+      for (let i = 0; i < 22; i++) {
+        const t = Math.pow(R(), 0.75);
+        const a = a0 + curl * t;
+        blob(Math.cos(a) * t * r + gauss(R) * r * 0.05, Math.sin(a) * t * r * 0.78 + gauss(R) * r * 0.05, r * (0.1 + R() * 0.16) * (1.15 - t * 0.55), 0.03 + R() * 0.045);
+      }
+    }
+    g.globalCompositeOperation = 'destination-out';
+    for (let i = 0; i < 6; i++) {
+      const a = R() * Math.PI * 2;
+      const d = r * (0.22 + R() * 0.5);
+      const rad = r * (0.07 + R() * 0.1);
+      const x = Math.cos(a) * d;
+      const y = Math.sin(a) * d * 0.78;
+      const grad = g.createRadialGradient(x, y, 0, x, y, rad);
+      grad.addColorStop(0, 'rgba(0,0,0,0.55)');
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = grad;
+      g.fillRect(x - rad, y - rad, rad * 2, rad * 2);
+    }
+    const out = { canvas: cv, size };
+    c.gasCache.set(rgb, out);
+    return out;
+  }
+
+  /** A star with diffraction spikes, drawn once: the core of every nebula. */
+  let spikes = null;
+  function spikeSprite() {
+    if (spikes) return spikes;
+    const S = 160;
+    spikes = document.createElement('canvas');
+    spikes.width = spikes.height = S;
+    const g = spikes.getContext('2d');
+    g.translate(S / 2, S / 2);
+    const core = g.createRadialGradient(0, 0, 0, 0, 0, S * 0.18);
+    core.addColorStop(0, 'rgba(255,255,255,0.95)');
+    core.addColorStop(0.25, 'rgba(225,238,255,0.5)');
+    core.addColorStop(1, 'rgba(200,220,255,0)');
+    g.fillStyle = core;
+    g.fillRect(-S / 2, -S / 2, S, S);
+    for (const [rot, len, w] of [[0, 0.5, 1.1], [Math.PI / 2, 0.5, 1.1], [Math.PI / 4, 0.28, 0.6], [-Math.PI / 4, 0.28, 0.6]]) {
+      g.save();
+      g.rotate(rot);
+      const lg = g.createLinearGradient(-S * len, 0, S * len, 0);
+      lg.addColorStop(0, 'rgba(220,235,255,0)');
+      lg.addColorStop(0.5, 'rgba(240,248,255,0.85)');
+      lg.addColorStop(1, 'rgba(220,235,255,0)');
+      g.fillStyle = lg;
+      g.fillRect(-S * len, -w / 2, S * len * 2, w);
+      g.restore();
+    }
+    return spikes;
+  }
+
+  /** The crawler's heart: a pink glow, drawn once. */
+  let heart = null;
+  function heartSprite() {
+    if (heart) return heart;
+    heart = document.createElement('canvas');
+    heart.width = heart.height = 64;
+    const g = heart.getContext('2d');
+    const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, 'rgba(255,92,138,0.9)');
+    grad.addColorStop(0.4, 'rgba(255,92,138,0.35)');
+    grad.addColorStop(1, 'rgba(255,92,138,0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 64, 64);
+    return heart;
+  }
+
+  /**
+   * A group's orbit: a tilted ring, and one satellite for each step of how busy it is right now (its
+   * day's messages, plus what just arrived). Drawn in two halves, so the nebula stands between them.
+   */
+  function drawOrbit(c, time, still, front) {
+    const busy = Math.min(9, Math.round(c.base + c.heat));
+    const rx = c.r * 1.12;
+    const ry = c.r * 0.34;
+    const pink = c.glow > 0.5;
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.rotate(c.tilt);
+    ctx.strokeStyle = pink ? C.pink : `rgb(${c.hue})`;
+    ctx.globalAlpha = (front ? 0.16 : 0.08) + c.glow * (front ? 0.28 : 0.14);
+    ctx.lineWidth = 0.6;
+    ctx.setLineDash([2, 7]);
+    ctx.lineDashOffset = still ? 0 : -time * 6 * c.orbitDir;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, rx, ry, 0, front ? 0 : Math.PI, front ? Math.PI : Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const w = (0.16 + c.heat * 0.06) * c.orbitDir;
+    for (let i = 0; i < busy; i++) {
+      const a = (still ? 0.4 : time * w) + (i / busy) * Math.PI * 2;
+      if (Math.sin(a) >= 0 !== front) continue;
+      for (let k = 3; k >= 0; k--) {
+        const ak = a - k * 0.045 * Math.sign(w || 1);
+        ctx.globalAlpha = (k === 0 ? 0.95 : 0.34 / k) * (front ? 1 : 0.45);
+        ctx.fillStyle = k === 0 ? (pink ? '#ffd1de' : C.white) : pink ? C.pink : `rgb(${c.hue})`;
+        const z = k === 0 ? 2.3 : 1.5;
+        ctx.fillRect(Math.cos(ak) * rx - z / 2, Math.sin(ak) * ry - z / 2, z, z);
+      }
+    }
+    ctx.restore();
   }
 
   // ── words: what the detector tags a kept message with ──────────────────
@@ -866,7 +1668,6 @@
       return el('span', { class: 'hud-field' }, el('span', { class: 'hud-label', text: label }), b);
     };
     stats.replaceChildren(
-      el('span', { class: 'hud-field' }, el('span', { class: 'hud-label', text: 'SWARM' }), el('b', { text: 'group-pulse' })),
       field('GROUPS', 'groups'),
       field('MESSAGES', 'messages'),
       field('NEWS', 'news'),
@@ -875,8 +1676,6 @@
       field('NOISE', 'noise', 'dim'),
       field('WRITES', 'writes', 'teal'),
       field('ERRORS', 'errors'),
-      field('T', 'uptime'),
-      field('FRAME', 'frame'),
     );
   }
   buildHud();
@@ -886,7 +1685,6 @@
   let pulse = null;
   let pulseStale = false;
   let lagsLoaded = false;
-  let startedAt = 0;
   const lags = [];
   let sessionTagged = 0;
   let sessionDropped = 0;
@@ -894,14 +1692,6 @@
   let seenHits = new Set();
   const fresh = new Map();
 
-  setInterval(() => {
-    if (!startedAt || document.hidden) return;
-    const s = Math.max(0, Math.floor(now() - startedAt));
-    const hh = Math.floor(s / 3600);
-    const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
-    const ss = String(s % 60).padStart(2, '0');
-    setText(hud.uptime, `${hh}:${mm}:${ss}`);
-  }, 1000);
 
   function showTitle() {
     const c = clouds.get(activeKey);
@@ -947,32 +1737,6 @@
 
   // ── instruments ────────────────────────────────────────────────────────
 
-  function logLine(verb, what, cls = '', when) {
-    const at = HM.format(when ? when * 1000 : Date.now());
-    const list = $('i-log-list');
-    list.prepend(el('li', { class: `${when ? '' : 'fresh '}${cls}` }, el('time', { text: at }), el('b', { text: verb }), el('span', { text: what })));
-    while (list.children.length > 18) list.lastChild.remove();
-  }
-
-  /** What a row of the activity stream reads as in the crawl log, or null when it is not worth a line. */
-  function describe(a) {
-    if (!a.ok) return ['error', `${a.method} · ${a.target}`, 'pink'];
-    if (a.kind === 'write') return ['WRITE', `${a.method} · ${a.target}`, 'pink'];
-    if (a.method === 'stored') return ['read', `${a.target} +${Number((/^(\d+)/.exec(a.detail) || [])[1] || 1)}`, ''];
-    if (a.method === 'messages.GetPeerDialogs') return ['peek', `${(/→ (\d+)/.exec(a.detail) || [])[1] ?? '?'} chats · ${a.ms ?? '?'}ms`, 'dim'];
-    if (a.method === 'messages.GetHistory' && /→ 0 messages/.test(a.detail)) return ['scan', a.target, 'dim'];
-    if (a.method === 'in the group') return ['link', cut(`${a.target} · ${a.detail}`, 60), 'cyan'];
-    if (a.method === 'news in the group') return ['flag', `HOT · ${a.target}`, 'pink'];
-    if (a.method === 'group was first') return ['flag', `FIRST · ${a.target}`, 'pink'];
-    if (a.method === 'feed failed' || a.method === 'feed back' || a.method === 'news checked') return ['feed', `${a.target} · ${a.method}`, 'cyan'];
-    if (a.method === 'connection lost' || a.method === 'connection back') return ['net', a.method, a.method === 'connection lost' ? 'pink' : ''];
-    if (a.method === 'term burst') return ['burst', cut(`${a.target} · ${(/^"([^"]+)"/.exec(a.detail) || [])[1] || ''}`, 60), 'yellow'];
-    if (a.actor === 'claude' && a.method === 'flagged') return ['flag', `CLAUDE · ${cut(a.target || 'for you', 40)}`, 'pink'];
-    if (a.kind === 'agent') return ['claude', cut(`${a.method}${a.target ? ` · ${a.target}` : ''}`, 60), 'teal'];
-    if (a.actor === 'claude') return ['claude', cut(`${a.method} · ${a.target}`, 60), 'teal'];
-    return null;
-  }
-
   /** Messages stored in the last minute (for the rate), trimmed as they come in. */
   const stored = [];
   function rate() {
@@ -983,38 +1747,8 @@
   setInterval(() => {
     if (document.hidden) return;
     const r = rate();
-    setText($('i-log-rate'), `${r} msg/m`);
     setText($('i-rate'), `${r}/m`);
   }, 2000);
-
-  const removedOf = (chatId) => {
-    const x = pulse && pulse.noise ? pulse.noise.find((r) => r.chatId === chatId) : null;
-    return x ? Object.values(x.removed).reduce((a, b) => a + b, 0) : 0;
-  };
-
-  /** Each nebula: its messages of the day, the part the denoiser removed in grey. */
-  function renderGroups() {
-    if (!state) return;
-    const list = state.sources.filter((s) => s.enabled).sort((a, b) => b.messages24h - a.messages24h);
-    const max = Math.max(1, ...list.map((s) => s.messages24h));
-    setText($('i-groups-n'), `${list.length}/${state.sources.length}`);
-    const box = $('i-groups-list');
-    const sig = JSON.stringify([list.map((s) => [s.chatId, s.title, s.messages24h, removedOf(s.chatId), clouds.get(`g:${s.chatId}`)?.channel]), activeKey]);
-    if (box.__sig === sig) return;
-    box.__sig = sig;
-    box.replaceChildren(...list.slice(0, 8).map((s) => {
-      const on = `g:${s.chatId}` === activeKey;
-      const ch = clouds.get(`g:${s.chatId}`)?.channel;
-      const removed = Math.min(s.messages24h, removedOf(s.chatId));
-      const kept = el('i');
-      const cutBar = el('i', { class: 'cut' });
-      kept.style.width = `${Math.max(s.messages24h ? 2 : 0, ((s.messages24h - removed) / max) * 100)}%`;
-      cutBar.style.width = `${(removed / max) * 100}%`;
-      return el('li', { class: `${on ? 'on' : ''}${ch ? ' channel' : ''}`, title: `${s.title}: ${n(s.messages24h)} messages today, ${n(removed)} removed as noise` },
-        el('div', { class: 'row' }, el('span', { class: 'name', text: s.title }), el('span', { class: 'count', text: s.messages24h ? `${n(s.messages24h)}${removed ? ` · ${Math.round((removed / s.messages24h) * 100)}%` : ''}` : '0' })),
-        el('div', { class: 'bar' }, kept, cutBar));
-    }));
-  }
 
   /** The denoiser: what it removed over the last day, by why, across the groups. */
   function renderDenoiser() {
@@ -1042,63 +1776,6 @@
   }
 
   /** The keyword detector: today's top stories (dashed: how many outlets; filled: your groups). */
-  function renderRadar() {
-    const svg = $('i-radar-svg');
-    const bars = $('i-radar-bars');
-    if (!news) return setText($('i-radar-n'), '—'); // not loaded yet
-    if (!news.enabled) {
-      setText($('i-radar-n'), 'radar off');
-      if (svg.__sig !== 'off') {
-        svg.__sig = 'off';
-        svg.replaceChildren();
-        bars.replaceChildren();
-        bars.__sig = '';
-      }
-      return;
-    }
-    const echoed = news.keywords.filter((k) => k.groups.length).length;
-    const hot = news.alerts.filter((a) => a.kind === 'hot').length;
-    const first = news.alerts.filter((a) => a.kind === 'first').length;
-    setText($('i-radar-n'), `${echoed} in your groups`);
-    const barSig = JSON.stringify([echoed, hot, first]);
-    if (bars.__sig !== barSig) {
-      bars.__sig = barSig;
-      const most = Math.max(1, echoed, hot, first);
-      bars.replaceChildren(...[['stories', echoed, 'teal'], ['hot', hot, 'pink'], ['had it first', first, 'yellow']].map(([label, v, cls]) => {
-        const bar = el('i', { class: cls });
-        bar.style.width = `${(v / most) * 100}%`;
-        return el('li', {}, el('span', { text: label }), el('span', { class: 'b' }, bar), el('b', { text: v }));
-      }));
-    }
-    const topics = news.keywords.filter((k) => k.sources.length >= 2 || k.groups.length).sort((a, b) => b.score - a.score).slice(0, 7);
-    const sig = JSON.stringify(topics.map((k) => [k.label, k.sources.length, k.groups.map((g) => g.count)]));
-    if (svg.__sig === sig) return;
-    svg.__sig = sig;
-    const NS = 'http://www.w3.org/2000/svg';
-    const mk = (tag, attrs) => {
-      const e = document.createElementNS(NS, tag);
-      for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, String(v));
-      return e;
-    };
-    svg.setAttribute('viewBox', '-100 -86 200 172');
-    svg.replaceChildren();
-    const m = Math.max(3, topics.length);
-    const pt = (i, r) => [Math.cos(-Math.PI / 2 + (i / m) * Math.PI * 2) * r, Math.sin(-Math.PI / 2 + (i / m) * Math.PI * 2) * r];
-    for (const ring of [0.33, 0.66, 1]) svg.append(mk('polygon', { points: Array.from({ length: m }, (_, i) => pt(i, ring * 62).join(',')).join(' '), class: 'ring' }));
-    for (let i = 0; i < m; i++) svg.append(mk('line', { x1: 0, y1: 0, x2: pt(i, 62)[0], y2: pt(i, 62)[1], class: 'spoke' }));
-    const maxSources = Math.max(1, ...topics.map((k) => k.sources.length));
-    const echoOf = (k) => k.groups.reduce((s, g) => s + g.count, 0);
-    const maxEcho = Math.max(1, ...topics.map(echoOf));
-    svg.append(mk('polygon', { class: 'outlets', points: Array.from({ length: m }, (_, i) => pt(i, topics[i] ? 10 + 52 * (topics[i].sources.length / maxSources) : 4).join(',')).join(' ') }));
-    svg.append(mk('polygon', { class: 'echo', points: Array.from({ length: m }, (_, i) => pt(i, topics[i] ? 4 + 58 * (Math.log1p(echoOf(topics[i])) / Math.log1p(maxEcho)) : 4).join(',')).join(' ') }));
-    topics.forEach((k, i) => {
-      const [x, y] = pt(i, 76);
-      const label = mk('text', { x, y: y + 3, 'text-anchor': Math.abs(x) < 8 ? 'middle' : x > 0 ? 'start' : 'end', class: k.groups.length ? 'hit' : '' });
-      label.textContent = Array.from(k.label.split(' · ')[0] || '').slice(0, 9).join('');
-      svg.append(label);
-    });
-  }
-
   /** Messages per hour over the last day, and the day's totals. */
   function renderHeat() {
     if (!pulse || !state) return;
@@ -1171,68 +1848,6 @@
     setText($('i-speed-note'), `median of the last ${recent.length} · fastest ${recent[0]}s`);
   }
 
-  // The reader as code: what it is doing, typed out as it happens.
-  const code = { queue: [], typing: null, timer: 0, doneAt: [] };
-  function say(line, cls = '') {
-    code.queue.push([line, cls]);
-    if (code.queue.length > 6) code.queue.splice(0, code.queue.length - 6);
-    if (!code.timer) typeNext();
-  }
-  function typeNext() {
-    code.timer = 0;
-    const pre = $('i-code-pre');
-    if (!code.typing) {
-      const next = code.queue.shift();
-      if (!next) return;
-      const line = el('div', { class: next[1] }, el('span'), el('i', { class: 'cursor' }));
-      pre.append(line);
-      while (pre.children.length > 13) pre.firstChild.remove();
-      for (const c of pre.querySelectorAll('.cursor')) if (c.parentNode !== line) c.remove();
-      code.typing = { chars: Array.from(next[0]), at: 0, node: line.firstChild };
-    }
-    const tp = code.typing;
-    const step = calm.matches || document.hidden ? tp.chars.length : Math.max(1, Math.ceil(tp.chars.length / 26));
-    tp.at = Math.min(tp.chars.length, tp.at + step);
-    tp.node.textContent = tp.chars.slice(0, tp.at).join('');
-    if (tp.at >= tp.chars.length) {
-      code.typing = null;
-      const t = Date.now();
-      code.doneAt.push(t);
-      while (code.doneAt.length && code.doneAt[0] < t - 60_000) code.doneAt.shift();
-    }
-    code.timer = setTimeout(typeNext, code.typing ? 28 : 160);
-  }
-  setInterval(() => {
-    if (document.hidden) return;
-    const since = Date.now() - 60_000;
-    while (code.doneAt.length && code.doneAt[0] < since) code.doneAt.shift();
-    setText($('i-code-rate'), `${code.doneAt.length} l/m`);
-  }, 2000);
-
-  /** Who is signed in, and how digests and notifications are set up. */
-  function renderStatus() {
-    if (!state) return;
-    const a = state.account;
-    const conn = a && a.connection;
-    const parts = a
-      ? [a.name, `ID ${a.id}`, conn ? (conn.state === 'offline' ? 'Telegram unreachable · retrying' : `connected since ${HM.format(conn.since * 1000)}`) : 'signed in', 'revoke in Telegram → Devices']
-      : [state.readerConfigured ? 'not signed in: run npm run login, then restart' : 'not signed in: set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env, then npm run login'];
-    const lw = state.activity.lastWrite;
-    if (lw) parts.push(`last write: ${lw.method} · ${lw.target} · ${HM.format(lw.at * 1000)}`);
-    parts.push(
-      state.bot ? `digests go to chat ${state.reportTo ?? '—'} through @${state.bot.username}` : 'digests stay on this page',
-      state.claude.ready ? `Claude ${state.claude.model} · ${usd(state.costs.day.costUsd)} today · ${usd(state.costs.all.costUsd)} total` : 'Claude API not set: digests come from Claude Desktop',
-      state.notifications ? 'macOS notifications on' : 'notifications off',
-      `messages kept ${state.retentionDays} days`,
-    );
-    const box = $('hud-status');
-    const sig = JSON.stringify(parts);
-    if (box.__sig === sig) return;
-    box.__sig = sig;
-    box.replaceChildren(...parts.map((p, i) => el('span', { class: i === 0 ? 'who' : p.startsWith('last write') ? 'pink' : '' }, p)));
-    setText($('hud-brand'), a ? `${a.name} · read-only` : 'read-only');
-  }
-
   // ── fetching what the view needs on its own ────────────────────────────
 
   async function get(path) {
@@ -1256,7 +1871,6 @@
         lagsLoaded = true;
         renderHeat();
         renderSpeed();
-        renderGroups();
         renderDenoiser();
       } catch {
         // the console is restarting; the next event tries again
@@ -1287,6 +1901,16 @@
       let spawned = 0;
       const dropped = [];
       const tagged = [];
+      // What it reads streams in from the nebula: cyan what is kept, grey what the denoiser drops.
+      const t0 = performance.now();
+      msgs.slice(-6).forEach((m, k) => {
+        for (let q = 0; q < 3; q++) {
+          const j = Math.floor(Math.random() * c.n);
+          streams.push({ sx: c.x + c.pts[j * 3], sy: c.y + c.pts[j * 3 + 1], born: t0 + k * 120 + q * 60, dur: 620 + Math.random() * 420, color: m.noise ? '#8994a0' : C.cyan, bend: (Math.random() - 0.5) * 0.7 });
+        }
+      });
+      while (streams.length > 160) streams.shift();
+      crawler.feedUntil = t0 + 1600;
       for (const m of msgs.slice(-6)) {
         if (m.noise) {
           dropped.push(m.noise);
@@ -1299,17 +1923,8 @@
         }
       }
       if (seed) return;
-      if (dropped.length) {
-        const kinds = [...new Set(dropped)].join(', ');
-        logLine('drop', `${dropped.length} · ${kinds}`, 'dim');
-        say(`denoise(drop=${dropped.length})  # ${kinds}`, 'dim');
-        sessionDropped += dropped.length;
-      }
-      if (tagged.length) {
-        logLine('tag', tagged.join('  '), 'cyan');
-        say(`detect(${tagged.slice(0, 3).map((w) => `"${w}"`).join(', ')})`, 'cyan');
-        sessionTagged += tagged.length;
-      }
+      sessionDropped += dropped.length;
+      sessionTagged += tagged.length;
       renderDenoiser();
       // Stored at `at`; the newest of them was posted at its date: that is how long it took.
       const newest = msgs[msgs.length - 1];
@@ -1342,7 +1957,6 @@
     setState(s) {
       const firstTime = !state;
       state = s;
-      startedAt = s.startedAt || startedAt;
       const enabled = s.sources.filter((x) => x.enabled);
       const keys = new Set(enabled.map((x) => `g:${x.chatId}`));
       for (const k of [...clouds.keys()]) if (k.startsWith('g:') && !keys.has(k)) clouds.delete(k);
@@ -1350,6 +1964,7 @@
       for (const src of enabled) {
         const c = cloudFor(`g:${src.chatId}`, 'group', src.title);
         c.count = src.messages24h;
+        c.base = Math.min(4, Math.log10(1 + src.messages24h) * 1.1);
         c.sub = `${n(src.messages24h)} today · ${src.error ? 'error' : src.behind ? 'catching up' : src.peeked || src.pushed ? 'live' : `every ~${src.everyS >= 60 ? `${Math.round(src.everyS / 60)}m` : `${src.everyS}s`}`}`;
       }
       if (s.news && !clouds.has('news')) cloudFor('news', 'news', 'first-tier news');
@@ -1368,11 +1983,6 @@
           if (firstTime) read(newest.chatId, 4, null, true);
         }
       }
-      if (firstTime) {
-        say('# reader.py · reads your groups, never writes', 'dim');
-        say(`groups = watch(${enabled.length})  # read-only`);
-        say(s.news ? `news = radar(${s.news.sources})  # first-tier feeds` : 'news = None  # PULSE_NEWS=off', s.news ? '' : 'dim');
-      }
       setText(hud.groups, `${enabled.length}/${s.sources.length}`);
       setText(hud.messages, n(s.sources.reduce((t, x) => t + x.messages24h, 0)));
       setText(hud.writes, n(s.activity.counts.write || 0));
@@ -1386,10 +1996,10 @@
       }
       showTitle();
       renderTabs();
-      renderGroups();
       renderHeat();
-      renderStatus();
+      setText($('hud-brand'), s.account ? `${s.account.name} · writes only on your click` : 'writes only on your click');
       if (!pulse) loadPulse();
+      if (firstTime) loadMap('');
       wake();
     },
 
@@ -1400,7 +2010,6 @@
       if (!v.enabled) {
         links.length = 0;
         seenHits = new Set();
-        renderRadar();
         return;
       }
       const channels = new Set(v.sources.filter((x) => x.kind === 'telegram').map((x) => `g:${x.id.slice(3)}`));
@@ -1410,8 +2019,7 @@
         nc.words = v.keywords.filter((k) => k.sources.length >= 2).slice(0, 3).map((k) => cut(k.label, 30));
         if (prev && prev.enabled && v.items24h > prev.items24h) {
           ping(nc.x, nc.y, C.cyan);
-          logLine('feed', `+${v.items24h - prev.items24h} news items`, 'cyan');
-          say(`news.fetch()  # +${v.items24h - prev.items24h} items`);
+          newsFlare = 1;
         }
       }
       // New matches: a message the radar matched that was not in the last view. Each becomes a flag
@@ -1431,8 +2039,6 @@
           focus(g.key);
           spawnTag(`${cut(word, 16)} → ${cut(story, 18)}`, 'news', g);
         }
-        logLine('link', `${cut(h.group, 18)} → ${cut(story, 24)}`, 'cyan');
-        say(`link("${cut(h.group, 14)}", "${cut(story, 18)}")`, 'cyan');
         sessionTagged++;
       }
       seenHits = ids;
@@ -1447,51 +2053,245 @@
       setText(hud.links, n(linkedCount()));
       setText(hud.flags, n(v.alerts.length));
       setText(hud.news, n(v.items24h));
-      renderRadar();
       renderHeat();
       wake();
     },
 
-    /** The rows the page loaded at the start: written into the log only (nothing moves for the past). */
-    history(rows) {
-      for (const a of rows.slice(-120)) {
-        const d = describe(a);
-        if (d) logLine(d[0], d[1], d[2], a.at);
-      }
-    },
-
     /** One row of the activity stream, as it happens. */
     activity(a) {
-      const d = describe(a);
-      if (d) logLine(d[0], d[1], d[2]);
       if (!a.ok) return;
       if (a.kind === 'write') {
-        say(`# WRITE: ${a.method}`, 'pink');
+        ping(crawler.x, crawler.y, C.pink);
+        setTimeout(() => ping(crawler.x, crawler.y, C.pink), 180);
         return;
       }
       const chat = sourceByTitle(a.target);
       if (a.method === 'stored' && chat) {
         const count = Number((/^(\d+)/.exec(a.detail) || [])[1] || 1);
         stored.push([now(), count]);
+        const g = clouds.get(`g:${chat.chatId}`);
+        if (g) g.heat = Math.min(8, g.heat + 1 + Math.log2(count));
         rate(); // trims what is older than a minute
-        say(`read("${cut(a.target, 16)}")  # +${count}`);
         read(chat.chatId, count, a.at);
         loadPulse(4000);
       } else if (a.method === 'messages.GetPeerDialogs') {
         if (clouds.get(activeKey)) ping(crawler.x, crawler.y);
-        say(`peek(chats=${(/→ (\d+)/.exec(a.detail) || [])[1] ?? '?'})  # ${a.ms ?? '?'}ms`, 'dim');
       } else if (a.method === 'news in the group' || a.method === 'group was first') {
         const first = a.method === 'group was first';
-        say(`flag("${cut(a.target, 16)}", ${first ? 'first' : 'hot'}=True)`, 'pink');
         if (chat) spawnTag(first ? 'had it first' : 'HOT', 'news', clouds.get(`g:${chat.chatId}`));
-      } else if (a.method === 'connection lost' || a.method === 'connection back') {
-        say(`# ${a.method}`, 'dim');
       }
     },
   };
 
+  // ── the owner's hands on the map: hover, click, drag, zoom ─────────────
+
+  const card = $('stage-card');
+  let drag = null;
+  const touches = new Map();
+  /** In as far as a nebula's points stay points (2.5×); out as far as the whole map, with a margin. */
+  const zoomLimit = (z) => Math.min(2.5, Math.max(Math.min(room.zoom, 1 / room.g) * 0.7, z));
+  /** The owner's view, at once (dragging, zooming at the pointer). */
+  function setUser(x, y, z) {
+    user.on = true;
+    user.z = zoomLimit(z);
+    user.x = x;
+    user.y = y;
+    cam.x = cam.tx = user.x;
+    cam.y = cam.ty = user.y;
+    cam.z = cam.tz = user.z;
+    wake();
+  }
+  /** The owner's view, eased to (double-click a nebula or a galaxy). */
+  function glideTo(x, y, z) {
+    user.on = true;
+    user.x = x;
+    user.y = y;
+    user.z = zoomLimit(z);
+    wake();
+  }
+  function zoomAt(sx, sy, k) {
+    const [wx, wy] = toWorld(sx, sy);
+    const z = zoomLimit(cam.z * k);
+    setUser(wx - (sx - view.w / 2) / z, wy - (sy - view.h / 2) / z, z);
+  }
+  /** Back to the default view (it follows the crawler). */
+  function fit() {
+    user.on = false;
+    wake();
+  }
+  const local = (e) => {
+    const b = stage.getBoundingClientRect();
+    return [e.clientX - b.left, e.clientY - b.top];
+  };
+  const onControl = (e) => e.target.closest('button, .stage-days, .stage-zoom, .stage-card');
+
+  /** What is under a point of the stage: a nebula, else a route, else a galaxy's disc. */
+  function hitAt(sx, sy) {
+    const [wx, wy] = toWorld(sx, sy);
+    let best = null;
+    let bd = Infinity;
+    for (const c of clouds.values()) {
+      const d = Math.hypot(wx - c.x, wy - c.y);
+      if (d < c.r * 0.72 && d < bd) {
+        bd = d;
+        best = c;
+      }
+    }
+    if (best) return { kind: 'cloud', c: best };
+    for (const r of routes) {
+      const A = clouds.get(`g:${r.a}`);
+      const B = clouds.get(`g:${r.b}`);
+      if (!A || !B) continue;
+      const [mx, my] = routeMid(r, A, B);
+      for (let i = 1; i < 24; i++) {
+        const u = i / 24;
+        const [px, py] = toScreen((1 - u) * (1 - u) * A.x + 2 * (1 - u) * u * mx + u * u * B.x, (1 - u) * (1 - u) * A.y + 2 * (1 - u) * u * my + u * u * B.y);
+        if (Math.hypot(px - sx, py - sy) < 7) return { kind: 'route', r };
+      }
+    }
+    for (const g of galaxies) {
+      const ring = galaxyRing(g);
+      if (ring && Math.hypot(wx - ring.x, (wy - ring.y) / 0.72) < ring.r) return { kind: 'galaxy', g };
+    }
+    return null;
+  }
+
+  /** The card beside the pointer: what a nebula talks about, what a route stands for, what a galaxy shares. */
+  function showCard(hit, sx, sy) {
+    if (!card) return;
+    if (!hit) {
+      card.hidden = true;
+      return;
+    }
+    const day = mapDay ? `on ${mapDay}` : 'today';
+    const name = (id) => cut(clouds.get(`g:${id}`)?.title ?? '?', 20);
+    const lines = [];
+    if (hit.kind === 'cloud' && hit.c.kind === 'news') {
+      lines.push(['First-tier news', 'h'], [`${n(hit.c.count)} items in the last day`, ''], ['Its dashed lines: groups that talked about one of its stories', 'd']);
+    } else if (hit.kind === 'cloud') {
+      const c = hit.c;
+      const near = routes.filter((r) => r.a === c.chatId || r.b === c.chatId).slice(0, 3).map((r) => `${name(r.a === c.chatId ? r.b : r.a)} ${Math.round(r.overlap * 100)}%`);
+      lines.push(
+        [c.title, 'h'],
+        [`${n(countOf(c))} messages ${day}`, ''],
+        [`Talks about: ${(nodeTopics.get(c.chatId) || []).slice(0, 6).join(' · ') || '—'}`, 't'],
+        [near.length ? `Closest by topic: ${near.join(' · ')}` : `No other group shares its topics ${day}`, 'd'],
+        ['Click: its messages · double-click: zoom in', 'k'],
+      );
+    } else if (hit.kind === 'route') {
+      const r = hit.r;
+      lines.push(
+        [`${name(r.a)} ↔ ${name(r.b)}`, 'h'],
+        [`Same topics ${day}: ${r.topics.join(' · ')}`, 't'],
+        [`Overlap ${Math.round(r.overlap * 100)}%: how much of what sets each group apart from the others is the same. The more, the closer they sit.`, 'd'],
+      );
+    } else {
+      const g = hit.g;
+      lines.push([`Galaxy · ${g.members.length} groups`, 'h'], [g.members.map(name).join(' · '), ''], [`What they share ${day}: ${g.topics.join(' · ') || '—'}`, 't'], ['Double-click: zoom in', 'k']);
+    }
+    card.replaceChildren(...lines.map(([text, cls]) => el('div', { class: cls, text })));
+    card.hidden = false;
+    const w = card.offsetWidth;
+    const h = card.offsetHeight;
+    card.style.left = `${Math.max(8, Math.min(view.w - w - 8, sx + 16))}px`;
+    card.style.top = `${Math.max(8, Math.min(view.h - h - 8, sy + 16))}px`;
+  }
+
+  stage.addEventListener('pointerdown', (e) => {
+    if (onControl(e)) return;
+    touches.set(e.pointerId, local(e));
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    drag = { x: e.clientX, y: e.clientY, cx: cam.x, cy: cam.y, moved: false, id: e.pointerId };
+  });
+  stage.addEventListener('pointermove', (e) => {
+    const [sx, sy] = local(e);
+    if (touches.size === 2 && touches.has(e.pointerId)) {
+      // Two fingers: pinch.
+      const [a, b] = [...touches.values()];
+      const before = Math.hypot(a[0] - b[0], a[1] - b[1]);
+      touches.set(e.pointerId, [sx, sy]);
+      const [c, d] = [...touches.values()];
+      const after = Math.hypot(c[0] - d[0], c[1] - d[1]);
+      if (before > 0) zoomAt((c[0] + d[0]) / 2, (c[1] + d[1]) / 2, after / before);
+      drag = null;
+      return;
+    }
+    if (touches.has(e.pointerId)) touches.set(e.pointerId, [sx, sy]);
+    if (drag && e.pointerId === drag.id) {
+      const dx = e.clientX - drag.x;
+      const dy = e.clientY - drag.y;
+      if (!drag.moved && Math.hypot(dx, dy) > 4) {
+        drag.moved = true;
+        stage.setPointerCapture?.(e.pointerId);
+        stage.classList.add('panning');
+        card.hidden = true;
+      }
+      if (drag.moved) return setUser(drag.cx - dx / cam.z, drag.cy - dy / cam.z, cam.z);
+    }
+    if (onControl(e)) return;
+    const hit = hitAt(sx, sy);
+    hover = hit ? { chatId: hit.c?.chatId ?? null, route: hit.r ?? null, galaxy: hit.g?.key ?? null } : null;
+    showCard(hit, sx, sy);
+    stage.classList.toggle('pointing', Boolean(hit && hit.kind !== 'galaxy'));
+    wake();
+  });
+  const release = (e) => {
+    touches.delete(e.pointerId);
+    if (!drag || e.pointerId !== drag.id) return;
+    const moved = drag.moved;
+    drag = null;
+    stage.classList.remove('panning');
+    if (moved || e.type !== 'pointerup') return;
+    const [sx, sy] = local(e);
+    const hit = hitAt(sx, sy);
+    if (hit?.kind === 'cloud' && hit.c.kind === 'group') {
+      focus(hit.c.key);
+      api.onPick?.(hit.c.chatId);
+    }
+  };
+  stage.addEventListener('pointerup', release);
+  stage.addEventListener('pointercancel', release);
+  stage.addEventListener('pointerleave', () => {
+    if (drag) return;
+    hover = null;
+    if (card) card.hidden = true;
+    stage.classList.remove('pointing');
+    wake();
+  });
+  // Plain scrolling scrolls the page; a pinch on the trackpad, or ⌘/Ctrl + scroll, zooms.
+  stage.addEventListener('wheel', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    const [sx, sy] = local(e);
+    zoomAt(sx, sy, Math.exp(-e.deltaY * 0.006));
+  }, { passive: false });
+  stage.addEventListener('dblclick', (e) => {
+    if (onControl(e)) return;
+    const [sx, sy] = local(e);
+    const hit = hitAt(sx, sy);
+    if (hit?.kind === 'cloud') return glideTo(hit.c.x, hit.c.y, Math.max(cam.z * 1.5, room.zoom * 1.6));
+    if (hit?.kind === 'galaxy') {
+      const ring = galaxyRing(hit.g);
+      if (ring) return glideTo(ring.x, ring.y, Math.max(cam.z * 1.3, (view.h * 0.75) / (ring.r * 2 * 0.72)));
+    }
+    zoomAt(sx, sy, 1.8);
+  });
+  $('stage-zoom')?.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-z]');
+    if (!b) return;
+    if (b.dataset.z === 'fit') return fit();
+    zoomAt(view.w / 2, view.h / 2, b.dataset.z === 'in' ? 1.4 : 1 / 1.4);
+  });
+  stage.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === '+' || e.key === '=') zoomAt(view.w / 2, view.h / 2, 1.4);
+    else if (e.key === '-' || e.key === '_') zoomAt(view.w / 2, view.h / 2, 1 / 1.4);
+    else if (e.key === '0') fit();
+    else return;
+    e.preventDefault();
+  });
+
   window.Crawler = api;
   renderSpeed();
-  renderRadar();
   resize();
 })();

@@ -80,7 +80,9 @@ export function describeTarget(req: Record<string, unknown>, titleOf: (chatId: n
   };
   if (typeof req.username === 'string') return `@${req.username}`;
   if (typeof req.hash === 'string') return `invite ${req.hash.slice(0, 4)}…`;
-  const direct = label(req.channel as Peerish) ?? label(req.peer as Peerish);
+  // A chat's notification settings carry it one level down; a forward names where it came from.
+  const direct =
+    label(req.channel as Peerish) ?? label(req.peer as Peerish) ?? label((req.peer as { peer?: Peerish } | undefined)?.peer) ?? label(req.fromPeer as Peerish) ?? (req.chatId !== undefined ? label({ chatId: req.chatId }) : null);
   if (direct) return direct;
   if (Array.isArray(req.id) && req.id.length > 0 && typeof req.id[0] === 'object') return label(req.id[0] as Peerish) ?? '';
   return '';
@@ -93,6 +95,11 @@ export function describeCall(className: string, req: Record<string, unknown>, re
     for (const k of ['limit', 'offsetId', 'minId', 'offsetDate'] as const) if (req[k]) parts.push(`${k} ${String(req[k])}`);
   }
   if (Array.isArray(req.id) && className.endsWith('GetMessages')) parts.push(`${req.id.length} ids`);
+  if (className === 'messages.SendReaction') {
+    const r = (req.reaction as { emoticon?: string }[] | undefined) ?? [];
+    parts.push(`#${String(req.msgId)} ${r.length ? r.map((x) => x.emoticon ?? '?').join('') : 'reaction taken back'}`);
+  }
+  if (className === 'messages.ForwardMessages' && (req.toPeer as Peerish)?.className === 'InputPeerSelf') parts.push('→ Saved Messages');
   const r = res as { messages?: unknown[]; chats?: unknown[]; count?: number } | undefined;
   if (r && Array.isArray(r.messages)) parts.push(`→ ${r.messages.length} messages`);
   return parts.join(' · ');

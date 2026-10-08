@@ -816,6 +816,11 @@ export class Store {
     };
   }
 
+  /** Messages stored with a date in [from, to), across every chat. */
+  countBetween(from: number, to: number): number {
+    return num(this.get('SELECT COUNT(*) AS n FROM messages WHERE date >= ? AND date < ?', from, to)?.n ?? 0);
+  }
+
   messages(chatId: number, from: number, to: number): StoredMessage[] {
     return this.all('SELECT * FROM messages WHERE chat_id = ? AND date >= ? AND date < ? ORDER BY date, message_id', chatId, from, to).map((r) => this.toMessage(r));
   }
@@ -1385,6 +1390,12 @@ export class Store {
 
   outbox(limit = 50): OutboxRow[] {
     return this.all('SELECT * FROM outbox ORDER BY id DESC LIMIT ?', limit).map((r) => this.toOutbox(r));
+  }
+
+  /** The newest stored message of a chat (its Telegram id), or null. */
+  newestMessageId(chatId: number): number | null {
+    const r = this.get('SELECT MAX(message_id) AS id FROM messages WHERE chat_id = ?', chatId);
+    return r && r.id !== null && r.id !== undefined ? num(r.id) : null;
   }
 
   outboxRow(id: number): OutboxRow | null {

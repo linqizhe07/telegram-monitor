@@ -1,7 +1,7 @@
 // Connects the reader account (GramJS over MTProto) from the session saved by `npm run login`.
 
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { Api, TelegramClient, utils } from 'telegram';
+import { Api, errors, TelegramClient, utils } from 'telegram';
 import { returnBigInt } from 'telegram/Helpers.js';
 import { Logger, LogLevel } from 'telegram/extensions/Logger.js';
 import { UpdateConnectionState } from 'telegram/network/index.js';
@@ -28,13 +28,49 @@ export function newClient(config: Config, session = ''): TelegramClient {
 }
 
 /** Never retried by the door itself: a lookup Telegram rations like a username lookup (see invites.ts), and the owner's writes. */
-const NO_RETRY = new Set(['messages.CheckChatInvite', 'channels.JoinChannel', 'messages.ImportChatInvite', 'messages.GetBotCallbackAnswer', 'messages.SendMessage']);
+const NO_RETRY = new Set([
+  'messages.CheckChatInvite',
+  'channels.JoinChannel',
+  'messages.ImportChatInvite',
+  'messages.GetBotCallbackAnswer',
+  'messages.SendMessage',
+  'messages.SendReaction',
+  'messages.ForwardMessages',
+  'channels.LeaveChannel',
+  'messages.DeleteChatUser',
+]);
 
-/** The writes the owner can make from the console, one click at a time: joining, and answering a group's check. */
-export type OwnerWrite = 'channels.JoinChannel' | 'messages.ImportChatInvite' | 'messages.GetBotCallbackAnswer' | 'messages.SendMessage';
+/**
+ * The writes the owner can make from the console, one click at a time: joining, answering a
+ * group's check, and the pad's (posting, replying, reacting, saving to Saved Messages, marking
+ * read, muting, leaving, pressing a bot's button).
+ */
+export type OwnerWrite =
+  | 'channels.JoinChannel'
+  | 'messages.ImportChatInvite'
+  | 'messages.GetBotCallbackAnswer'
+  | 'messages.SendMessage'
+  | 'messages.SendReaction'
+  | 'messages.ForwardMessages'
+  | 'channels.ReadHistory'
+  | 'messages.ReadHistory'
+  | 'account.UpdateNotifySettings'
+  | 'channels.LeaveChannel'
+  | 'messages.DeleteChatUser';
 
 /** Lets exactly one write through: of this kind, matching this request, within a few seconds (the owner's click). */
 export type PermitWrite = (method: OwnerWrite, matches: (request: Record<string, unknown>) => boolean, ms?: number) => void;
+
+/**
+ * A chat's slow mode (SLOWMODE_WAIT_N): only that chat waits. GramJS gives it `seconds` like a
+ * FLOOD_WAIT, but it is not Telegram asking the whole account to slow down.
+ */
+export function slowModeSeconds(err: unknown): number | null {
+  const e = err as { seconds?: number; message?: string; errorMessage?: string };
+  if (err instanceof errors.SlowModeWaitError) return Number(e.seconds) || 0;
+  const m = /SLOWMODE_WAIT_(\d+)/.exec(`${e.errorMessage ?? ''} ${e.message ?? ''}`) ?? /A wait of (\d+) seconds is required before sending another message in this chat/.exec(e.message ?? '');
+  return m ? Number(m[1]) : null;
+}
 
 /**
  * The one door every request goes through: all GramJS helpers use `invoke`, file downloads use
@@ -42,8 +78,9 @@ export type PermitWrite = (method: OwnerWrite, matches: (request: Record<string,
  * nothing about any chat). At this door each request is
  *  - refused if it is a write (join, leave, send, press a button, vote, mark read, open a bot
  *    page, pay, or anything unknown), unless the owner just asked for exactly that one in the
- *    console (`permit`: a join, or an answer to a group's check, one request per click). Nothing
- *    else writes, and Claude cannot ask for a permit: that is enforced here, in code;
+ *    console (`permit`: a join, an answer to a group's check, or a press on the pad; one request
+ *    per click). Nothing else writes, and Claude cannot ask for a permit: that is enforced here,
+ *    in code;
  *  - paced: an account-wide budget of about one request a second (Telegram's limits are not
  *    published; the last public figure was 30 history requests per 30 seconds);
  *  - held while Telegram has asked the account to wait (FLOOD_WAIT), for every chat at once;
@@ -57,17 +94,17 @@ export function superviseRequests(
 ): { pausedUntil: () => number; permit: PermitWrite } {
   const interval = opts.intervalMs ?? 1100;
   // The owner's clicks: each lets one matching write through, briefly.
-  const permits: { method: string; matches: (r: Record<string, unknown>) => boolean; until: number }[] = [];
+  type Permit = { method: string; matches: (r: Record<string, unknown>) => boolean; until: number };
+  const permits: Permit[] = [];
   const permit: PermitWrite = (method, matches, ms = 20_000) => {
     permits.push({ method, matches, until: Date.now() + ms });
   };
-  const takePermit = (className: string, req: Record<string, unknown>): boolean => {
+  const takePermit = (className: string, req: Record<string, unknown>): Permit | null => {
     const now = Date.now();
     for (let i = permits.length - 1; i >= 0; i--) if (permits[i].until < now) permits.splice(i, 1);
     const i = permits.findIndex((p) => p.method === className && p.matches(req));
-    if (i < 0) return false;
-    permits.splice(i, 1);
-    return true;
+    if (i < 0) return null;
+    return permits.splice(i, 1)[0];
   };
   let tokens = opts.burst ?? 5;
   let refilledAt = Date.now();
@@ -102,7 +139,8 @@ export function superviseRequests(
       const req = request as unknown as Record<string, unknown>;
       const kind = classify(request.className, req as { increment?: boolean });
       const target = describeTarget(req, titleOf);
-      const owners = kind === 'write' && takePermit(request.className, req);
+      const ownerPermit = kind === 'write' ? takePermit(request.className, req) : null;
+      const owners = Boolean(ownerPermit);
       if (kind === 'write' && (opts.readOnly ?? true) && !owners) {
         activity.record({
           actor: 'reader',
@@ -117,6 +155,13 @@ export function superviseRequests(
       }
       for (let attempt = 0; ; attempt++) {
         if (kind !== 'system') await turn();
+        // The owner's click is for now. A write that waited past its permit (a FLOOD_WAIT hold, the
+        // pacing) is not sent late, and none goes into a dropped connection to leave on reconnecting.
+        const late = ownerPermit && Date.now() > ownerPermit.until ? 'PERMIT_EXPIRED' : ownerPermit && (client as { connected?: boolean }).connected === false ? 'OFFLINE' : null;
+        if (late) {
+          activity.record({ actor: 'owner', kind: 'error', method: request.className, target, detail: late === 'OFFLINE' ? 'not sent: the connection to Telegram is down' : "not sent: it waited past the owner's click (Telegram had asked the account to wait)", ok: false, ms: 0 });
+          throw Object.assign(new Error(`${late} ${request.className}`), { errorMessage: late });
+        }
         const started = Date.now();
         try {
           const res = await call(request, ...rest);
@@ -125,6 +170,12 @@ export function superviseRequests(
         } catch (err) {
           const e = err as { errorMessage?: string; message?: string; seconds?: number };
           const code = e.errorMessage ?? e.message ?? String(err);
+          const slow = slowModeSeconds(err);
+          if (slow !== null) {
+            // One chat's slow mode: that chat waits, nothing else does.
+            activity.record({ actor: owners ? 'owner' : 'reader', kind: 'error', method: request.className, target, detail: `SLOWMODE_WAIT ${slow}s: this chat's slow mode (nothing else waits)`, ok: false, ms: Date.now() - started });
+            throw err;
+          }
           const wait = typeof e.seconds === 'number' ? e.seconds : /FLOOD_WAIT_(\d+)/.test(code) ? Number(/FLOOD_WAIT_(\d+)/.exec(code)![1]) : null;
           if (wait !== null) {
             // Telegram asked this account to slow down: hold every request, not just this one.

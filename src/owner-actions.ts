@@ -18,7 +18,8 @@ import { generateRandomLong } from 'telegram/Helpers.js';
 import type { Activity } from './activity.ts';
 import { keyOf } from './invite-rules.ts';
 import type { InviteTracker, Requester } from './invites.ts';
-import type { PermitWrite } from './reader-client.ts';
+import { SPAM_HOLD } from './controller.ts';
+import { slowModeSeconds, type PermitWrite } from './reader-client.ts';
 import { chatIdOf, explain, FOLDER_LINK, parseRef, peerOf, type MtEntity, type MtMessage } from './reader.ts';
 import type { Store } from './store.ts';
 
@@ -74,6 +75,16 @@ export class OwnerActions {
   joinBudget(): { ok: boolean; message: string; usedHour: number; usedDay: number } {
     const now = this.d.now();
     const j = this.joins();
+    // Telegram's PEER_FLOOD, met by a join or by the pad: nothing others would see for a day.
+    try {
+      const hold = JSON.parse(this.d.store.getKv(SPAM_HOLD) ?? '') as { until: number; why: string };
+      if (hold.until > j.blockedUntil) {
+        j.blockedUntil = hold.until;
+        j.why = hold.why;
+      }
+    } catch {
+      // no hold
+    }
     const usedHour = j.at.filter((t) => t > now - 3600).length;
     const usedDay = j.at.filter((t) => t > now - 86_400).length;
     const at = (t: number) => new Date(t * 1000).toISOString().slice(11, 16);
@@ -212,6 +223,7 @@ export class OwnerActions {
     if (/CHANNELS_TOO_MUCH/.test(code)) return { ok: false, chatId, message: 'The account is in as many groups and channels as Telegram allows: leave some in the app first.' };
     if (/PEER_FLOOD/.test(code)) {
       this.holdJoins(86_400, 'Telegram limits this account for now (it suspects spam). Check @SpamBot in your Telegram app.');
+      this.d.store.setKv(SPAM_HOLD, JSON.stringify({ until: this.d.now() + 86_400, why: 'Telegram limits this account for now (it suspects spam). Check @SpamBot in your Telegram app.' }));
       return { ok: false, chatId, message: 'Telegram limits this account for now (it suspects spam): no joins from here for a day. Check @SpamBot in your Telegram app.' };
     }
     if (e.retryAfter > 0) {
@@ -293,7 +305,8 @@ export class OwnerActions {
     } catch (err) {
       const e = explain(err);
       if (/CHAT_WRITE_FORBIDDEN|CHAT_SEND_PLAIN_FORBIDDEN|USER_BANNED_IN_CHANNEL/.test(e.code)) return { ok: false, message: 'The account cannot post there yet: this check is answered somewhere else (often in the bot\'s private chat). Use your Telegram app.' };
-      if (/SLOWMODE_WAIT/.test(e.code)) return { ok: false, message: 'The group has slow mode on: wait a little, then send it again.' };
+      const slow = slowModeSeconds(err);
+      if (slow !== null) return { ok: false, message: `The group has slow mode on: send it again in ${slow}s.` };
       if (/ALLOW_PAYMENT_REQUIRED|PAYMENT/.test(e.code)) return { ok: false, message: 'Posting there costs Stars. This page never pays: answer it in your Telegram app.' };
       return { ok: false, message: e.message };
     }

@@ -8,6 +8,7 @@ import { Engine } from './engine.ts';
 import { InviteTracker, type Invoker } from './invites.ts';
 import { AnthropicLlm } from './llm.ts';
 import { NewsRadar } from './news.ts';
+import { Controller } from './controller.ts';
 import { OwnerActions } from './owner-actions.ts';
 import { MacNotifier, NullNotifier, type Notifier } from './notify.ts';
 import { connectReader, type ReaderConnection } from './reader-client.ts';
@@ -214,6 +215,20 @@ async function main(): Promise<void> {
       discovery,
       // Joining and answering a group's check, on the owner's click only.
       owner: connection && invites ? new OwnerActions({ raw: connection.raw, permit: connection.permitWrite, store, activity, tracker: invites, now, likelyScams: () => discovery?.likelyScams() ?? new Set() }) : null,
+      // The pad: the owner's hands on Telegram, one click per request (src/controller.ts).
+      pad: connection
+        ? new Controller({
+            raw: connection.raw,
+            permit: connection.permitWrite,
+            store,
+            activity,
+            now,
+            pullSoon: (chatId) => void setTimeout(() => void reader?.pullNow(chatId).catch(() => 0), 1500),
+            listSoon: () => reader?.reconcileSoon(),
+            held: connection.pausedUntil,
+            online: () => connection.state().state === 'online',
+          })
+        : null,
       digestNow: (chatId) => {
         const chat = store.getChat(chatId);
         return engine.digest(chatId, { kind: 'manual', to: chat?.kind === 'watched' ? (chat.reportChatId ?? undefined) : undefined });
