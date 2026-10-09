@@ -258,3 +258,26 @@ test('a membership notice loads the chat list only when it can mean a join, a le
   await wait();
   assert.equal(loads(), before + 2, 'the same chat again within the hour: the hourly check will see it');
 });
+
+test('a Discord channel is never Telegram\'s: the chat-list check leaves it, and the read loop never asks Telegram for it', async () => {
+  const env = setup();
+  env.account.dialogs = [ch(3333, 'Alpha VIP')];
+  await env.reader.reconcile();
+  const { chat } = env.store.addDiscordChannel({ channelId: '1100000000000000011', guildId: '1000000000000000001', guildName: 'Ours', name: 'feeds', type: 0 }, 42, true, DEFAULTS);
+  // Even dressed as a chat the account left, it is not in Telegram's list and never will be.
+  env.store.updateChat(chat.chatId, { readerOrigin: 'dialog' });
+  env.store.setKv(`reader_off_reason:${chat.chatId}`, 'left');
+  const r = await env.reader.reconcile();
+  assert.deepEqual(r.left, []);
+  assert.ok(env.store.getChat(chat.chatId), 'still a source');
+  assert.equal(env.store.getChat(chat.chatId)!.readerOrigin, 'dialog', 'not touched at all');
+
+  const lists = env.account.dialogParams.length;
+  const stop = env.reader.start();
+  await new Promise((r) => setTimeout(r, 40));
+  stop();
+  assert.ok(env.account.pulls.includes('Alpha VIP'), 'the Telegram chat is read');
+  assert.ok(!env.account.pulls.some((p) => /feeds|Ours/.test(p)), 'the Discord one is not');
+  assert.ok(env.account.dialogParams.slice(lists).every((p) => p.limit !== 500), 'no chat-list lookup to find it');
+  assert.equal(env.store.getChat(chat.chatId)!.readerError, null);
+});

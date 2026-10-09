@@ -21,6 +21,8 @@ export interface EngineDeps {
    * messages posted while the service was offline are in) and refreshes reactions and edits.
    */
   reader?: { refresh(chat: ChatRow, window: Window): Promise<void>; catchUp?(chat: ChatRow): Promise<boolean> } | null;
+  /** Discord sources catch up through the Discord bot, never the Telegram reader. */
+  discord?: { catchUp(chat: ChatRow): Promise<boolean> } | null;
 }
 
 const pct = (x: number | null) => (x === null ? 'n/a' : `${Math.round(x * 100)}%`);
@@ -102,7 +104,13 @@ export class Engine {
       const s = strings(this.uiLang(chat));
       const post = { replyTo: opts.replyTo, threadId: opts.threadId, to: opts.to };
 
-      if (chat.kind === 'watched' && this.deps.reader) {
+      if (chat.kind === 'watched' && chat.platform === 'discord') {
+        const current = await (this.deps.discord?.catchUp(chat) ?? Promise.resolve(false)).catch((err) => {
+          log(`chat ${chatId}: Discord catch-up failed: ${describeError(err)}`);
+          return false;
+        });
+        if (!current) log(`chat ${chatId}: not fully caught up; the digest uses what has arrived so far`);
+      } else if (chat.kind === 'watched' && this.deps.reader) {
         const reader = this.deps.reader;
         const current = await (reader.catchUp?.(chat) ?? Promise.resolve(true)).catch((err) => {
           log(`chat ${chatId}: reader catch-up failed: ${describeError(err)}`);
@@ -132,6 +140,7 @@ export class Engine {
           version: genome.version,
           validIds: new Set(transcript.byId.keys()),
           streaks: streaks(store, row.digest),
+          link: chat.platform === 'discord' ? (id) => store.discordLink(chat.chatId, id) : undefined,
         });
         const ids: number[] = [];
         for (const [i, html] of parts.entries()) {

@@ -41,9 +41,34 @@ export interface ChatRow {
   readerPeer: string | null;
   /** How it became a source: 'dialog' = found in the account's own chat list; 'manual' = added by name or link. */
   readerOrigin: 'dialog' | 'manual' | null;
+  /** Where it is: a Telegram chat, or a Discord channel read through the Discord bot (src/discord.ts). */
+  platform: Platform;
 }
 
 export type ChatKind = 'group' | 'watched' | 'report';
+export type Platform = 'telegram' | 'discord';
+
+/**
+ * Discord channels get chat ids from here up (DISCORD_BASE + 1, + 2…, never reused): past any id
+ * Telegram gives (at most 52 bits), and still exact in a double. Discord's own ids (snowflakes, 64
+ * bits) are kept as text, in the discord_* tables.
+ */
+export const DISCORD_BASE = 8_000_000_000_000_000;
+export const isDiscordChat = (chatId: number): boolean => chatId > DISCORD_BASE;
+
+export interface DiscordChannelRow {
+  chatId: number;
+  channelId: string;
+  guildId: string;
+  guildName: string;
+  name: string;
+  /** Discord's channel type: 0 text, 5 announcement. */
+  type: number;
+  /** The newest message read (a snowflake): catching up starts after it. */
+  lastId: string | null;
+  /** Posts more than talk: an announcement channel, or one that followed channels post into. */
+  feed: boolean;
+}
 
 export interface UserRow {
   userId: number;
@@ -491,6 +516,28 @@ CREATE TABLE IF NOT EXISTS news_alerts (
   detail TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (chat_id, topic_id, kind)
 );
+CREATE TABLE IF NOT EXISTS discord_channels (
+  chat_id INTEGER PRIMARY KEY,
+  channel_id TEXT NOT NULL UNIQUE,
+  guild_id TEXT NOT NULL,
+  guild_name TEXT NOT NULL,
+  name TEXT NOT NULL,
+  type INTEGER NOT NULL,
+  last_id TEXT,
+  feed INTEGER NOT NULL DEFAULT 0,
+  next_local INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS discord_messages (
+  chat_id INTEGER NOT NULL,
+  local INTEGER NOT NULL,
+  snowflake TEXT NOT NULL,
+  PRIMARY KEY (chat_id, local)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS discord_messages_by_snowflake ON discord_messages (chat_id, snowflake);
+CREATE TABLE IF NOT EXISTS discord_users (
+  n INTEGER PRIMARY KEY AUTOINCREMENT,
+  snowflake TEXT NOT NULL UNIQUE
+);
 `;
 
 type Row = Record<string, unknown>;
@@ -541,6 +588,7 @@ export class Store {
       ['chats', 'reader_origin', 'TEXT'],
       ['digests', 'posted_chat_id', 'INTEGER'],
       ['outbox', 'source_chat_id', 'INTEGER'],
+      ['chats', 'platform', "TEXT NOT NULL DEFAULT 'telegram'"],
     ];
     for (const [table, column, type] of added) {
       const cols = (this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
@@ -572,6 +620,20 @@ export class Store {
 
   private all(sql: string, ...params: Param[]): Row[] {
     return this.q(sql).all(...params) as Row[];
+  }
+
+  /** Runs `fn` so that, if it throws, only what it wrote is undone: inside a transaction or not. */
+  savepoint<T>(fn: () => T): T {
+    this.db.exec('SAVEPOINT one');
+    try {
+      const out = fn();
+      this.db.exec('RELEASE one');
+      return out;
+    } catch (err) {
+      this.db.exec('ROLLBACK TO one');
+      this.db.exec('RELEASE one');
+      throw err;
+    }
   }
 
   transaction<T>(fn: () => T): T {
@@ -613,6 +675,7 @@ export class Store {
       readerError: strOrNull(r.reader_error),
       readerPeer: strOrNull(r.reader_peer),
       readerOrigin: (strOrNull(r.reader_origin) as ChatRow['readerOrigin']) ?? null,
+      platform: (str(r.platform) || 'telegram') as Platform,
     };
   }
 
@@ -725,6 +788,8 @@ export class Store {
       this.run('DELETE FROM messages WHERE chat_id = ?', chatId);
       this.run('DELETE FROM users WHERE chat_id = ?', chatId);
       for (const key of SOURCE_KEYS) this.run('DELETE FROM kv WHERE key = ?', `${key}:${chatId}`);
+      this.run('DELETE FROM discord_messages WHERE chat_id = ?', chatId);
+      this.run('DELETE FROM discord_channels WHERE chat_id = ?', chatId);
       this.run('DELETE FROM chats WHERE chat_id = ?', chatId);
     });
     return true;
@@ -924,6 +989,7 @@ export class Store {
   purgeBefore(cutoff: number): { messages: number; shadows: number } {
     const messages = this.run('DELETE FROM messages WHERE date < ?', cutoff).changes;
     const shadows = this.run("DELETE FROM digests WHERE kind = 'shadow' AND window_end < ?", cutoff).changes;
+    if (messages) this.pruneDiscordMessages();
     return { messages, shadows };
   }
 
@@ -932,7 +998,9 @@ export class Store {
   optOut(chatId: number, userId: number): number {
     return this.transaction(() => {
       this.run('INSERT OR IGNORE INTO optouts (chat_id, user_id, created_at) VALUES (?, ?, ?)', chatId, userId, this.clock());
-      return this.run('DELETE FROM messages WHERE chat_id = ? AND user_id = ?', chatId, userId).changes;
+      const n = this.run('DELETE FROM messages WHERE chat_id = ? AND user_id = ?', chatId, userId).changes;
+      if (n) this.pruneDiscordMessages();
+      return n;
     });
   }
 
@@ -1518,6 +1586,8 @@ export class Store {
         // Storage positions start over: readers' places from before (agent-views) are reset.
         this.setKv('messages_epoch', String(Number(this.getKv('messages_epoch') ?? 0) + 1));
         deleted.people = this.run('DELETE FROM users').changes;
+        // Discord message ids go with them; each channel's counter and place stay, so ids are never reused.
+        this.run('DELETE FROM discord_messages');
         // The news radar's record of what it saw and flagged goes too; feeds are read afresh.
         deleted.news = this.run('DELETE FROM news_items').changes;
         this.run('DELETE FROM news_alerts');
@@ -1539,6 +1609,105 @@ export class Store {
       compacted = false; // another process held the file: the rows are gone, the space comes back later
     }
     return { deleted, compacted };
+  }
+
+  // ── Discord channels (src/discord.ts) ───────────────────────────────────
+
+  private toDiscordChannel(r: Row): DiscordChannelRow {
+    return {
+      chatId: num(r.chat_id),
+      channelId: str(r.channel_id),
+      guildId: str(r.guild_id),
+      guildName: str(r.guild_name),
+      name: str(r.name),
+      type: num(r.type),
+      lastId: strOrNull(r.last_id),
+      feed: num(r.feed) === 1,
+    };
+  }
+
+  discordChannel(by: { channelId: string } | { chatId: number }): DiscordChannelRow | null {
+    const r = 'channelId' in by ? this.get('SELECT * FROM discord_channels WHERE channel_id = ?', by.channelId) : this.get('SELECT * FROM discord_channels WHERE chat_id = ?', by.chatId);
+    return r ? this.toDiscordChannel(r) : null;
+  }
+
+  discordChannels(): DiscordChannelRow[] {
+    return this.all('SELECT * FROM discord_channels ORDER BY chat_id').map((r) => this.toDiscordChannel(r));
+  }
+
+  /**
+   * A Discord channel as a source: on first sight a watched chat with a chat id of its own (never
+   * reused), titled "Server · #channel", digests going to `reportChatId`; after that its names are
+   * kept current. No @username, no Telegram address and no Telegram type, so nothing that reads
+   * Telegram ever takes it for a Telegram chat.
+   */
+  addDiscordChannel(
+    c: { channelId: string; guildId: string; guildName: string; name: string; type: number },
+    reportChatId: number | null,
+    enabled: boolean,
+    defaults: ChatDefaults,
+  ): { chat: ChatRow; created: boolean } {
+    const title = `${c.guildName} · #${c.name}`;
+    const known = this.discordChannel({ channelId: c.channelId });
+    if (known) {
+      this.run('UPDATE discord_channels SET guild_name = ?, name = ?, type = ?, feed = MAX(feed, ?) WHERE chat_id = ?', c.guildName, c.name, c.type, c.type === 5 ? 1 : 0, known.chatId);
+      this.run('UPDATE chats SET title = ? WHERE chat_id = ?', title, known.chatId);
+      return { chat: this.getChat(known.chatId)!, created: false };
+    }
+    return this.transaction(() => {
+      const n = Number(this.getKv('discord_chats') ?? 0) + 1;
+      this.setKv('discord_chats', String(n));
+      const chatId = DISCORD_BASE + n;
+      this.run('INSERT INTO discord_channels (chat_id, channel_id, guild_id, guild_name, name, type, feed) VALUES (?, ?, ?, ?, ?, ?, ?)', chatId, c.channelId, c.guildId, c.guildName, c.name, c.type, c.type === 5 ? 1 : 0);
+      this.upsertChat({ chatId, title, username: null, type: 'discord' }, defaults);
+      this.run("UPDATE chats SET platform = 'discord' WHERE chat_id = ?", chatId);
+      this.updateChat(chatId, { kind: 'watched', reportChatId, readerRef: `discord:${c.channelId}`, enabled, readerError: null });
+      return { chat: this.getChat(chatId)!, created: true };
+    });
+  }
+
+  updateDiscordChannel(chatId: number, patch: { lastId?: string; feed?: boolean }): void {
+    if (patch.lastId !== undefined) this.run('UPDATE discord_channels SET last_id = ? WHERE chat_id = ?', patch.lastId, chatId);
+    if (patch.feed !== undefined) this.run('UPDATE discord_channels SET feed = ? WHERE chat_id = ?', patch.feed ? 1 : 0, chatId);
+  }
+
+  /** The id a Discord message has here (its channel's next number, never reused), and whether it is new. */
+  discordMessageId(chatId: number, snowflake: string): { id: number; created: boolean } {
+    const known = this.get('SELECT local FROM discord_messages WHERE chat_id = ? AND snowflake = ?', chatId, snowflake);
+    if (known) return { id: num(known.local), created: false };
+    const next = this.get('SELECT next_local FROM discord_channels WHERE chat_id = ?', chatId);
+    if (!next) throw new Error(`no Discord channel for chat ${chatId}`);
+    const id = num(next.next_local);
+    this.run('UPDATE discord_channels SET next_local = ? WHERE chat_id = ?', id + 1, chatId);
+    this.run('INSERT INTO discord_messages (chat_id, local, snowflake) VALUES (?, ?, ?)', chatId, id, snowflake);
+    return { id, created: true };
+  }
+
+  /** The id a Discord message already has here, if it was stored. */
+  knownDiscordMessage(chatId: number, snowflake: string): number | null {
+    const r = this.get('SELECT local FROM discord_messages WHERE chat_id = ? AND snowflake = ?', chatId, snowflake);
+    return r ? num(r.local) : null;
+  }
+
+  /** A Discord user as a user id here (DISCORD_BASE + n: Telegram never gives one so high). */
+  discordUserId(snowflake: string): number {
+    this.run('INSERT OR IGNORE INTO discord_users (snowflake) VALUES (?)', snowflake);
+    return DISCORD_BASE + num(this.get('SELECT n FROM discord_users WHERE snowflake = ?', snowflake)!.n);
+  }
+
+  /** The link to a stored Discord message, or null. */
+  discordLink(chatId: number, messageId: number): string | null {
+    const r = this.get(
+      'SELECT c.guild_id, c.channel_id, m.snowflake FROM discord_messages m JOIN discord_channels c ON c.chat_id = m.chat_id WHERE m.chat_id = ? AND m.local = ?',
+      chatId,
+      messageId,
+    );
+    return r ? `https://discord.com/channels/${str(r.guild_id)}/${str(r.channel_id)}/${str(r.snowflake)}` : null;
+  }
+
+  /** Discord ids of messages no longer stored (retention, an opt-out) go too. */
+  private pruneDiscordMessages(): void {
+    this.run('DELETE FROM discord_messages WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = discord_messages.chat_id AND m.message_id = discord_messages.local)');
   }
 
   // ── invites and memberships (private groups, docs/private-groups.md) ─────

@@ -277,6 +277,10 @@ input[role="switch"]:disabled { opacity: 0.5; cursor: wait; }
 .pill.read { color: var(--cyan); border-color: rgb(92 200 236 / 0.4); }
 .pill.llm, .pill.first { color: #12100a; background: var(--yellow); border-color: var(--yellow); }
 .pill.hot { color: #12040a; background: var(--pink); border-color: var(--pink); }
+.pill.discord { color: #aab4ff; border-color: rgb(88 101 242 / 0.65); }
+.steps { margin: 8px 0 0; padding-left: 20px; font-size: 12.5px; line-height: 1.75; color: var(--ink-2); }
+.steps code { padding: 0 4px; border: 1px solid var(--line-2); font-size: 11.5px; color: var(--white); }
+.steps a { color: var(--cyan); }
 .chip { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border: 1px solid var(--line); color: var(--muted); font-size: 10.5px; white-space: nowrap; }
 .chip.guard { color: var(--yellow); border-color: rgb(232 192 90 / 0.35); }
 .lag { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border: 1px solid var(--line-2); color: var(--muted); font-size: 10.5px; font-weight: 600; white-space: nowrap; }

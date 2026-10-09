@@ -25,8 +25,8 @@ import {
   formatNew,
   inContext,
   linkPattern,
+  linkTo,
   messageLine,
-  messageLink,
   newMessages,
   pastDigests,
   phrasesOf,
@@ -209,6 +209,7 @@ function firstPage(blocks: string[], hint: string): string {
 }
 
 const links = (c: ChatRow) => {
+  if (c.platform === 'discord') return "message links: each message has its own (Discord's id, not #id): get_messages gives them";
   const l = linkPattern(c);
   return l ? `message links: ${l}` : 'no message links (a basic group)';
 };
@@ -483,7 +484,7 @@ server.registerTool(
     note('get_messages', c.title, `${ids.length} ids · ±${around}${thread ? ' · thread' : ''}`);
     const lines = messages.map((m) => {
       const line = messageLine(m, name, time, 1200);
-      const link = asked.has(m.messageId) ? messageLink(c, m.messageId) : null;
+      const link = asked.has(m.messageId) ? linkTo(store, c, m.messageId) : null;
       return `${asked.has(m.messageId) ? '▶ ' : '  '}${line}${link ? ` ${link}` : ''}`;
     });
     const head = `${c.title} · ${messages.length} messages (${c.timezone}) · ${links(c)}${missing.length ? `\nNot stored (older than ${config.retentionDays} days, deleted, or never captured): #${missing.join(', #')}` : ''}`;
@@ -621,7 +622,7 @@ function playbookText(c: ChatRow): string {
     g.playbook,
     '',
     'Write the digest in the language the group mostly writes in. Sections: Topics, Pain points, New ideas, Opportunities, Open questions, and News in the chat.',
-    `Every item cites the messages it rests on as #id, and says only what those messages support.${link ? ` Write each citation as a Markdown link, [#id](${link.replace('<id>', 'id')}), with the id in the link.` : ''} Merge repeats; skip greetings, spam and bot noise.`,
+    `Every item cites the messages it rests on as #id, and says only what those messages support.${link ? ` Write each citation as a Markdown link, [#id](${link.replace('<id>', 'id')}), with the id in the link.` : c.platform === 'discord' ? " Write each citation as a Markdown link, [#id](link), with the message's own link from get_messages (a Discord link holds Discord's id, not #id)." : ''} Merge repeats; skip greetings, spam and bot noise.`,
     'Call past_digests for this source first: carry on the stories earlier digests started (say what changed) rather than telling them again.',
     'News in the chat: call news_in_group for this source first. List the first-tier news the group talked about: the keyword, which outlet reported it first and when, how soon the group picked it up (or that it was talking about it before the first report), and the #ids. Leave the section out when nothing matched.',
   ].join('\n');
@@ -823,7 +824,7 @@ server.registerTool(
     const usual = (e: number) => (e < 0.5 ? 'almost never' : `usually ${e.toFixed(1)}`);
     const lines = found.map(({ c, b }) => {
       const inNews = news.get(b.term.toLowerCase());
-      const link = messageLink(c, b.ids[0]);
+      const link = linkTo(store, c, b.ids[0]);
       return `${b.term} · ${c.title} · ${b.count} messages from ${b.people} people in ${minutes} min (${usual(b.expected)}, ×${b.ratio.toFixed(1)}) · since ${when(b.firstAt, c.timezone)} · ${b.ids.map((id) => `#${id}`).join(' ')}${link ? ` · ${link}` : ''}${inNews ? ` · in today's news: ${inNews}` : ''}`;
     });
     return text(
