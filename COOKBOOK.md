@@ -77,7 +77,7 @@ npm install
 cp .env.example .env
 ```
 
-检查点：`npm test` 全部通过（目前 182 个）。
+检查点：`npm test` 全部通过（目前 204 个）。
 
 ---
 
@@ -332,6 +332,41 @@ Groups → Find & add 里搜到的每一行、贴群名或链接 **Check** 的�
 所有动作都在 Activity 里：每个请求、你点的每个按钮、每次状态变化、每条通知。macOS 通知可以用 System 区块的 **Test notification** 按钮先试一下；如果没弹出来，在「系统设置 → 通知」里允许「脚本编辑器」，并检查专注模式。`.env` 里 `PULSE_NOTIFY=off` 关闭通知，`PULSE_NOTIFY_TITLES=0` 让锁屏上不显示群名。
 
 完整设计、证据和以后的第二阶段（软件代为加群，暂不做）见 `docs/private-groups.md`。
+
+### Discord：用你自己的 bot 读频道
+
+Discord 也能接进来，读法和 Telegram 群一样：每个能读的频道是一个来源，有开关、有星云、能写摘要、Claude 能用 MCP 读。
+
+**为什么是 bot**：Discord 只允许程序以 bot 的身份读服务器。用你自己的账号自动读（self-bot）违反 Discord 条款，会被封号，所以这里只用 bot。bot 只能进你能拉 bot 的服务器：你自己的，或者管理员同意拉它进去的。
+
+**设置一次**（token 只在你电脑上，自己填进 `.env`）：
+
+1. 打开 [discord.com/developers/applications](https://discord.com/developers/applications) → **New Application**（名字随意）→ 左边 **Bot**。
+2. 点 **Reset Token**，复制，写进 `tg-pulse/.env`：`DISCORD_BOT_TOKEN=…`。
+3. 同一页往下：**Privileged Gateway Intents** → 打开 **Message Content Intent** → **Save Changes**。不开的话，Discord 发给 bot 的消息是空的。
+4. 重启服务：`npm run restart`。
+5. 打开控制台 → Groups → **Discord**，点 **Add the bot to a server**，选你的服务器。这个链接只申请两个权限：查看频道、读取消息历史。bot 不能发言、不能加表情、不能改任何东西。
+
+**读什么**：bot 能看到的文字频道和公告频道（语音、论坛、帖子线程暂时不读）。权限按 Discord 自己的规则算：服务器角色、频道对 @everyone / 角色 / bot 本身的覆盖设置；看不到的频道不会出现。
+
+**别的服务器的公告**（交易所、项目方的公告频道）：在那个服务器里打开公告频道 → **Follow**（关注）→ 选你服务器里的一个频道。之后它的每条公告都会转发到你的频道，bot 一起读。这样不用别人拉 bot，就能读到官方公告。这类频道在星图上按「帖子数」算话题（和 Telegram 频道一样），因为公告只有一个发布者。
+
+**怎么读**：
+- 新消息由 Discord 实时推给 bot（gateway），几乎没有延迟；编辑过的消息会更新。
+- 补抓用只读的 REST 请求：第一次读一个频道，往回 24 小时；服务关着或断线期间发的消息，从上次读到的地方全部补上（最多到保留期，默认 7 天）；关掉的频道重新打开，最多往回 24 小时。补抓排队期间来的新消息照样存，但不会让程序以为前面的已经读过。
+- bot 能看到频道、却没有「读取消息历史」权限时，只能收到新消息，来源上会写明。Message Content Intent 没开时什么都不读（读到的都会是空消息），系统栏和来源上会提示你去打开。
+- 机器人和系统通知（谁加入了、置顶）不算聊天，不存；从关注的公告频道转发过来的帖子要存。
+- 图片、文件、贴纸写成 `[photo]`、`[file 名字]`、`[sticker 名字]`；@人、#频道、表情换成名字。
+
+**在控制台里**：
+- Reading 列表里，Discord 频道显示为「服务器 · #频道」，带紫色的 Discord 标记。开关、Catch up now、Digest now 都能用；Audit 只对 Telegram 有意义，Discord 频道不提供。
+- 新出现的频道是否自动开始读，跟着「Read new groups automatically」这个开关。
+- 星图上 Discord 星云是 Discord 的蓝紫色。
+- 手柄可以切到 Discord 频道看消息，但它只读：发言、表情这些操作都会被拒绝，☰ 里的「Open it in the Discord app」会打开这个频道。
+- 摘要里的引用链接直接跳到 Discord 里那条消息。
+- Activity 里能看到 bot 发给 Discord 的每个请求（只有 GET），以及连上、断开、新频道、存了几条。
+
+**消失**：bot 被移出服务器、频道被删、或者 bot 不再能看到这个频道时，这个来源连同为它存下的消息一起删掉，和 Telegram 里退群一样。删之前会先直接问 Discord 一次，确认 bot 真的看不到了才删；服务器的角色信息可能过时，不能只凭它。服务关着期间发生的也算：重新连上时会对一遍。Discord 服务器短暂故障不算。
 
 ### 离线期间的消息
 
@@ -662,6 +697,7 @@ journalctl -u telegram-monitor -f
 | `PULSE_NEWS` / `PULSE_NEWS_NOTIFY` | on / on | 新闻雷达；群里在聊新闻（或比报道还早）时弹通知 |
 | `PULSE_WATCH` / `PULSE_REPORT_TO` | 空 / 第一个 owner | 启动时自动监控的群，以及摘要发到哪 |
 | `PULSE_CONSOLE_PORT` | 4830 | 控制台端口，0 关闭 |
+| `DISCORD_BOT_TOKEN` | 空 | 你自己的 Discord bot（需打开 Message Content Intent）；填了就读它能看到的频道（6A「Discord」） |
 | `PULSE_AUTO_WATCH_NEW` | on | 账号新加入的群自动开始读（off：只列出来，默认关） |
 | `PULSE_NOTIFY` / `PULSE_NOTIFY_TITLES` | on / 1 | 需要你去 App 里操作时弹 macOS 通知；`0` 让通知里不显示群名 |
 | `PULSE_TIMEZONE` / `PULSE_DIGEST_HOUR` | Asia/Shanghai / 9 | 新群的默认值，之后每个群可用 `/settings` 改 |
@@ -685,6 +721,7 @@ journalctl -u telegram-monitor -f
 
 - **Telegram 条款**：Telegram 允许第三方客户端通过官方 API 使用账号，但禁止刷屏、滥用，以及用来骚扰或冒充。读者账号只在你点击时写，而且这一点写在代码里：所有请求都过同一个入口。你在控制台点 Join、点验证按钮、发验证答案，或在手柄上按键（发言、回复、表情、存收藏夹、标已读、静音、退群、按机器人按钮）时，入口只放行那一个请求；其余的写操作，比如投票、打开机器人页面、付款，以及任何没人点就要发出的请求，一律在发出前拒绝。读取用的都是普通客户端也会发的只读请求，整个账号每秒最多约 1 个，行为接近开着 App 潜水的普通用户。即便如此，Telegram 仍可能对它认为异常的账号限流或封号；用主号就要接受这个风险（第 0 节）。被限流时日志会出现「slow down for N s」，程序会自动等待。
 - **群规**：有的群明确禁止机器人或记录聊天。监控之前先看群规，尊重别人的社区。
+- **Discord 条款**：Discord 禁止用个人账号自动化（self-bot），所以这里只用 bot。Message Content 是特权权限，bot 进 100 个以上服务器时要 Discord 审核。[开发者政策](https://support-dev.discord.com/hc/en-us/articles/8563934450327)（2024 年 7 月 8 日生效的版本）要求通过 API 拿到的数据只用于应用声明的功能；把消息交给 Claude 写摘要是否符合，请读原文自己判断。只在你管理、或管理员同意的服务器里用，并让成员知道服务器里有一个只读的记录 bot。
 - **个人信息**：群消息里有别人的名字和言论，在有的地区（例如欧盟）受数据保护法约束。程序的做法是：
   - 发给模型分析前把名字换成代号；
   - 摘要只写「说了什么」，不给个人画像、不评价人；

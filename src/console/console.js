@@ -287,6 +287,9 @@ const METHODS = {
   'news source removed': 'news source removed',
   news: 'notification: news in a group',
   ahead: 'notification: a group had it first',
+  'GET /users/@me': 'Discord: who the bot is',
+  'GET /channels/{id}/messages': 'Discord: read messages',
+  'new channel': 'a channel the bot can read',
 };
 const KIND = {
   read: ['READ', 'read'],
@@ -306,6 +309,7 @@ const OFF = { owner: 'switched off', claude: 'switched off by Claude', left: 'yo
 const DOTS = 'M4.5 10a1.4 1.4 0 1 0 2.8 0 1.4 1.4 0 0 0-2.8 0Zm4.1 0a1.4 1.4 0 1 0 2.8 0 1.4 1.4 0 0 0-2.8 0Zm4.1 0a1.4 1.4 0 1 0 2.8 0 1.4 1.4 0 0 0-2.8 0Z';
 
 function accessPill(a) {
+  if (a === 'discord') return el('span', { class: 'pill discord', text: 'Discord', title: 'A Discord channel, read through your Discord bot' });
   if (a === 'outside') return el('span', { class: 'pill ok', text: 'Outside', title: 'Read from outside: the account never joined' });
   if (a === 'member') return el('span', { class: 'pill read', text: 'Member' });
   if (!a) return el('span', { class: 'pill', text: 'Not checked' });
@@ -313,6 +317,7 @@ function accessPill(a) {
 }
 
 function cadence(src) {
+  if (src.platform === 'discord') return src.pushed ? 'instant · pushed by Discord' : 'the bot is not connected';
   if (src.pushed) return 'instant · pushed by Telegram';
   if (src.peeked) return `new messages within ~${(state && state.peekSeconds) || 10}s`;
   const every = src.everyS >= 60 ? `every ~${Math.round(src.everyS / 60)}m` : `every ~${src.everyS}s`;
@@ -320,6 +325,10 @@ function cadence(src) {
 }
 
 function readingTitle(src) {
+  if (src.platform === 'discord') {
+    const how = src.pushed ? 'Discord pushes this channel\'s new messages to the bot as they are posted.' : 'The bot is not connected now; it catches up when it is (from where it stopped, at most 24 hours back).';
+    return [src.error || '', src.caughtUpAt ? `Caught up ${ago(src.caughtUpAt)}.` : '', how].filter(Boolean).join(' ');
+  }
   const how = src.pushed
     ? `Telegram pushes this chat's new messages: they are read within a second or two (last push ${ago(src.lastPushAt)}).`
     : src.peeked
@@ -349,7 +358,7 @@ function guardsCell(src) {
   if (src.door?.telegramAntispam) g.push(el('span', { class: 'chip guard', text: 'anti-spam', title: 'Telegram anti-spam is on' }));
   const bots = src.bots || [];
   if (bots.length) g.push(el('span', { class: 'chip', text: `${bots.length} bot${bots.length === 1 ? '' : 's'}`, title: bots.join('  ') }));
-  return el('div', { class: 'chips-inline' }, g.length ? g : el('span', { class: 'cell-sub', text: src.access ? 'none seen' : '—' }));
+  return el('div', { class: 'chips-inline' }, g.length ? g : el('span', { class: 'cell-sub', text: src.access && src.platform !== 'discord' ? 'none seen' : '—' }));
 }
 
 /** Row actions in flight, by chat and action: a running catch-up does not hold up an audit. */
@@ -369,7 +378,7 @@ function moreButton(chatId, title) {
     };
     openMenu(b, [
       watched && item('pull', 'Catch up now', 'Read anything missed, right away', '/api/pull', { chatId }, `Catching up on ${src.title}…`),
-      watched && item('audit', 'Audit the last hour', 'Compare with Telegram: is anything missing?', '/api/audit', { chatId, hours: 1 }, `Auditing ${src.title}…`),
+      watched && src.platform !== 'discord' && item('audit', 'Audit the last hour', 'Compare with Telegram: is anything missing?', '/api/audit', { chatId, hours: 1 }, `Auditing ${src.title}…`),
       item('digest', 'Digest now', state.claude.ready ? `Next one ${until(src.nextDigestAt)}${src.lastDigestAt ? ` · last ${fmtDateTime(src.lastDigestAt)}` : ''}` : 'Needs ANTHROPIC_API_KEY (Claude Desktop writes the daily one)', '/api/digest', { chatId }, `Writing a digest of ${src.title}…`, !state.claude.ready),
     ].filter(Boolean));
   });
@@ -389,6 +398,15 @@ async function runAction(key, path, body, pending) {
   } finally {
     busy.delete(key);
   }
+}
+
+/** Under a source's name: how it is reached. */
+function sourceSub(src) {
+  if (src.platform === 'discord') {
+    const d = src.discord;
+    return ['Discord', d && d.announcement ? 'announcement channel' : d && d.feed ? 'followed channels post here' : ''].filter(Boolean).join(' · ');
+  }
+  return [src.ref, ORIGIN[src.origin]].filter(Boolean).join(' · ');
 }
 
 function sourceRow(src, standing) {
@@ -413,7 +431,7 @@ function sourceRow(src, standing) {
   const reading = readingCell(src, standing);
   const tr = el('tr', { class: src.enabled ? '' : 'off' },
     el('td', {}, sw),
-    el('td', {}, el('button', { type: 'button', class: 'src-title', text: src.title, title: `${src.title} · read its messages`, onclick: () => selectSource(src.chatId) }), el('div', { class: 'src-sub', text: [src.ref, ORIGIN[src.origin]].filter(Boolean).join(' · ') })),
+    el('td', {}, el('button', { type: 'button', class: 'src-title', text: src.title, title: `${src.title} · read its messages`, onclick: () => selectSource(src.chatId) }), el('div', { class: 'src-sub', text: sourceSub(src) })),
     el('td', {}, accessPill(src.access)),
     el('td', {}, el('div', {}, count, ' messages'), el('div', { class: 'cell-sub' }, people, ' people · ', last)),
     el('td', {}, el('div', { text: src.perDay !== null ? `~${n(src.perDay)} / day` : '—' }), el('div', { class: 'cell-sub', text: src.members ? `${n(src.members)} members` : '' })),
@@ -438,7 +456,7 @@ function renderSources(s) {
   sync(t.tBodies[0], s.sources, {
     key: (src) => src.chatId,
     // What the row is drawn from; counts and times change often and are written in place (update).
-    sig: (src) => JSON.stringify([src.title, src.ref, src.kind, src.enabled, src.offReason, src.error, src.access, src.origin, src.members, src.perDay, src.bots, src.door, src.behind, src.pushed, src.peeked, src.member, src.everyS, standing.get(src.chatId) || '', s.claude.ready, s.peekSeconds]),
+    sig: (src) => JSON.stringify([src.title, src.ref, src.platform, src.discord, src.kind, src.enabled, src.offReason, src.error, src.access, src.origin, src.members, src.perDay, src.bots, src.door, src.behind, src.pushed, src.peeked, src.member, src.everyS, standing.get(src.chatId) || '', s.claude.ready, s.peekSeconds]),
     render: (src) => sourceRow(src, standing.get(src.chatId)),
     update: (row, src) => row.__update(src),
     empty: { text: 'none', render: () => el('tr', {}, el('td', { colspan: SOURCE_HEAD.length, class: 'empty', text: 'Nothing here yet. Join a group in Telegram, or check one by name below.' })) },
@@ -1084,6 +1102,7 @@ function showGroups(which) {
   }
   $('groups-reading').hidden = which !== 'reading';
   $('groups-find').hidden = which !== 'find';
+  $('groups-discord').hidden = which !== 'discord';
   try {
     localStorage.setItem('groups-tab', which);
   } catch {
@@ -1095,7 +1114,8 @@ $('groups-tabs').addEventListener('click', (e) => {
   if (b) showGroups(b.dataset.g);
 });
 try {
-  showGroups(localStorage.getItem('groups-tab') === 'find' ? 'find' : 'reading');
+  const tab = localStorage.getItem('groups-tab');
+  showGroups(tab === 'find' || tab === 'discord' ? tab : 'reading');
 } catch {
   showGroups('reading');
 }
@@ -1307,6 +1327,7 @@ function folderIcon() {
 /** Where a group's messages open in Telegram ("https://t.me/name/"), or null (a basic group has no message links). */
 function messageBase(chatId) {
   const s = state?.sources.find((x) => x.chatId === chatId);
+  if (s && s.platform === 'discord') return s.discord ? `${s.discord.link}/` : null;
   if (s && s.ref.startsWith('@')) return `https://t.me/${s.ref.slice(1)}/`;
   const id = String(chatId);
   return id.startsWith('-100') ? `https://t.me/c/${id.slice(4)}/` : null;
@@ -1319,12 +1340,14 @@ function renderMarkdown(escaped, base = null) {
   // digest (Claude could be led to write one by what it read) is never one click away.
   const inline = (text) => {
     const out = [];
-    const re = /\*\*(.+?)\*\*|\[#(\d{1,12})\]\((https:\/\/t\.me\/[A-Za-z0-9_/]{1,80}?\/(\d{1,12}))\)/g;
+    const re = /\*\*(.+?)\*\*|\[#(\d{1,12})\]\((https:\/\/(?:t\.me\/[A-Za-z0-9_/]{1,80}?\/(\d{1,12})|discord\.com\/channels\/\d{1,20}\/\d{1,20}\/(\d{1,20})))\)/g;
     let last = 0;
     let m;
     while ((m = re.exec(text))) {
       const cite = m[1] === undefined;
-      if (cite && !(base && m[2] === m[4] && m[3].toLowerCase() === `${base}${m[4]}`.toLowerCase())) continue;
+      // A Discord link holds Discord's id, not #id: it only has to open a message of the digest's own channel.
+      const own = m[5] !== undefined ? Boolean(base && base.startsWith('https://discord.com/') && m[3] === `${base}${m[5]}`) : Boolean(base && m[2] === m[4] && m[3].toLowerCase() === `${base}${m[4]}`.toLowerCase());
+      if (cite && !own) continue;
       if (m.index > last) out.push(text.slice(last, m.index));
       out.push(cite ? el('a', { href: m[3], target: '_blank', rel: 'noopener noreferrer', text: `#${m[2]}` }) : el('b', { text: m[1] }));
       last = re.lastIndex;
@@ -1756,6 +1779,51 @@ function makeFoldable() {
 const usd = (x) => `$${(x || 0).toFixed(2)}`;
 
 /** Who is signed in, the last write, and how digests and notifications go. */
+function discordLine(d) {
+  if (!d || !d.configured) return 'Discord: not set up (Groups → Discord)';
+  if (d.error) return `Discord: ${d.error}`;
+  const where = `${d.servers.length} server${d.servers.length === 1 ? '' : 's'}`;
+  return d.state === 'online' ? `Discord: bot ${d.bot ? d.bot.name : ''} connected · ${where}` : `Discord: ${d.state === 'connecting' ? 'connecting' : 'not connected'} · ${where}`;
+}
+
+// ── Discord: the bot, and how to set it up ─────────────────────────────────
+
+const DISCORD_STEPS = [
+  ['Make a bot: ', ['discord.com/developers/applications', 'https://discord.com/developers/applications'], ' → New Application (any name) → Bot.'],
+  ['On the same page: Reset Token, copy it, and put it in .env as ', 'DISCORD_BOT_TOKEN=…', '. It stays on this computer.'],
+  ['Still under Bot: Privileged Gateway Intents → switch on ', 'Message Content Intent', ' → Save. Without it Discord sends the bot empty messages.'],
+  ['Restart the service (', 'npm run restart', '). This tab then shows the link that adds the bot to your servers.'],
+];
+
+function discordStep(parts) {
+  return el('li', {}, parts.map((p, i) => (Array.isArray(p) ? el('a', { href: p[1], target: '_blank', rel: 'noopener noreferrer', text: p[0] }) : i === 1 ? el('code', { text: p }) : p)));
+}
+
+function renderDiscord(s) {
+  const d = s.discord || { configured: false };
+  const servers = d.servers || [];
+  const on = (s.sources || []).filter((x) => x.platform === 'discord');
+  setText($('discord-n'), d.configured ? String(on.length) : '');
+  const card = $('discord-card');
+  const sig = JSON.stringify([d, on.length]);
+  if (card.__sig === sig) return;
+  card.__sig = sig;
+  const why = el('p', { class: 'fine', text: 'Discord lets a program read a server only as a bot the server lets in: reading with your own account breaks Discord\'s rules and can get it banned. So the monitor reads Discord as a bot of yours. It asks only to view channels and read their history: it cannot post, react or change anything.' });
+  const follow = el('p', { class: 'fine', text: 'Announcement channels of any server (an exchange, a protocol): in that server, open the channel → Follow → choose a channel of your server. Their posts then arrive there, and the bot reads them with the rest.' });
+  if (!d.configured) {
+    card.replaceChildren(el('h3', { class: 'col-head', text: 'Not set up' }), el('ol', { class: 'steps' }, DISCORD_STEPS.map(discordStep)), why, follow);
+    return;
+  }
+  const state = d.error ? ['bad', d.error] : d.state === 'online' ? ['ok', `Connected as ${d.bot ? d.bot.name : 'the bot'}`] : ['warn', d.state === 'connecting' ? 'Connecting…' : 'Not connected'];
+  const head = el('div', { class: 'tab-controls' },
+    el('div', { class: `state ${state[0]}` }, el('span', { class: 'dot' }), el('span', { text: state[1] })),
+    d.invite ? el('a', { class: 'btn primary', href: d.invite, target: '_blank', rel: 'noopener noreferrer', text: 'Add the bot to a server', title: 'Opens Discord: pick a server you manage. It asks only for View Channels and Read Message History.' }) : null);
+  const list = servers.length
+    ? el('ul', { class: 'notes' }, servers.map((g) => el('li', { text: `${g.name} · ${g.channels} channel${g.channels === 1 ? '' : 's'} it can read · ${g.on} on` })))
+    : el('p', { class: 'fine', text: 'The bot is in no server yet: add it with the button (any server where you can add bots).' });
+  card.replaceChildren(head, list, el('p', { class: 'fine', text: 'Each channel the bot can read shows up under Reading, switched on or off by "Read new groups automatically". Switch any of them off there.' }), follow, why);
+}
+
 function renderSystem(s) {
   const a = s.account;
   const conn = a && a.connection;
@@ -1765,6 +1833,7 @@ function renderSystem(s) {
     lw ? [`Last write: ${METHODS[lw.method] || lw.method} · ${lw.target} · ${fmtWhen(lw.at)}`, 'pink'] : null,
     [s.bot ? `Digests go to chat ${s.reportTo ?? '—'} through @${s.bot.username}` : 'Digests stay on this page and in data/digests/ (no bot)', ''],
     [s.claude.ready ? `Claude ${s.claude.model} · ${usd(s.costs.day.costUsd)} today · ${usd(s.costs.all.costUsd)} in all` : 'No Claude API key: digests come from Claude Desktop', ''],
+    [discordLine(s.discord), s.discord && s.discord.error ? 'pink' : ''],
     [s.notifications ? 'macOS notifications on' : 'Notifications off', ''],
     [`Messages are kept ${s.retentionDays} days`, ''],
   ].filter(Boolean);
@@ -1824,6 +1893,7 @@ function refresh(first) {
       renderInvites(state);
       renderOutbox(state);
       renderSystem(state);
+      renderDiscord(state);
       if (discoverView) renderDiscover(); // "Reading" follows a Watch
       if ($('notify-test').hidden !== !state.notifications) $('notify-test').hidden = !state.notifications;
       if (!state.news) $('news-panel').hidden = true;

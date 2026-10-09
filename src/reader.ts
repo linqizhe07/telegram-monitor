@@ -640,8 +640,10 @@ export class Reader {
         activity?.event('reader', 'rejoined', c.title, 'the account is back in this chat: reading again (from up to 24 hours back)');
       }
     }
-    // Sources the account is not in were added by name (read from outside): never stopped by this check.
+    // Sources the account is not in were added by name (read from outside): never stopped by this
+    // check. Discord channels are not Telegram's to judge: this check never touches them.
     for (const row of store.listChats(false)) {
+      if (row.platform !== 'telegram') continue;
       if (row.kind === 'watched' && !row.readerOrigin && !inList.has(row.chatId)) store.updateChat(row.chatId, { readerOrigin: 'manual' });
     }
     if (complete) {
@@ -649,7 +651,7 @@ export class Reader {
       // kept for it (on or off; if the account joins again, it comes back as a new chat). Ones switched
       // off earlier because the account had left go too.
       for (const row of store.listChats(false)) {
-        if (row.kind !== 'watched' || inList.has(row.chatId) || present.has(row.chatId)) continue;
+        if (row.platform !== 'telegram' || row.kind !== 'watched' || inList.has(row.chatId) || present.has(row.chatId)) continue;
         const hadLeft = store.getKv(`reader_off_reason:${row.chatId}`) === 'left';
         if (row.readerOrigin !== 'dialog' && !hadLeft) continue;
         store.removeSource(row.chatId);
@@ -1096,7 +1098,8 @@ export class Reader {
         if (this.deps.discovery && Date.now() - this.lastReconcile >= (this.deps.discovery.everyMs ?? 3_600_000)) {
           await withTimeout(this.reconcile(), 120_000, 'checking the chat list').catch((err) => log(`reader: chat list check failed: ${(err as Error).message}`));
         }
-        const watched = store.listChats(true).filter((c) => c.kind === 'watched');
+        // Telegram's chats only: Discord channels are read by the Discord bot (src/discord.ts).
+        const watched = store.listChats(true).filter((c) => c.kind === 'watched' && c.platform === 'telegram');
         for (const chat of watched) {
           if (stopped) break;
           if ((due.get(chat.chatId) ?? 0) > Date.now() && !this.behind.has(chat.chatId)) continue;

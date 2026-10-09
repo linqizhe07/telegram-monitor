@@ -79,7 +79,13 @@
   const internal = () => (/^-100\d+$/.test(s.chatId) ? s.chatId.slice(4) : '');
   const picked = () => (s.at >= 0 && s.at < s.list.length ? s.list[s.at] : null);
 
+  /** Which app the chat on the controller lives in. */
+  const app = () => (source()?.platform === 'discord' ? 'Discord' : 'Telegram');
+
   function links(msgId) {
+    const d = source()?.discord;
+    // A Discord channel opens at the channel (its messages carry Discord's ids, not these).
+    if (d) return { app: d.link.replace('https://discord.com/', 'discord://-/'), web: d.link };
     const u = username();
     const c = internal();
     const id = Number.isInteger(msgId) && msgId > 0 ? msgId : null;
@@ -318,15 +324,15 @@
   }
 
   function open(href, what) {
-    if (!href) return say('No link for this one: open it in your Telegram app.', 'bad');
-    el('a', { href }).click(); // tg:// opens the Telegram app; nothing is sent from here
+    if (!href) return say(`No link for this one: open it in your ${app()} app.`, 'bad');
+    el('a', { href }).click(); // tg:// (or discord://) opens the app; nothing is sent from here
     say(what, 'ok');
   }
 
   function openInTelegram() {
     if (!needChat()) return;
     const m = picked();
-    open(links(m?.id ?? s.list.at(-1)?.id).app, m ? `Opened #${m.id} in Telegram.` : `Opened «${title()}» in Telegram.`);
+    open(links(m?.id ?? s.list.at(-1)?.id).app, m && app() === 'Telegram' ? `Opened #${m.id} in Telegram.` : `Opened «${title()}» in ${app()}.`);
   }
 
   function openMore() {
@@ -334,8 +340,8 @@
     const m = picked();
     const l = links(m?.id);
     const items = [];
-    items.push({ label: 'Open it in the Telegram app', key: 'O', run: openInTelegram });
-    if (l.web) items.push({ label: m ? `Copy the link to #${m.id}` : "Copy the chat's link", run: () => copy(l.web) });
+    items.push({ label: `Open it in the ${app()} app`, key: 'O', run: openInTelegram });
+    if (l.web) items.push({ label: m && app() === 'Telegram' ? `Copy the link to #${m.id}` : "Copy the chat's link", run: () => copy(l.web) });
     if (m?.user) items.push({ label: `Open ${m.author} (@${m.user}) in Telegram`, run: () => open(`tg://resolve?domain=${m.user}`, `Opened @${m.user} in Telegram.`) });
     if (m) items.push({ label: "The message's bot buttons", key: 'K', run: openKeys });
     items.push({ label: s.view === 'all' ? 'Show the signal only (noise removed)' : 'Show every message', key: 'V', run: toggleView });

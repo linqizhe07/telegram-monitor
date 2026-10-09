@@ -132,6 +132,7 @@
       <div class="seg" id="groups-tabs" role="tablist" aria-label="Groups">
         <button type="button" role="tab" data-g="reading" class="on" aria-selected="true">Reading <span id="groups-n"></span></button>
         <button type="button" role="tab" data-g="find" aria-selected="false">Find &amp; add</button>
+        <button type="button" role="tab" data-g="discord" aria-selected="false">Discord <span id="discord-n"></span></button>
       </div>
     </div>
 
@@ -143,6 +144,10 @@
         <button class="btn" id="refresh-list" title="Check the account's chat list now (it also runs every hour, and soon after you join a group)">Refresh from Telegram</button>
       </div>
       <div class="table-wrap"><table class="grid sources" id="sources"></table></div>
+    </div>
+
+    <div id="groups-discord" role="tabpanel" aria-label="Discord" hidden>
+      <div id="discord-card" aria-live="polite"></div>
     </div>
 
     <div id="groups-find" role="tabpanel" aria-label="Find and add" hidden>
