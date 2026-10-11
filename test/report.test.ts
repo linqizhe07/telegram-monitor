@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { PulseBot, type ReaderLike } from '../src/bot.ts';
-import type { Config } from '../src/config.ts';
+import { loadConfig, type Config } from '../src/config.ts';
 import { Engine } from '../src/engine.ts';
 import { FakeLlm } from '../src/fake-llm.ts';
 import type { SourceInfo } from '../src/reader.ts';
@@ -107,7 +107,7 @@ test('a report chat with several watched groups asks which one, and accepts @nam
   assert.match(env.api.last().text, /📡 OKX 中文/);
 
   await env.bot.handle(dm('/sources'));
-  assert.match(env.api.last().text, /#1 Binance 中文（@binance_cn_test）· 近 24 小时 28 条/);
+  assert.match(env.api.last().text, /#1 Binance 中文（@binance_cn_test）· 近 24 小时 28 条 · 下一份摘要 \d\d-\d\d \d\d:\d\d/);
 
   await env.bot.handle(dm('/unwatch @okx_cn_test'));
   assert.equal(env.store.getChat(OKX.chatId)!.enabled, false);
@@ -149,6 +149,44 @@ test('without a reader account, /watch explains how to set one up', async () => 
   const bot = new PulseBot({ store: env.store, engine: env.engine, api: env.api, config: env.config, me: await env.api.getMe(), now: env.clock.now, log: () => undefined, reader: null });
   await bot.handle(dm('/watch @binance_cn_test'));
   assert.match(env.api.last().text, /npm run login/);
+});
+
+test('with PULSE_DAILY_DIGESTS=off the bot names no time for the next digest', async () => {
+  const env = await setup({ dailyDigests: false });
+  await env.bot.handle(dm('/watch @binance_cn_test'));
+  await env.bot.handle(dm('/sources'));
+  assert.match(env.api.last().text, /#1 Binance 中文（@binance_cn_test）· 近 24 小时 \d+ 条 · 下一份摘要 不定时（发 \/digest 写一份）/);
+});
+
+test('PULSE_DAILY_DIGESTS: the daily digests are on unless it says off', () => {
+  assert.equal(loadConfig({}).dailyDigests, true);
+  assert.equal(loadConfig({ PULSE_DAILY_DIGESTS: 'off' }).dailyDigests, false);
+  assert.equal(loadConfig({ PULSE_DAILY_DIGESTS: 'on' }).dailyDigests, true);
+  assert.throws(() => loadConfig({ PULSE_DAILY_DIGESTS: 'no' }), /PULSE_DAILY_DIGESTS: expected one of on \| off/);
+});
+
+test('a digest written as part of Run digests leaves no "not enough messages" or "failed" note in the chat; a lone Digest now does', async () => {
+  const clock = new Clock(T0 + 3600);
+  const store = memoryStore(clock);
+  const api = new FakeTelegram();
+  const config = testConfig({ ownerIds: [OWNER] });
+  const defaults = { language: 'auto' as const, digestHour: 9, timezone: 'Asia/Shanghai', rsiMode: 'auto' as const };
+  store.watchChat(BINANCE, OWNER, null, defaults);
+  const engine = new Engine({ store, llm: new FakeLlm(), config, api, now: clock.now, log: () => undefined });
+  assert.equal(await engine.digest(BINANCE.chatId, { kind: 'manual', quietly: true }), 'quiet');
+  assert.equal(api.sent.length, 0, 'the console reports a quiet group itself');
+  assert.equal(await engine.digest(BINANCE.chatId, { kind: 'manual' }), 'quiet');
+  assert.equal(api.sent.length, 1, 'a lone Digest now says why there is none');
+
+  seedUsers(store, BINANCE.chatId);
+  for (const m of syntheticDay(BINANCE.chatId, T0 - 20 * 3600, 1, 6)) store.saveMessage(m);
+  const failing = new Engine({ store, llm: new FakeLlm({ digest: () => { throw new Error('overloaded'); } }), config, api, now: clock.now, log: () => undefined });
+  assert.equal(await failing.digest(BINANCE.chatId, { kind: 'manual', quietly: true }), 'failed');
+  assert.equal(api.sent.length, 1, 'nor a failed one');
+  assert.equal(await failing.digest(BINANCE.chatId, { kind: 'manual' }), 'failed');
+  assert.equal(api.sent.length, 2);
+  assert.equal(await engine.digest(BINANCE.chatId, { kind: 'manual', quietly: true }), 'posted');
+  assert.ok(api.sent.length > 2, 'the digest itself is posted as always');
 });
 
 test("a Discord channel's digest: caught up through the Discord bot, never the Telegram reader; sent to the report chat, linking into Discord", async () => {

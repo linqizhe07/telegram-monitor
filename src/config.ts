@@ -28,6 +28,8 @@ export interface Config {
   /** Telegram user ids allowed to add the bot to groups and to administer it everywhere. Empty = anyone. */
   ownerIds: number[];
   minDigestMessages: number;
+  /** With Claude configured, write each group's digest at its daily hour. Off: only when asked (Run digests, Digest now, /digest), so no scheduled RSI round either (an admin's /rsi evolve still runs one). */
+  dailyDigests: boolean;
   manualCooldownMinutes: number;
   maxTranscriptChars: number;
   maxMessageChars: number;
@@ -134,6 +136,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     promoteThreshold: field('PULSE_RSI_PROMOTE_AT', () => float(env.PULSE_RSI_PROMOTE_AT, 0.625, 0.5, 1)),
     ownerIds,
     minDigestMessages: field('PULSE_MIN_MESSAGES', () => int(env.PULSE_MIN_MESSAGES, 5, 1, 10_000)),
+    dailyDigests: field('PULSE_DAILY_DIGESTS', () => oneOf(env.PULSE_DAILY_DIGESTS, ['on', 'off'] as const, 'on') === 'on'),
     manualCooldownMinutes: field('PULSE_DIGEST_COOLDOWN_MIN', () => int(env.PULSE_DIGEST_COOLDOWN_MIN, 30, 0, 1440)),
     maxTranscriptChars: field('PULSE_MAX_TRANSCRIPT_CHARS', () =>
       int(env.PULSE_MAX_TRANSCRIPT_CHARS, 600_000, 20_000, 3_000_000),
