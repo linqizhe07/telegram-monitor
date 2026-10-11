@@ -1346,7 +1346,7 @@ function renderMarkdown(escaped, base = null) {
     while ((m = re.exec(text))) {
       const cite = m[1] === undefined;
       // A Discord link holds Discord's id, not #id: it only has to open a message of the digest's own channel.
-      const own = m[5] !== undefined ? Boolean(base && base.startsWith('https://discord.com/') && m[3] === `${base}${m[5]}`) : Boolean(base && m[2] === m[4] && m[3].toLowerCase() === `${base}${m[4]}`.toLowerCase());
+      const own = cite && (m[5] !== undefined ? Boolean(base && base.startsWith('https://discord.com/') && m[3] === `${base}${m[5]}`) : Boolean(base && m[2] === m[4] && m[3].toLowerCase() === `${base}${m[4]}`.toLowerCase()));
       if (cite && !own) continue;
       if (m.index > last) out.push(text.slice(last, m.index));
       out.push(cite ? el('a', { href: m[3], target: '_blank', rel: 'noopener noreferrer', text: `#${m[2]}` }) : el('b', { text: m[1] }));
@@ -1393,6 +1393,15 @@ async function deleteDigest(button, item, folder) {
   }
 }
 
+/** A digest's text. One the page cannot draw shows as plain text: it never blanks the whole panel. */
+function digestBody(item, base) {
+  try {
+    return item.format === 'markdown' ? renderMarkdown(item.body, base) : sanitize(item.body);
+  } catch {
+    return el('div', { class: 'md-p', text: item.body.replace(/<[^>]*>/g, '') });
+  }
+}
+
 function renderOutbox(s) {
   setText($('out-hint'), s.bot ? 'What the service sent to Telegram, one folder per group' : 'Kept here and in data/digests/, one folder per group');
   const folders = s.digestFolders || [];
@@ -1419,7 +1428,7 @@ function renderOutbox(s) {
             el('span', { class: `pill ${item.delivered ? 'ok' : ''}`, text: item.delivered ? 'sent' : 'kept here' }),
             el('span', { class: 'digest-heading', text: item.heading || fmtDateTime(item.at) }),
             el('span', { class: 'digest-at', text: fmtDateTime(item.at) })),
-          el('div', { class: 'body' }, item.format === 'markdown' ? renderMarkdown(item.body, f.chatId === null ? null : messageBase(f.chatId)) : sanitize(item.body)));
+          el('div', { class: 'body' }, digestBody(item, f.chatId === null ? null : messageBase(f.chatId))));
         d.addEventListener('toggle', () => {
           if (d.open) {
             openItems.add(key);
