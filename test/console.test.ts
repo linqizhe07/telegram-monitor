@@ -3,6 +3,7 @@ import { request } from 'node:http';
 import { test } from 'node:test';
 import { Activity, classify, describeTarget } from '../src/activity.ts';
 import { ConsoleServer } from '../src/console/server.ts';
+import type { Reader } from '../src/reader.ts';
 import { RecordingApi } from '../src/recording.ts';
 import { Clock, memoryStore, testConfig } from './helpers.ts';
 
@@ -213,19 +214,204 @@ test('two tokens: the page can do everything; local tools (Claude) only the acti
     assert.notEqual(pageToken, toolToken);
     assert.ok(!page.body.includes(toolToken), 'the page never carries the tool token');
     const post = (path: string, token: string, body = '{}') => call(port, path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-console-token': token }, body });
-    for (const path of ['/api/invite/confirm', '/api/invite/recheck', '/api/invite/dismiss', '/api/membership/check', '/api/digest', '/api/settings', '/api/clear', '/api/unwatch', '/api/notify-test', '/api/news/feed', '/api/news/toggle', '/api/news/remove', '/api/discover/dismiss', '/api/join', '/api/verify/press', '/api/verify/answer', '/api/verify/photo', '/api/digest/delete', '/api/pad/look', '/api/pad/send', '/api/pad/react', '/api/pad/save', '/api/pad/read', '/api/pad/mute', '/api/pad/leave', '/api/pad/buttons', '/api/pad/press']) {
+    for (const path of ['/api/invite/confirm', '/api/invite/recheck', '/api/invite/dismiss', '/api/membership/check', '/api/digest', '/api/settings', '/api/clear', '/api/unwatch', '/api/notify-test', '/api/news/feed', '/api/news/toggle', '/api/news/remove', '/api/discover/dismiss', '/api/join', '/api/verify/press', '/api/verify/answer', '/api/verify/photo', '/api/digest/delete', '/api/digest/run', '/api/digest/stop', '/api/pad/look', '/api/pad/send', '/api/pad/react', '/api/pad/save', '/api/pad/read', '/api/pad/mute', '/api/pad/leave', '/api/pad/buttons', '/api/pad/press']) {
       assert.equal((await post(path, toolToken)).status, 403, `${path}: not for local tools`);
       assert.notEqual((await post(path, pageToken)).status, 403, `${path}: the page may`);
     }
     for (const path of ['/api/probe', '/api/watch', '/api/pull', '/api/audit', '/api/toggle', '/api/refresh', '/api/flag', '/api/news/refresh', '/api/discover']) {
       assert.notEqual((await post(path, toolToken, '{"target":"@x","chatId":1}')).status, 403, `${path}: what Claude's tools call`);
     }
+    assert.match(JSON.parse((await post('/api/digest/run', pageToken)).body).message, /ANTHROPIC_API_KEY/, 'no Claude: Run digests says what it needs');
     const state = JSON.parse((await call(port, '/api/state')).body);
     assert.equal(state.privateGroups, null, 'no reader account: no private-group state');
     assert.equal(JSON.parse((await call(port, '/api/news')).body).enabled, false, 'no radar: the panel stays hidden');
   } finally {
     await server.stop();
   }
+});
+
+test('Run digests: one for each read source with enough messages, busiest first, three at a time; the page only; Stop leaves the rest unstarted', async (t) => {
+  const { mkdtempSync, readFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const clock = new Clock();
+  const store = memoryStore(clock);
+  const activity = new Activity(store);
+  const config = testConfig({ reportTo: 700000001, minDigestMessages: 5 });
+  const defaults = { language: 'auto' as const, digestHour: 9, timezone: 'UTC', rsiMode: 'auto' as const };
+  const sources: [number, string, number, boolean][] = [
+    [-1001, 'Six', 6, true],
+    [-1002, 'Forty', 40, true],
+    [-1003, 'Two', 2, true], // too quiet: left out
+    [-1004, 'Twenty', 20, true],
+    [-1005, 'Off', 50, false], // not read: left out
+    [-1006, 'Ten', 10, true],
+    [-1007, 'Thirty', 30, true],
+  ];
+  let messageId = 1;
+  for (const [chatId, title, n, on] of sources) {
+    store.watchChat({ chatId, title, username: null, type: 'supergroup', ref: String(chatId) }, 700000001, null, defaults);
+    if (!on) store.updateChat(chatId, { enabled: false });
+    for (let i = 0; i < n; i++) store.saveMessage({ chatId, messageId: messageId++, threadId: null, userId: 9, date: clock.now() - 600, text: `m${i}`, replyTo: null, reactions: 0, edited: false });
+  }
+  const titleOf = (chatId: number) => sources.find((s) => s[0] === chatId)![1];
+  const asked: { chatId: number; quietly?: boolean; finish: (outcome: string) => void }[] = [];
+  const digestNow = (chatId: number, opts?: { quietly?: boolean }) => new Promise<string>((finish) => asked.push({ chatId, quietly: opts?.quietly, finish }));
+  const settle = () => new Promise((r) => setImmediate(r));
+  const handoffFile = join(mkdtempSync(join(tmpdir(), 'pulse-run-')), 'console.json');
+  const server = new ConsoleServer({ store, activity, config, port: 0, now: clock.now, log: () => undefined, startedAt: clock.now(), account: null, reader: null, bot: null, claude: { ready: true, model: config.model }, digestNow, handoffFile });
+  try {
+    await server.start();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EPERM') return t.skip('this sandbox does not allow listening on a local port');
+    throw err;
+  }
+  const port = Number(new URL(server.url).port);
+  try {
+    const pageToken = /name="console-token" content="([^"]+)"/.exec((await call(port, '/')).body)![1];
+    const toolToken = (JSON.parse(readFileSync(handoffFile, 'utf8')) as { token: string }).token;
+    const post = async (path: string, token = pageToken) => {
+      const r = await call(port, path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-console-token': token }, body: '{}' });
+      return r.status === 200 ? (JSON.parse(r.body) as { ok: boolean; message: string }) : r.status;
+    };
+    const run = async () => JSON.parse((await call(port, '/api/state')).body).digestRun;
+
+    assert.equal(await run(), null);
+    assert.equal(await post('/api/digest/run', toolToken), 403, 'each digest is a paid Claude request: never for local tools');
+    assert.equal(asked.length, 0);
+
+    const started = await post('/api/digest/run');
+    assert.ok(typeof started === 'object' && started.ok);
+    assert.match(started.message, /^Writing 5 digests, 3 at a time/);
+    assert.deepEqual(asked.map((a) => titleOf(a.chatId)), ['Forty', 'Thirty', 'Twenty'], 'busiest first, three at a time');
+    assert.ok(asked.every((a) => a.quietly === true), 'the run reports quiet and failed groups itself');
+    let r = await run();
+    assert.deepEqual([r.total, r.done, r.skipped, r.finishedAt], [5, 0, 1, null], 'Two is too quiet and Off is not read');
+    assert.deepEqual(r.writing, ['Forty', 'Thirty', 'Twenty']);
+    assert.deepEqual(await post('/api/digest/run'), { ok: false, message: 'Already writing digests: 0 of 5 done.' }, 'one run at a time');
+
+    asked[0].finish('posted');
+    await settle();
+    assert.deepEqual(asked.map((a) => titleOf(a.chatId)), ['Forty', 'Thirty', 'Twenty', 'Ten'], 'one done: the next starts');
+
+    const stopped = await post('/api/digest/stop');
+    assert.deepEqual(stopped, { ok: true, message: 'Stopped: 1 not started; 3 being written finish first.' });
+    asked[1].finish('quiet');
+    asked[2].finish('failed');
+    asked[3].finish('posted');
+    await settle();
+    assert.equal(asked.length, 4, 'Six is never started');
+    r = await run();
+    assert.ok(r.finishedAt);
+    const { startedAt, finishedAt, ...counts } = r;
+    assert.deepEqual(counts, { total: 5, done: 4, written: 2, quiet: 1, failed: 1, failedTitles: ['Twenty'], skipped: 1, writing: [], stopped: true, notStarted: 1 });
+    const events = store.activity().filter((a) => a.method.startsWith('digests '));
+    assert.deepEqual(events.map((a) => [a.actor, a.method, a.target]), [['console', 'digests started', '5 sources'], ['console', 'digests done', '5 sources']]);
+    assert.equal(events[1].detail, '2 written, 1 too quiet once caught up, 1 failed (Twenty), 1 not started (stopped)');
+    assert.equal(events[1].ok, false);
+    assert.deepEqual(await post('/api/digest/stop'), { ok: false, message: 'No digests are being written.' });
+
+    const again = await post('/api/digest/run');
+    assert.ok(typeof again === 'object' && again.ok, 'a new run once the last one is done');
+    for (let i = 4; i < asked.length; i++) {
+      asked[i].finish('posted');
+      await settle();
+    }
+    assert.equal(asked.length, 9);
+    assert.equal((await run()).written, 5);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('Run digests always ends: a digest that throws or hangs counts as failed and a busy activity log does not stop it; groups still catching up are asked, the bot\'s own groups never', async (t) => {
+  const clock = new Clock();
+  const store = memoryStore(clock);
+  const activity = new Activity(store);
+  const config = testConfig({ reportTo: 700000001, minDigestMessages: 5 });
+  const defaults = { language: 'auto' as const, digestHour: 9, timezone: 'UTC', rsiMode: 'auto' as const };
+  let messageId = 1;
+  const fill = (chatId: number, n: number) => {
+    for (let i = 0; i < n; i++) store.saveMessage({ chatId, messageId: messageId++, threadId: null, userId: 9, date: clock.now() - 600, text: `m${i}`, replyTo: null, reactions: 0, edited: false });
+  };
+  for (const [chatId, title, n] of [[-2001, 'Throws', 30], [-2002, 'Hangs', 20], [-2003, 'Behind', 2]] as const) {
+    store.watchChat({ chatId, title, username: null, type: 'supergroup', ref: String(chatId) }, 700000001, null, defaults);
+    fill(chatId, n);
+  }
+  store.upsertChat({ chatId: -2004, title: 'Bot group', username: null, type: 'supergroup' }, defaults);
+  fill(-2004, 40);
+  assert.equal(store.getChat(-2004)!.kind, 'group');
+  // The reader still fetching what Behind missed: only 2 of its messages are stored so far.
+  const reader = { isBehind: (id: number) => id === -2003, isPushed: () => false, isPeeked: () => false, isMember: () => true, intervalOf: () => 30, lastPush: () => null } as unknown as Reader;
+  const asked: number[] = [];
+  const digestNow = (chatId: number) => {
+    asked.push(chatId);
+    if (chatId === -2001) throw new Error('no such table: chats');
+    if (chatId === -2002) return new Promise<string>(() => undefined);
+    return Promise.resolve('quiet');
+  };
+  // The database busy when the run starts (the MCP server writes to it too).
+  const event = activity.event.bind(activity);
+  activity.event = (actor, method, ...rest) => {
+    if (method === 'digests started') throw new Error('database is locked');
+    return event(actor, method, ...rest);
+  };
+  const server = new ConsoleServer({ store, activity, config, port: 0, now: clock.now, log: () => undefined, startedAt: clock.now(), account: null, reader, bot: null, claude: { ready: true, model: config.model }, digestNow, digestLimitMs: 50 });
+  try {
+    await server.start();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EPERM') return t.skip('this sandbox does not allow listening on a local port');
+    throw err;
+  }
+  const port = Number(new URL(server.url).port);
+  try {
+    const pageToken = /name="console-token" content="([^"]+)"/.exec((await call(port, '/')).body)![1];
+    const started = await call(port, '/api/digest/run', { method: 'POST', headers: { 'content-type': 'application/json', 'x-console-token': pageToken }, body: '{}' });
+    assert.equal(started.status, 200, 'a busy log does not fail the request');
+    assert.match(JSON.parse(started.body).message, /^Writing 3 digests/);
+    assert.deepEqual(asked, [-2001, -2002, -2003], 'busiest first; Behind is asked although only 2 of its messages are in; the bot group is not');
+    await new Promise((r) => setTimeout(r, 150));
+    const run = JSON.parse((await call(port, '/api/state')).body).digestRun;
+    assert.ok(run.finishedAt, 'the run ended');
+    assert.deepEqual([run.done, run.written, run.quiet, run.failed, run.failedTitles, run.writing], [3, 0, 1, 2, ['Throws', 'Hangs'], []]);
+    const done = store.activity().filter((a) => a.method.startsWith('digests '));
+    assert.deepEqual(done.map((a) => [a.method, a.detail]), [['digests done', '0 written, 1 too quiet once caught up, 2 failed (Throws, Hangs)']]);
+  } finally {
+    await server.stop();
+  }
+});
+
+test('Run digests: stopping the service starts no more digests', async (t) => {
+  const clock = new Clock();
+  const store = memoryStore(clock);
+  const activity = new Activity(store);
+  const config = testConfig({ reportTo: 700000001, minDigestMessages: 5 });
+  const defaults = { language: 'auto' as const, digestHour: 9, timezone: 'UTC', rsiMode: 'auto' as const };
+  let messageId = 1;
+  for (let k = 1; k <= 5; k++) {
+    const chatId = -3000 - k;
+    store.watchChat({ chatId, title: `G${k}`, username: null, type: 'supergroup', ref: String(chatId) }, 700000001, null, defaults);
+    for (let i = 0; i < 10 + k; i++) store.saveMessage({ chatId, messageId: messageId++, threadId: null, userId: 9, date: clock.now() - 600, text: `m${i}`, replyTo: null, reactions: 0, edited: false });
+  }
+  const pending: ((outcome: string) => void)[] = [];
+  const digestNow = () => new Promise<string>((finish) => pending.push(finish));
+  const server = new ConsoleServer({ store, activity, config, port: 0, now: clock.now, log: () => undefined, startedAt: clock.now(), account: null, reader: null, bot: null, claude: { ready: true, model: config.model }, digestNow });
+  try {
+    await server.start();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EPERM') return t.skip('this sandbox does not allow listening on a local port');
+    throw err;
+  }
+  const port = Number(new URL(server.url).port);
+  const pageToken = /name="console-token" content="([^"]+)"/.exec((await call(port, '/')).body)![1];
+  await call(port, '/api/digest/run', { method: 'POST', headers: { 'content-type': 'application/json', 'x-console-token': pageToken }, body: '{}' });
+  assert.equal(pending.length, 3);
+  await server.stop();
+  for (const finish of pending.slice()) finish('posted');
+  await new Promise((r) => setImmediate(r));
+  assert.equal(pending.length, 3, 'the two left are never started');
+  const done = store.activity().find((a) => a.method === 'digests done');
+  assert.equal(done?.detail, '3 written, 2 not started (stopped)');
 });
 
 test('clearing digests removes the files in every group folder, and the empty folders', async (t) => {

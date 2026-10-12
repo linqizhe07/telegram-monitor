@@ -43,9 +43,10 @@ export interface ConsoleDeps {
   /** The Discord bot's reader (null: no DISCORD_BOT_TOKEN). */
   discord?: DiscordReader | null;
   bot: { username: string } | null;
-  claude: { ready: boolean; model: string };
-  /** Asks the engine for a digest now; resolves with its outcome. */
-  digestNow?: (chatId: number) => Promise<string>;
+  /** daily: each group's digest is written at its daily hour (PULSE_DAILY_DIGESTS; on unless said). */
+  claude: { ready: boolean; model: string; daily?: boolean };
+  /** Asks the engine for a digest now; resolves with its outcome. quietly: part of Run digests, which reports quiet and failed groups itself. */
+  digestNow?: (chatId: number, opts?: { quietly?: boolean }) => Promise<string>;
   /**
    * Where to leave {url, token, pid} (mode 600) while running, so local tools (the MCP server for
    * Claude) can ask the running service instead of opening a second Telegram connection.
@@ -59,6 +60,8 @@ export interface ConsoleDeps {
   news?: NewsRadar | null;
   /** How often rows other processes add to the activity log are looked for (tests shorten it). */
   tailMs?: number;
+  /** How long one digest of Run digests may take before it counts as failed (tests shorten it). */
+  digestLimitMs?: number;
   /** Finding groups worth reading (null: not signed in). */
   discovery?: Discovery | null;
   /** Joining and answering a group's check, on the owner's click (null: not signed in). Never for local tools. */
@@ -89,6 +92,34 @@ export function askerFor(role: 'page' | 'tool', client: unknown): Asker {
 
 /** At most this many of Claude's flags an hour become a notification; the rest are only recorded. */
 const FLAG_NOTICES_PER_HOUR = 4;
+
+/** Run digests writes this many at a time: each is one long Claude request. */
+const DIGESTS_AT_ONCE = 3;
+/** One digest of a run that takes longer counts as failed, so the run always ends (the digest may still arrive later). */
+const DIGEST_LIMIT_MS = 20 * 60_000;
+
+/** The console's Run digests: a digest of the last 24 hours for each source with enough messages. */
+export interface DigestRun {
+  startedAt: number;
+  /** null while it runs. */
+  finishedAt: number | null;
+  /** Sources asked for a digest. */
+  total: number;
+  done: number;
+  written: number;
+  /** Fewer messages than a digest needs once caught up. */
+  quiet: number;
+  failed: number;
+  failedTitles: string[];
+  /** Sources left out before it started: too few messages in the last 24 hours. */
+  skipped: number;
+  /** The ones being written now. */
+  writing: string[];
+  /** The owner pressed Stop: what is being written finishes, the rest is not started. */
+  stopped: boolean;
+  /** Not started because of Stop. */
+  notStarted: number;
+}
 
 const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
@@ -129,6 +160,10 @@ export class ConsoleServer {
   private tailId = 0;
   private readonly streamed = new Set<number>();
   private flagTimes: number[] = [];
+  /** The latest Run digests (null: none since the service started). */
+  private digestRun: DigestRun | null = null;
+  /** Sources it has yet to start, busiest first. */
+  private digestQueue: ChatRow[] = [];
   /** The bound port (differs from deps.port when that is 0: any free port). */
   private port: number;
 
@@ -185,6 +220,12 @@ export class ConsoleServer {
   }
 
   async stop(): Promise<void> {
+    // The service is stopping: a run in progress starts no more paid requests.
+    if (this.digestRun && this.digestRun.finishedAt === null) {
+      this.digestRun.stopped = true;
+      this.digestRun.notStarted += this.digestQueue.length;
+    }
+    this.digestQueue = [];
     if (this.deps.handoffFile) rmSync(this.deps.handoffFile, { force: true });
     this.unsubscribe?.();
     if (this.heartbeat) clearInterval(this.heartbeat);
@@ -350,6 +391,11 @@ export class ConsoleServer {
           return this.json(res, 200, this.clear(body));
         case '/api/digest/delete':
           return this.json(res, 200, this.deleteDigest(Number(body.id)));
+        // Each digest is a paid Claude request: never in TOOL_ALLOWED.
+        case '/api/digest/run':
+          return this.json(res, 200, this.runDigests());
+        case '/api/digest/stop':
+          return this.json(res, 200, this.stopDigests());
         case '/api/news/feed':
           return this.json(res, 200, this.deps.news ? await withTimeout(this.deps.news.addFeed(String(body.url ?? ''), String(body.name ?? '')), 30_000, 'reading the feed').catch((err) => ({ ok: false, message: (err as Error).message })) : { ok: false, message: 'The news radar is off.' });
         case '/api/news/toggle':
@@ -425,6 +471,8 @@ export class ConsoleServer {
       discord: this.deps.discord?.status() ?? { configured: false },
       bot: this.deps.bot,
       claude: this.deps.claude,
+      minDigestMessages: config.minDigestMessages,
+      digestRun: this.digestRun,
       reportTo: config.reportTo,
       autoWatchNew: (store.getKv('auto_watch_new') || (config.autoWatchNew ? 'on' : 'off')) === 'on',
       privateGroups: this.deps.invites?.views() ?? null,
@@ -1007,5 +1055,91 @@ export class ConsoleServer {
     if (!claude.ready || !digestNow) return { ok: false, message: 'Claude is not configured: set ANTHROPIC_API_KEY in .env and restart.' };
     const outcome = await digestNow(chatId);
     return { ok: outcome === 'posted', message: `Digest: ${outcome}.` };
+  }
+
+  /**
+   * Run digests: a digest of the last 24 hours for each source that is read and has enough messages,
+   * DIGESTS_AT_ONCE at a time, busiest first. It answers at once; /api/state shows the progress, and
+   * each digest lands under Digests as it is written.
+   */
+  private runDigests(): { ok: boolean; message: string } {
+    const { claude, digestNow, store, config, log, now } = this.deps;
+    if (!claude.ready || !digestNow) return { ok: false, message: 'Claude is not configured: set ANTHROPIC_API_KEY in .env and restart.' };
+    const busy = this.digestRun;
+    if (busy && busy.finishedAt === null) return { ok: false, message: `Already writing digests: ${busy.done} of ${busy.total} done.` };
+    const stats = store.messageStats(now() - 86_400);
+    // The groups being read. A group the bot is in would get its digest in the group itself, which
+    // members see: that is the bot's /digest, not this button's. One still catching up (after sleep
+    // or a restart) is asked all the same: its stored count is not its count yet, and the digest
+    // catches up first and says so if it is quiet.
+    const sources = store.listChats(true).filter((c) => c.kind === 'watched');
+    const due = sources
+      .map((chat) => ({ chat, count: stats.get(chat.chatId)?.count ?? 0, behind: this.deps.reader?.isBehind(chat.chatId) ?? false }))
+      .filter((x) => x.count >= config.minDigestMessages || x.behind)
+      .sort((a, b) => b.count - a.count)
+      .map((x) => x.chat);
+    if (due.length === 0) return { ok: false, message: `No source has ${config.minDigestMessages} or more messages in the last 24 hours.` };
+    const skipped = sources.length - due.length;
+    const run: DigestRun = { startedAt: now(), finishedAt: null, total: due.length, done: 0, written: 0, quiet: 0, failed: 0, failedTitles: [], skipped, writing: [], stopped: false, notStarted: 0 };
+    this.digestRun = run;
+    this.digestQueue = [...due];
+    this.note(
+      'digests started',
+      `${due.length} source${due.length === 1 ? '' : 's'}`,
+      `the last 24 hours of each, ${DIGESTS_AT_ONCE} at a time${skipped ? `; ${skipped} with fewer than ${config.minDigestMessages} messages left out` : ''}`,
+    );
+    const worker = async () => {
+      for (let chat = this.digestQueue.shift(); chat; chat = this.digestQueue.shift()) {
+        run.writing.push(chat.title);
+        let outcome: string;
+        try {
+          // Inside the try: a digest that throws before it starts counts as failed too.
+          outcome = await withTimeout(digestNow(chat.chatId, { quietly: true }), this.deps.digestLimitMs ?? DIGEST_LIMIT_MS, `the digest of ${chat.title}`);
+        } catch (err) {
+          log(`chat ${chat.chatId}: Run digests: ${(err as Error).message}`);
+          outcome = 'failed';
+        }
+        run.writing.splice(run.writing.indexOf(chat.title), 1);
+        run.done++;
+        if (outcome === 'posted') run.written++;
+        else if (outcome === 'quiet') run.quiet++;
+        else {
+          run.failed++;
+          run.failedTitles.push(chat.title);
+        }
+      }
+    };
+    void Promise.allSettled(Array.from({ length: Math.min(DIGESTS_AT_ONCE, due.length) }, worker)).then(() => {
+      run.finishedAt = now();
+      const parts = [
+        `${run.written} written`,
+        run.quiet ? `${run.quiet} too quiet once caught up` : '',
+        run.failed ? `${run.failed} failed (${run.failedTitles.join(', ')})` : '',
+        run.notStarted ? `${run.notStarted} not started (stopped)` : '',
+      ];
+      this.note('digests done', `${run.total} source${run.total === 1 ? '' : 's'}`, parts.filter(Boolean).join(', '), run.failed === 0);
+    });
+    const where = this.deps.bot ? 'sent to the report chat and listed under Digests' : 'listed under Digests';
+    return { ok: true, message: `Writing ${run.total} digest${run.total === 1 ? '' : 's'}, ${DIGESTS_AT_ONCE} at a time; each is ${where} as soon as it is done.` };
+  }
+
+  /** A row of the console's own in the activity log that never stops what it records (the database can be busy for a moment). */
+  private note(method: string, target: string, detail: string, ok = true): void {
+    try {
+      this.deps.activity.event('console', method, target, detail, ok);
+    } catch (err) {
+      this.deps.log(`activity log: ${method}: ${(err as Error).message}`);
+    }
+  }
+
+  /** Stop: the digests being written finish; the rest are not started. */
+  private stopDigests(): { ok: boolean; message: string } {
+    const run = this.digestRun;
+    if (!run || run.finishedAt !== null) return { ok: false, message: 'No digests are being written.' };
+    run.stopped = true;
+    run.notStarted += this.digestQueue.length;
+    this.digestQueue = [];
+    const now = run.writing.length;
+    return { ok: true, message: `Stopped: ${run.notStarted} not started${now ? `; ${now} being written finish${now === 1 ? 'es' : ''} first` : ''}.` };
   }
 }

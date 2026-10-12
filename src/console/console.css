@@ -436,6 +436,13 @@ table.news-src { min-width: 860px; margin-top: 6px; }
 
 /* ── digests ───────────────────────────────────────────────────────────────── */
 
+.digest-run-line { margin: -4px 0 14px; font-size: 11.5px; line-height: 1.6; color: var(--muted); }
+.digest-run-line b { color: var(--ink); font-weight: 600; }
+.digest-run-line code { padding: 0 4px; border: 1px solid var(--line-2); font-size: 11px; color: var(--white); }
+.digest-run-bar { display: block; width: 100%; height: 2px; margin-top: 8px; border: 0; background: var(--line-2); appearance: none; -webkit-appearance: none; }
+.digest-run-bar::-webkit-progress-bar { background: var(--line-2); }
+.digest-run-bar::-webkit-progress-value { background: var(--cyan); }
+.digest-run-bar::-moz-progress-bar { background: var(--cyan); }
 .outbox { display: grid; gap: 8px; }
 .folder { overflow: hidden; border: 1px solid var(--line-2); background: var(--sunk); }
 .folder > summary { list-style: none; display: flex; align-items: center; gap: 12px; padding: 12px 14px; cursor: pointer; transition: background-color 0.15s; }

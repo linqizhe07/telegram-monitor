@@ -379,7 +379,7 @@ function moreButton(chatId, title) {
     openMenu(b, [
       watched && item('pull', 'Catch up now', 'Read anything missed, right away', '/api/pull', { chatId }, `Catching up on ${src.title}…`),
       watched && src.platform !== 'discord' && item('audit', 'Audit the last hour', 'Compare with Telegram: is anything missing?', '/api/audit', { chatId, hours: 1 }, `Auditing ${src.title}…`),
-      item('digest', 'Digest now', state.claude.ready ? `Next one ${until(src.nextDigestAt)}${src.lastDigestAt ? ` · last ${fmtDateTime(src.lastDigestAt)}` : ''}` : 'Needs ANTHROPIC_API_KEY (Claude Desktop writes the daily one)', '/api/digest', { chatId }, `Writing a digest of ${src.title}…`, !state.claude.ready),
+      item('digest', 'Digest now', state.claude.ready ? `${state.claude.daily === false ? 'No daily one (PULSE_DAILY_DIGESTS=off)' : `Next one ${until(src.nextDigestAt)}`}${src.lastDigestAt ? ` · last ${fmtDateTime(src.lastDigestAt)}` : ''}` : 'Needs ANTHROPIC_API_KEY (Claude Desktop writes the daily one)', '/api/digest', { chatId }, `Writing a digest of ${src.title}…`, !state.claude.ready),
     ].filter(Boolean));
   });
   return b;
@@ -1410,7 +1410,7 @@ function renderOutbox(s) {
   outboxSignature = signature;
   const list = $('outbox');
   if (folders.length === 0) {
-    list.replaceChildren(el('li', { class: 'empty', text: s.claude.ready ? 'No digests yet. They run at the daily hour, or use Digest now in a source\'s menu.' : 'No digests yet. Ask Claude Desktop to summarise a group, or wait for the daily task.' }));
+    list.replaceChildren(el('li', { class: 'empty', text: s.claude.ready ? (s.claude.daily === false ? 'No digests yet. Press Run digests.' : 'No digests yet. They run at the daily hour, or press Run digests.') : 'No digests yet. Ask Claude Desktop to summarise a group, or wait for the daily task.' }));
     return;
   }
   list.replaceChildren(...folders.map((f) => {
@@ -1446,6 +1446,91 @@ function renderOutbox(s) {
     return el('li', {}, folder);
   }));
 }
+
+/** What Run digests would write, as the service picks them: groups being read with enough messages in the last 24 hours, or still catching up. Busiest first. */
+function digestDue(s) {
+  return s.sources.filter((x) => x.enabled && x.kind === 'watched' && (x.messages24h >= s.minDigestMessages || x.behind)).sort((a, b) => b.messages24h - a.messages24h);
+}
+
+let digestRunSignature = '';
+let digestRunPoll = 0;
+
+/** Run digests in the Digests panel, and the line under it: what it needs, how far it is, how the last run went. */
+function renderDigestRun(s) {
+  const b = $('digest-run');
+  const run = s.digestRun;
+  const running = Boolean(run && run.finishedAt === null);
+  const due = digestDue(s);
+  const signature = JSON.stringify([s.claude.ready, s.claude.model, run, due.length, s.minDigestMessages]);
+  if (signature === digestRunSignature) return;
+  digestRunSignature = signature;
+  b.hidden = false;
+  b.dataset.mode = running ? 'stop' : 'run';
+  b.classList.toggle('primary', !running);
+  b.classList.toggle('danger', running);
+  let line = null;
+  if (!s.claude.ready) {
+    b.textContent = 'Run digests';
+    b.disabled = true;
+    b.title = 'Needs ANTHROPIC_API_KEY in .env, then npm run restart';
+    line = ['Run digests has the service write them, with Claude through ', el('code', { text: 'ANTHROPIC_API_KEY' }), ' in .env (then npm run restart). Until then Claude Desktop writes the daily one.'];
+  } else if (running) {
+    b.textContent = run.stopped ? 'Stopping…' : 'Stop';
+    b.disabled = run.stopped;
+    b.title = 'The ones being written finish; the rest are not started';
+    line = [
+      el('b', { text: `${run.done} of ${run.total} done` }),
+      run.written ? ` · ${run.written} written` : '',
+      run.failed ? ` · ${run.failed} failed` : '',
+      run.writing.length ? ` · writing ${run.writing.join(', ')}` : '',
+      el('progress', { class: 'digest-run-bar', max: run.total, value: run.done, 'aria-label': 'Digests written' }),
+    ];
+  } else {
+    b.textContent = 'Run digests';
+    b.disabled = due.length === 0;
+    b.title = due.length
+      ? `A digest of the last 24 hours for each of the ${due.length} source${due.length === 1 ? '' : 's'} with ${s.minDigestMessages} or more messages, by Claude ${s.claude.model}`
+      : `No source has ${s.minDigestMessages} or more messages in the last 24 hours`;
+    if (run) {
+      line = [
+        `Last run ${fmtWhen(run.finishedAt)}: `,
+        el('b', { text: `${run.written} written` }),
+        run.quiet + run.skipped ? ` · ${run.quiet + run.skipped} too quiet` : '',
+        run.failed ? ` · ${run.failed} failed (${run.failedTitles.join(', ')})` : '',
+        run.notStarted ? ` · stopped, ${run.notStarted} not started` : '',
+      ];
+    }
+  }
+  const p = $('digest-run-line');
+  p.hidden = !line;
+  p.replaceChildren(...(line || []));
+}
+
+$('digest-run').addEventListener('click', async () => {
+  const b = $('digest-run');
+  const s = state;
+  if (!s || b.disabled) return;
+  const stop = b.dataset.mode === 'stop';
+  if (stop) {
+    if (!confirm('Stop writing digests?\n\nThe ones being written now still finish; the rest are not started.')) return;
+  } else {
+    const due = digestDue(s);
+    const names = due.slice(0, 12).map((x) => `· ${x.title} (${NUM.format(x.messages24h)} messages)`);
+    if (due.length > 12) names.push(`· and ${due.length - 12} more`);
+    const where = s.bot ? 'sent to the report chat and kept under Digests' : 'kept under Digests';
+    if (!confirm(`Write a digest of the last 24 hours for each of these ${due.length} source${due.length === 1 ? '' : 's'} now?\n\n${names.join('\n')}\n\nClaude ${s.claude.model} writes them, billed to your Anthropic API key, a few at a time. Each one is ${where} as soon as it is done.`)) return;
+  }
+  b.disabled = true;
+  try {
+    const r = await api(stop ? '/api/digest/stop' : '/api/digest/run', {});
+    toast(r.message);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    digestRunSignature = '';
+    await refresh();
+  }
+});
 
 // ── news radar ─────────────────────────────────────────────────────────────
 
@@ -1841,7 +1926,7 @@ function renderSystem(s) {
     [a ? `${a.name} · Telegram id ${a.id} · ${conn ? (conn.state === 'offline' ? 'Telegram unreachable, retrying' : `connected since ${fmtWhen(conn.since)}`) : 'signed in'} · end this session any time in Telegram → Settings → Devices` : s.readerConfigured ? 'Not signed in: run npm run login, then restart.' : 'Not signed in: set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env, then npm run login.', ''],
     lw ? [`Last write: ${METHODS[lw.method] || lw.method} · ${lw.target} · ${fmtWhen(lw.at)}`, 'pink'] : null,
     [s.bot ? `Digests go to chat ${s.reportTo ?? '—'} through @${s.bot.username}` : 'Digests stay on this page and in data/digests/ (no bot)', ''],
-    [s.claude.ready ? `Claude ${s.claude.model} · ${usd(s.costs.day.costUsd)} today · ${usd(s.costs.all.costUsd)} in all` : 'No Claude API key: digests come from Claude Desktop', ''],
+    [s.claude.ready ? `Claude ${s.claude.model} · ${usd(s.costs.day.costUsd)} today · ${usd(s.costs.all.costUsd)} in all${s.claude.daily === false ? ' · no daily digests: only when asked (Run digests, Digest now, /digest)' : ''}` : 'No Claude API key: digests come from Claude Desktop', ''],
     [discordLine(s.discord), s.discord && s.discord.error ? 'pink' : ''],
     [s.notifications ? 'macOS notifications on' : 'Notifications off', ''],
     [`Messages are kept ${s.retentionDays} days`, ''],
@@ -1901,6 +1986,10 @@ function refresh(first) {
       renderSources(state);
       renderInvites(state);
       renderOutbox(state);
+      renderDigestRun(state);
+      // While digests are being written, look every 3 s: each shows up as soon as it is done.
+      clearTimeout(digestRunPoll);
+      if (state.digestRun && state.digestRun.finishedAt === null) digestRunPoll = setTimeout(refresh, 3000);
       renderSystem(state);
       renderDiscord(state);
       if (discoverView) renderDiscover(); // "Reading" follows a Watch

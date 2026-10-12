@@ -25,6 +25,8 @@ export interface Strings {
   privateStart(userId: number): string;
   working(hours: number): string;
   notEnough(count: number, hours: number): string;
+  /** In place of the next digest's time when the service writes none on a schedule (PULSE_DAILY_DIGESTS=off). */
+  noDailyDigest: string;
   cooldown(minutes: number): string;
   failed(reason: string): string;
   adminOnly: string;
@@ -112,6 +114,7 @@ const en: Strings = {
     `👋 I am Pulse. Add me to a group and I will post a daily digest of it: topics, pain points, ideas, opportunities, open questions.\n\nYour Telegram user id is <code>${id}</code> (put it in PULSE_OWNER_IDS if you run this bot).`,
   working: (h) => `⏳ Reading the last ${h}h…`,
   notEnough: (c, h) => `Only ${c} message${c === 1 ? '' : 's'} in the last ${h}h: not enough for a digest yet.`,
+  noDailyDigest: 'none on a schedule (/digest writes one)',
   cooldown: (m) => `A digest was made a moment ago. Try again in ${m} min.`,
   failed: (r) => `⚠️ I could not write the digest this time (${r}).`,
   adminOnly: 'Only group admins can do that.',
@@ -240,6 +243,7 @@ const zh: Strings = {
     `👋 我是 Pulse。把我拉进群，我每天发一份群聊速览：话题、痛点、想法、机会、悬而未决的问题。\n\n你的 Telegram 用户 id 是 <code>${id}</code>（部署者可以填进 PULSE_OWNER_IDS）。`,
   working: (h) => `⏳ 正在读最近 ${h} 小时的消息…`,
   notEnough: (c, h) => `最近 ${h} 小时只有 ${c} 条消息，还不够出摘要。`,
+  noDailyDigest: '不定时（发 /digest 写一份）',
   cooldown: (m) => `刚出过一份，${m} 分钟后再试。`,
   failed: (r) => `⚠️ 这次没能写出摘要（${r}）。`,
   adminOnly: '只有群管理员可以这样做。',

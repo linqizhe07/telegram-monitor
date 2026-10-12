@@ -89,10 +89,12 @@ export class Engine {
   /**
    * Writes and posts a digest of the `hours` before `end`.
    * production = the scheduled daily digest (an evaluation window for RSI); manual = /digest.
+   * quietly: one of a run over every source (the console's Run digests), which reports a quiet or
+   * failed group itself, so no "not enough messages" or "failed" note goes to the chat.
    */
   digest(
     chatId: number,
-    opts: { kind: 'production' | 'manual'; hours?: number; end?: number; replyTo?: number; threadId?: number | null; to?: number },
+    opts: { kind: 'production' | 'manual'; hours?: number; end?: number; replyTo?: number; threadId?: number | null; to?: number; quietly?: boolean },
   ): Promise<'posted' | 'quiet' | 'failed'> {
     return this.serial(chatId, async () => {
       const { store, config, log } = this.deps;
@@ -103,6 +105,7 @@ export class Engine {
       const window = { start: end - hours * 3600, end };
       const s = strings(this.uiLang(chat));
       const post = { replyTo: opts.replyTo, threadId: opts.threadId, to: opts.to };
+      const notes = opts.kind === 'manual' && !opts.quietly;
 
       if (chat.kind === 'watched' && chat.platform === 'discord') {
         const current = await (this.deps.discord?.catchUp(chat) ?? Promise.resolve(false)).catch((err) => {
@@ -121,7 +124,7 @@ export class Engine {
       }
       const count = store.countMessages(chatId, window.start, window.end);
       if (count < config.minDigestMessages) {
-        if (opts.kind === 'manual') await this.send(chat, s.notEnough(count, hours), post);
+        if (notes) await this.send(chat, s.notEnough(count, hours), post);
         log(`chat ${chatId}: ${count} messages in the window, no digest`);
         return 'quiet';
       }
@@ -162,7 +165,7 @@ export class Engine {
         return 'posted';
       } catch (err) {
         log(`chat ${chatId}: digest failed: ${describeError(err)}`);
-        if (opts.kind === 'manual') await this.send(chat, s.failed(escapeHtml(describeError(err).slice(0, 160))), post).catch(() => undefined);
+        if (notes) await this.send(chat, s.failed(escapeHtml(describeError(err).slice(0, 160))), post).catch(() => undefined);
         return 'failed';
       }
     });

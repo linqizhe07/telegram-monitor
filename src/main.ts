@@ -200,7 +200,8 @@ async function main(): Promise<void> {
   const engine = new Engine({ store, llm, config, api, now, log, reader, discord });
   const bot = me ? new PulseBot({ store, engine, api, config, me, now, log, reader }) : null;
   let stopScheduler = () => undefined as void;
-  if (claudeReady) stopScheduler = startScheduler(engine, store, { now, log });
+  if (claudeReady && config.dailyDigests) stopScheduler = startScheduler(engine, store, { now, log });
+  else if (claudeReady) log('PULSE_DAILY_DIGESTS=off: digests are written only when asked (console Run digests or Digest now, /digest)');
   else log('no ANTHROPIC_API_KEY: messages are collected, but no digests are written until it is set');
   const stopReader = reader ? reader.start() : () => undefined;
   void discord?.start();
@@ -225,7 +226,7 @@ async function main(): Promise<void> {
       reader,
       discord,
       bot: me?.username ? { username: me.username } : null,
-      claude: { ready: claudeReady, model: config.model },
+      claude: { ready: claudeReady, model: config.model, daily: config.dailyDigests },
       // Next to the database, where the MCP server looks for it (data/console.json).
       handoffFile: join(dirname(config.dbPath), 'console.json'),
       invites,
@@ -249,9 +250,9 @@ async function main(): Promise<void> {
             online: () => connection.state().state === 'online',
           })
         : null,
-      digestNow: (chatId) => {
+      digestNow: (chatId, opts) => {
         const chat = store.getChat(chatId);
-        return engine.digest(chatId, { kind: 'manual', to: chat?.kind === 'watched' ? (chat.reportChatId ?? undefined) : undefined });
+        return engine.digest(chatId, { kind: 'manual', to: chat?.kind === 'watched' ? (chat.reportChatId ?? undefined) : undefined, quietly: opts?.quietly });
       },
     });
     try {
