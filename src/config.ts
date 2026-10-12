@@ -57,6 +57,8 @@ export interface Config {
   news: boolean;
   /** A notification when a group reacts to the news, or talks about it before the first report. */
   newsNotify: boolean;
+  /** A Discord bot's token (discord.com/developers): the channels it can see in the owner's servers are read like groups. Empty = no Discord. */
+  discordToken: string;
 }
 
 const EFFORTS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -150,6 +152,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     readerPeekSeconds: field('PULSE_READER_PEEK_SECONDS', () => int(env.PULSE_READER_PEEK_SECONDS, 10, 3, 600)),
     news: field('PULSE_NEWS', () => oneOf(env.PULSE_NEWS, ['on', 'off'] as const, 'on') === 'on'),
     newsNotify: field('PULSE_NEWS_NOTIFY', () => oneOf(env.PULSE_NEWS_NOTIFY, ['on', 'off'] as const, 'on') === 'on'),
+    discordToken: env.DISCORD_BOT_TOKEN?.trim() ?? '',
     reportTo: field('PULSE_REPORT_TO', () => {
       const raw = env.PULSE_REPORT_TO?.trim();
       if (!raw) return ownerIds[0] ?? null;

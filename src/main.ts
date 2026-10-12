@@ -4,6 +4,7 @@ import { PulseBot } from './bot.ts';
 import { loadConfig } from './config.ts';
 import { ConsoleServer } from './console/server.ts';
 import { Discovery } from './discover.ts';
+import { DiscordReader } from './discord.ts';
 import { Engine } from './engine.ts';
 import { InviteTracker, type Invoker } from './invites.ts';
 import { AnthropicLlm } from './llm.ts';
@@ -169,22 +170,40 @@ async function main(): Promise<void> {
   } else if (config.watch.length > 0) {
     log('PULSE_WATCH is set but the reader account is not signed in (TELEGRAM_API_ID / TELEGRAM_API_HASH, then npm run login)');
   }
-  if (!telegram && !connection) {
+  // Discord: the channels the owner's Discord bot can see, read like groups (src/discord.ts).
+  const discord = config.discordToken
+    ? new DiscordReader({
+        token: config.discordToken,
+        store,
+        activity,
+        now,
+        log,
+        reportTo: config.reportTo,
+        defaults,
+        autoWatch: () => (store.getKv('auto_watch_new') || (config.autoWatchNew ? 'on' : 'off')) === 'on',
+        maxMessageChars: config.maxMessageChars,
+        retentionDays: config.retentionDays,
+        onStored: (chatId, messages) => news.onStored(chatId, messages),
+      })
+    : null;
+  if (!telegram && !connection && !discord) {
     console.error(
       'Nothing to run. Either:\n' +
         '- sign in a reader account: TELEGRAM_API_ID / TELEGRAM_API_HASH in .env, then npm run login (see COOKBOOK.md), or\n' +
-        '- create a bot with @BotFather and set TELEGRAM_BOT_TOKEN in .env.',
+        '- create a bot with @BotFather and set TELEGRAM_BOT_TOKEN in .env, or\n' +
+        '- create a Discord bot and set DISCORD_BOT_TOKEN in .env.',
     );
     process.exit(1);
   }
 
   const llm = new RecordingLlm(new AnthropicLlm({ model: config.model }), activity);
-  const engine = new Engine({ store, llm, config, api, now, log, reader });
+  const engine = new Engine({ store, llm, config, api, now, log, reader, discord });
   const bot = me ? new PulseBot({ store, engine, api, config, me, now, log, reader }) : null;
   let stopScheduler = () => undefined as void;
   if (claudeReady) stopScheduler = startScheduler(engine, store, { now, log });
   else log('no ANTHROPIC_API_KEY: messages are collected, but no digests are written until it is set');
   const stopReader = reader ? reader.start() : () => undefined;
+  void discord?.start();
   const stopInvites = invites ? invites.start() : () => undefined;
   const stopNews = news.start();
   // Short-term high-frequency terms: looked for every two minutes, each raised once (console, alerts).
@@ -204,6 +223,7 @@ async function main(): Promise<void> {
       startedAt,
       account: connection ? { name: connection.name, id: connection.id, raw: connection.raw, state: connection.state, pushes: connection.pushes } : null,
       reader,
+      discord,
       bot: me?.username ? { username: me.username } : null,
       claude: { ready: claudeReady, model: config.model },
       // Next to the database, where the MCP server looks for it (data/console.json).
@@ -263,6 +283,7 @@ async function main(): Promise<void> {
     abort.abort();
     stopScheduler();
     stopReader();
+    discord?.stop();
     stopInvites();
     stopNews();
     stopTerms();

@@ -13,6 +13,11 @@ import { localDate, localTime } from './transcript.ts';
 
 export { messageLink };
 
+/** A message's link: t.me for a Telegram chat (when it has links), discord.com for a Discord channel. */
+export function linkTo(store: Store, chat: Pick<ChatRow, 'chatId' | 'username'> & { platform?: ChatRow['platform'] }, messageId: number): string | null {
+  return chat.platform === 'discord' ? store.discordLink(chat.chatId, messageId) : messageLink(chat, messageId);
+}
+
 /**
  * The groups and channels read, in the order list_sources and status number them (#1, #2…):
  * switched-off ones included, and in the order they were added, so a new one takes the next
@@ -25,8 +30,12 @@ export function sourcesOf(store: Store): ChatRow[] {
     .sort((a, b) => a.createdAt - b.createdAt || a.chatId - b.chatId);
 }
 
-/** How to link any message of the chat: its link with <id> in place of the message id. */
-export function linkPattern(c: Pick<ChatRow, 'chatId' | 'username'>): string | null {
+/**
+ * How to link any message of the chat: its link with <id> in place of the message id. A Discord
+ * message's link holds Discord's own id, not ours, so there is no pattern: each message has its own.
+ */
+export function linkPattern(c: Pick<ChatRow, 'chatId' | 'username'> & { platform?: ChatRow['platform'] }): string | null {
+  if (c.platform === 'discord') return null;
   return messageLink(c, 1)?.replace(/\/1$/, '/<id>') ?? null;
 }
 
@@ -251,7 +260,7 @@ export function search(store: Store, o: { chats: ChatRow[]; phrases: string[]; f
         return Boolean(u && (u.displayName.toLowerCase().includes(who) || u.username?.toLowerCase() === who));
       });
     }
-    for (const m of rows.slice(0, o.limit)) found.push({ chat, m, author: users.get(m.userId)?.displayName ?? String(m.userId), link: messageLink(chat, m.messageId) });
+    for (const m of rows.slice(0, o.limit)) found.push({ chat, m, author: users.get(m.userId)?.displayName ?? String(m.userId), link: linkTo(store, chat, m.messageId) });
   }
   return found.sort((a, b) => b.m.date - a.m.date || b.m.messageId - a.m.messageId).slice(0, o.limit);
 }
@@ -360,7 +369,7 @@ export interface LiveState {
   account: { connection: { state: 'online' | 'offline'; since: number } | null } | null;
   /** How often the chats the account is in are checked for new messages (one request for all of them). */
   peekSeconds?: number;
-  sources: { chatId: number; pushed: boolean; peeked: boolean; member: boolean; everyS: number; behind: boolean }[];
+  sources: { chatId: number; platform?: ChatRow['platform']; pushed: boolean; peeked: boolean; member: boolean; everyS: number; behind: boolean }[];
 }
 
 export interface SourceStatus {
@@ -401,6 +410,7 @@ export interface StatusView {
 
 /** How a source is read: pushed by Telegram, checked with the account's other chats every few seconds, or read on its own. */
 function readingOf(l: LiveState['sources'][number], peekSeconds: number | null): string {
+  if (l.platform === 'discord') return l.pushed ? 'pushed live by Discord, through the bot' : 'Discord: the bot is not connected now (it catches up when it is)';
   if (l.pushed) return `pushed live by Telegram (a full read every ${l.everyS}s besides)`;
   if (l.peeked && peekSeconds) return `checked for new messages every ${peekSeconds}s (a full read every ${l.everyS}s besides)`;
   return `read every ${l.everyS}s`;
@@ -416,7 +426,7 @@ export function statusView(store: Store, o: { now: number; running: boolean; liv
   const sources: SourceStatus[] = sourcesOf(store).map((c, i) => {
     const st = stats.get(c.chatId);
     const probeJson = store.getKv(`probe:${c.chatId}`);
-    let access: string | null = c.readerOrigin === 'dialog' ? 'member' : null;
+    let access: string | null = c.platform === 'discord' ? 'Discord, through the bot' : c.readerOrigin === 'dialog' ? 'member' : null;
     try {
       const p = probeJson ? (JSON.parse(probeJson) as { member?: boolean; verdict?: string }) : null;
       if (p) access = p.member ? 'member' : p.verdict === 'read-from-outside' ? 'outside' : (p.verdict ?? access);
@@ -440,7 +450,7 @@ export function statusView(store: Store, o: { now: number; running: boolean; liv
       caughtUpAt: Number(store.getKv(`reader_caught_up:${c.chatId}`) ?? 0) || null,
       behind: l ? l.behind : null,
       error: c.readerError,
-      links: linkPattern(c),
+      links: c.platform === 'discord' ? "each message's own link (Discord's id, not #id): get_messages gives them" : linkPattern(c),
     };
   });
   const tally = store.activityTally(day);

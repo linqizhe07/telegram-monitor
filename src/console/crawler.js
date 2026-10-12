@@ -83,19 +83,21 @@
   const HUES = ['92,200,236', '112,128,255', '170,112,255', '79,209,176', '90,160,255'];
   const NEWS_RGB = '92,200,236';
   const PINK_RGB = '255,92,138';
+  const DISCORD_RGB = '88,101,242';
 
   /** A nebula: one group, or the news. */
   const clouds = new Map();
   let order = [];
   let activeKey = null;
 
-  function cloudFor(key, kind, title) {
+  function cloudFor(key, kind, title, platform = 'telegram') {
     let c = clouds.get(key);
     if (!c) {
       c = { key, kind, title, chatId: kind === 'group' ? Number(key.slice(2)) : null, seed: hash(key), count: 0, sub: '', x: 0, y: 0, tx: 0, ty: 0, r: 40, n: 0, pts: null, sprite: null, tint: null, tintColor: '', glow: 0, channel: false };
       // Its gas colour, spin and orbit come from a second seed: the points' shape stays as it was.
       const R2 = rng(hash(`${key}·look`));
-      c.hue = kind === 'news' ? NEWS_RGB : HUES[Math.floor(R2() * HUES.length)];
+      // A Discord channel's gas is Discord's own blurple.
+      c.hue = kind === 'news' ? NEWS_RGB : platform === 'discord' ? DISCORD_RGB : HUES[Math.floor(R2() * HUES.length)];
       c.spin = (0.01 + R2() * 0.018) * (R2() < 0.5 ? -1 : 1);
       c.tilt = (R2() - 0.5) * 0.9;
       c.orbitDir = R2() < 0.5 ? -1 : 1;
@@ -1962,10 +1964,10 @@
       for (const k of [...clouds.keys()]) if (k.startsWith('g:') && !keys.has(k)) clouds.delete(k);
       order = enabled.slice().sort((a, b) => b.messages24h - a.messages24h || a.chatId - b.chatId).map((x) => `g:${x.chatId}`);
       for (const src of enabled) {
-        const c = cloudFor(`g:${src.chatId}`, 'group', src.title);
+        const c = cloudFor(`g:${src.chatId}`, 'group', src.title, src.platform);
         c.count = src.messages24h;
         c.base = Math.min(4, Math.log10(1 + src.messages24h) * 1.1);
-        c.sub = `${n(src.messages24h)} today · ${src.error ? 'error' : src.behind ? 'catching up' : src.peeked || src.pushed ? 'live' : `every ~${src.everyS >= 60 ? `${Math.round(src.everyS / 60)}m` : `${src.everyS}s`}`}`;
+        c.sub = `${n(src.messages24h)} today · ${src.error ? 'error' : src.behind ? 'catching up' : src.peeked || src.pushed ? (src.platform === 'discord' ? 'live · Discord' : 'live') : src.platform === 'discord' ? 'Discord · bot offline' : `every ~${src.everyS >= 60 ? `${Math.round(src.everyS / 60)}m` : `${src.everyS}s`}`}`;
       }
       if (s.news && !clouds.has('news')) cloudFor('news', 'news', 'first-tier news');
       if (!s.news) clouds.delete('news');

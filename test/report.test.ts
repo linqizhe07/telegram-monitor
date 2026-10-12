@@ -150,3 +150,36 @@ test('without a reader account, /watch explains how to set one up', async () => 
   await bot.handle(dm('/watch @binance_cn_test'));
   assert.match(env.api.last().text, /npm run login/);
 });
+
+test("a Discord channel's digest: caught up through the Discord bot, never the Telegram reader; sent to the report chat, linking into Discord", async () => {
+  const clock = new Clock(T0 + 3600);
+  const store = memoryStore(clock);
+  const api = new FakeTelegram();
+  const config = testConfig({ ownerIds: [OWNER] });
+  const telegram: string[] = [];
+  const caughtUp: number[] = [];
+  const engine = new Engine({
+    store,
+    llm: new FakeLlm(),
+    config,
+    api,
+    now: clock.now,
+    log: () => undefined,
+    reader: { refresh: async () => void telegram.push('refresh'), catchUp: async () => (telegram.push('catchUp'), true) },
+    discord: { catchUp: async (chat) => (caughtUp.push(chat.chatId), true) },
+  });
+  const defaults = { language: 'auto' as const, digestHour: 9, timezone: 'Asia/Shanghai', rsiMode: 'auto' as const };
+  const { chat } = store.addDiscordChannel({ channelId: '1100000000000000011', guildId: '1000000000000000001', guildName: 'Ours', name: 'general', type: 0 }, OWNER, true, defaults);
+  seedUsers(store, chat.chatId);
+  for (const m of syntheticDay(chat.chatId, T0 - 20 * 3600, 1, 6)) {
+    store.discordMessageId(chat.chatId, String(1_300_000_000_000_000_000n + BigInt(m.messageId)));
+    store.saveMessage(m);
+  }
+  assert.equal(await engine.digest(chat.chatId, { kind: 'manual' }), 'posted');
+  assert.deepEqual(caughtUp, [chat.chatId]);
+  assert.deepEqual(telegram, [], 'the Telegram reader is never asked about a Discord channel');
+  assert.ok(api.sent.length > 0 && api.sent.every((s) => s.chatId === OWNER), 'to the report chat, not to a Discord id');
+  const html = api.sent.map((s) => s.text).join('\n');
+  assert.match(html, /href="https:\/\/discord\.com\/channels\/1000000000000000001\/1100000000000000011\/13000000000000000\d\d"/);
+  assert.doesNotMatch(html, /t\.me\//);
+});

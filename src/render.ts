@@ -48,6 +48,8 @@ export interface RenderContext {
   version: number;
   validIds: Set<number>;
   streaks: Map<string, number>;
+  /** A message's link, when it is not a Telegram one (a Discord channel's). */
+  link?: (messageId: number) => string | null;
 }
 
 /** The digest as one or more Telegram HTML messages. */
@@ -56,7 +58,7 @@ export function renderDigest(d: Digest, ctx: RenderContext): string[] {
   const text = (x: string) => escapeHtml(humanize(x, ctx.names));
   const link = (refs: number[]) => {
     const first = refs.find((r) => ctx.validIds.has(r));
-    const url = first === undefined ? null : messageLink(ctx.chat, first);
+    const url = first === undefined ? null : (ctx.link ?? ((id: number) => messageLink(ctx.chat, id)))(first);
     return url ? ` <a href="${url}">↗</a>` : '';
   };
 

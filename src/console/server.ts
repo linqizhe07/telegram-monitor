@@ -17,6 +17,7 @@ import type { Config } from '../config.ts';
 import { denoise, formatSignal } from '../denoise.ts';
 import { digestFileHeading, digestFolders } from '../digest-folders.ts';
 import type { Discovery } from '../discover.ts';
+import type { DiscordReader } from '../discord.ts';
 import { dayMap, lastDays, type DayMap } from '../constellation.ts';
 import type { Controller } from '../controller.ts';
 import type { OwnerActions } from '../owner-actions.ts';
@@ -26,7 +27,7 @@ import type { NewsRadar } from '../news.ts';
 import { clean, type Notifier } from '../notify.ts';
 import { probe, type ProbeResult } from '../probe.ts';
 import { parseRef, withTimeout, type Reader } from '../reader.ts';
-import type { ActivityRow, Store } from '../store.ts';
+import { isDiscordChat, type ActivityRow, type ChatRow, type Store } from '../store.ts';
 import { lastSlot } from '../transcript.ts';
 
 export interface ConsoleDeps {
@@ -39,6 +40,8 @@ export interface ConsoleDeps {
   startedAt: number;
   account: { name: string; id: string; raw: GramClient; state?: () => { state: 'online' | 'offline'; since: number }; pushes?: () => { since: number; total: number; messages: number; kinds: Record<string, number> } } | null;
   reader: Reader | null;
+  /** The Discord bot's reader (null: no DISCORD_BOT_TOKEN). */
+  discord?: DiscordReader | null;
   bot: { username: string } | null;
   claude: { ready: boolean; model: string };
   /** Asks the engine for a digest now; resolves with its outcome. */
@@ -374,10 +377,13 @@ export class ConsoleServer {
       .filter((c) => c.kind !== 'report')
       .map((c) => {
         const st = stats.get(c.chatId);
+        if (c.platform === 'discord') return this.discordSource(c, st, now);
         const probeJson = store.getKv(probeKey(c.chatId));
         const p = probeJson ? (JSON.parse(probeJson) as ProbeResult) : null;
         return {
           chatId: c.chatId,
+          platform: c.platform,
+          discord: null,
           title: c.title,
           ref: c.readerRef ?? (c.username ? `@${c.username}` : String(c.chatId)),
           kind: c.kind,
@@ -416,6 +422,7 @@ export class ConsoleServer {
         ? { name: this.deps.account.name, id: this.deps.account.id, session: config.readerSession, connection: this.deps.account.state?.() ?? null, pushes: this.deps.account.pushes?.() ?? null }
         : null,
       readerConfigured: Boolean(config.telegramApiId),
+      discord: this.deps.discord?.status() ?? { configured: false },
       bot: this.deps.bot,
       claude: this.deps.claude,
       reportTo: config.reportTo,
@@ -445,6 +452,45 @@ export class ConsoleServer {
     };
   }
 
+  /** A Discord channel in /api/state: what a Telegram source says, in Discord's terms (the bot is in it; the gateway pushes). */
+  private discordSource(c: ChatRow, st: { count: number; people: number; newest: number | null } | undefined, now: number) {
+    const { store } = this.deps;
+    const ch = store.discordChannel({ chatId: c.chatId });
+    const online = this.deps.discord?.online() ?? false;
+    return {
+      chatId: c.chatId,
+      platform: c.platform,
+      discord: ch ? { server: ch.guildName, channel: ch.name, feed: ch.feed, announcement: ch.type === 5, link: `https://discord.com/channels/${ch.guildId}/${ch.channelId}` } : null,
+      title: c.title,
+      ref: c.readerRef ?? String(c.chatId),
+      kind: c.kind,
+      enabled: c.enabled,
+      access: 'discord',
+      members: null,
+      perDay: null,
+      bots: [],
+      door: null,
+      messages24h: st?.count ?? 0,
+      people24h: st?.people ?? 0,
+      newest: st?.newest ?? null,
+      cursor: null,
+      behind: false,
+      origin: c.readerOrigin,
+      offReason: c.enabled ? null : store.getKv(`reader_off_reason:${c.chatId}`) || null,
+      caughtUpAt: Number(store.getKv(`reader_caught_up:${c.chatId}`) ?? 0) || null,
+      pushed: online,
+      peeked: false,
+      member: true,
+      everyS: null,
+      lastPushAt: null,
+      error: c.readerError ?? (this.deps.discord ? null : 'DISCORD_BOT_TOKEN is not set: nothing reads it'),
+      reportTo: c.reportChatId,
+      lastDigestAt: c.lastDigestAt,
+      nextDigestAt: lastSlot(now, c.timezone, c.digestHour) + 86_400,
+      timezone: c.timezone,
+    };
+  }
+
   /** What only this process knows, for the MCP server's status tool: the connection, and how each source is read. */
   private live() {
     const { reader, store, config, account } = this.deps;
@@ -457,7 +503,8 @@ export class ConsoleServer {
         .filter((c) => c.kind === 'watched')
         .map((c) => ({
           chatId: c.chatId,
-          pushed: reader?.isPushed(c.chatId) ?? false,
+          platform: c.platform,
+          pushed: c.platform === 'discord' ? (this.deps.discord?.online() ?? false) : (reader?.isPushed(c.chatId) ?? false),
           peeked: reader?.isPeeked(c.chatId) ?? false,
           member: reader?.isMember(c.chatId) ?? c.readerOrigin === 'dialog',
           everyS: reader?.intervalOf(c.chatId) ?? config.readerPollSeconds,
@@ -621,7 +668,8 @@ export class ConsoleServer {
     let map = kept && (!today || now() - kept.at < 300) ? kept.map : null;
     if (!map) {
       const chats = store.listChats(false).filter((c) => c.kind === 'watched');
-      map = dayMap(chats.map((c) => ({ chatId: c.chatId, channel: c.type === 'channel', messages: store.messages(c.chatId, d.from, d.to) })), d.day, d.from, d.to);
+      const feed = (c: ChatRow) => c.type === 'channel' || (c.platform === 'discord' && Boolean(store.discordChannel({ chatId: c.chatId })?.feed));
+      map = dayMap(chats.map((c) => ({ chatId: c.chatId, channel: feed(c), messages: store.messages(c.chatId, d.from, d.to) })), d.day, d.from, d.to);
       this.maps.set(d.day, { at: now(), map });
       // Days that fell out of the window go.
       for (const k of this.maps.keys()) if (!days.some((x) => x.day === k)) this.maps.delete(k);
@@ -692,6 +740,9 @@ export class ConsoleServer {
 
   private async watch(target: string, asker: Asker = OWNER): Promise<{ ok: boolean; message: string; chatId?: number }> {
     const { reader, store, config, activity } = this.deps;
+    if (/discord(app)?\.com|discord\.gg/i.test(target)) {
+      return { ok: false, message: 'A Discord channel is read once the Discord bot is in its server: Groups → Discord shows the link that adds it. Announcement channels of other servers: Follow them into a channel of yours.' };
+    }
     if (!reader) return { ok: false, message: 'The reader account is not signed in.' };
     if (config.reportTo === null) return { ok: false, message: 'Set PULSE_OWNER_IDS (or PULSE_REPORT_TO) in .env so digests have somewhere to go.' };
     const hash = inviteHash(target);
@@ -744,7 +795,8 @@ export class ConsoleServer {
       store.setKv(`reader_off_reason:${chatId}`, '');
       store.setKv(`reader_floor:${chatId}`, String(this.deps.now() - 86_400));
       activity.event(asker.actor, 'switched on', chat.title, `reading again: catching up from where it stopped, at most 24 hours back${asker.via}`);
-      if (reader) void reader.pull(store.getChat(chatId)!).catch(() => undefined);
+      if (chat.platform === 'discord') this.deps.discord?.catchUpSoon(chatId);
+      else if (reader) void reader.pull(store.getChat(chatId)!).catch(() => undefined);
       return { ok: true, message: `${chat.title}: on. Catching up (at most the last 24 hours).` };
     }
     store.updateChat(chatId, { enabled: false });
@@ -811,6 +863,7 @@ export class ConsoleServer {
   private padCall(pad: Controller, what: string, body: Record<string, unknown>): Promise<unknown> {
     const chatId = Number(body.chatId);
     const msgId = Number(body.msgId);
+    if (isDiscordChat(chatId)) return Promise.resolve({ ok: false, message: 'A Discord channel: read here, never written. Open it in Discord to write.' });
     switch (what) {
       case 'look':
         return pad.look(chatId, body.fresh === true);
@@ -913,12 +966,13 @@ export class ConsoleServer {
   }
 
   private async pull(chatId: number, asker: Asker = OWNER): Promise<{ ok: boolean; message: string }> {
-    const { reader, store, activity } = this.deps;
+    const { reader, store, activity, discord } = this.deps;
     const chat = store.getChat(chatId);
-    if (!reader || !chat || chat.kind !== 'watched') return { ok: false, message: 'Not a watched source, or no reader account.' };
+    const by = chat?.platform === 'discord' ? discord : reader;
+    if (!by || !chat || chat.kind !== 'watched') return { ok: false, message: chat?.platform === 'discord' ? 'No Discord bot (DISCORD_BOT_TOKEN).' : 'Not a watched source, or no reader account.' };
     try {
       const before = store.countMessages(chatId, 0, this.deps.now() + 86_400);
-      const current = await withTimeout(reader.catchUp(chat, 5 * 60_000), 6 * 60_000, 'catching up');
+      const current = await withTimeout(chat.platform === 'discord' ? discord!.catchUp(chat) : reader!.catchUp(chat, 5 * 60_000), 6 * 60_000, 'catching up');
       const n = store.countMessages(chatId, 0, this.deps.now() + 86_400) - before;
       activity.event(asker.actor, 'catch up', chat.title, `${n} new messages${current ? ', up to date' : ', still catching up'}${asker.via}`);
       return { ok: true, message: `${n} new messages; ${current ? 'up to date' : 'still catching up (a lot was posted while offline)'}.` };
@@ -930,6 +984,7 @@ export class ConsoleServer {
   private async audit(chatId: number, hours: number, asker: Asker = OWNER): Promise<{ ok: boolean; message: string; result?: unknown }> {
     const { reader, store, activity, now } = this.deps;
     const chat = store.getChat(chatId);
+    if (chat?.platform === 'discord') return { ok: false, message: 'The audit checks the capture against Telegram; a Discord channel is caught up with "Catch up now".' };
     if (!reader || !chat || chat.kind !== 'watched') return { ok: false, message: 'Not a watched source, or no reader account.' };
     const h = Math.min(Math.max(hours || 1, 1), 24);
     try {

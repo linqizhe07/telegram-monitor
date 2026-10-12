@@ -419,3 +419,65 @@ test('the pulse: each group\'s messages per hour, what the denoiser removed, and
     await server.stop();
   }
 });
+
+test('Discord channels in the console: their state, and every action that would ask Telegram goes to the Discord bot instead, or is refused', async (t) => {
+  const clock = new Clock();
+  const store = memoryStore(clock);
+  const activity = new Activity(store);
+  const config = testConfig({ reportTo: 700000001 });
+  const { chat } = store.addDiscordChannel({ channelId: '1100000000000000011', guildId: '1000000000000000001', guildName: 'Ours', name: 'feeds', type: 5 }, 700000001, false, { language: 'auto', digestHour: 9, timezone: 'UTC', rsiMode: 'auto' });
+  const asked: string[] = [];
+  const discord = {
+    status: () => ({ configured: true, state: 'online', error: null, bot: { id: '2', name: 'pulse-bot' }, invite: 'https://discord.com/oauth2/authorize?client_id=2&scope=bot&permissions=66560', servers: [{ id: '1', name: 'Ours', channels: 1, on: 0 }] }),
+    online: () => true,
+    catchUp: async () => (asked.push('catchUp'), true),
+    catchUpSoon: () => void asked.push('catchUpSoon'),
+  };
+  const telegramOnly = new Proxy({}, { get: () => () => Promise.reject(new Error('Telegram was asked about a Discord channel')) });
+  const server = new ConsoleServer({
+    store,
+    activity,
+    config,
+    port: 0,
+    now: clock.now,
+    log: () => undefined,
+    startedAt: clock.now(),
+    account: null,
+    reader: telegramOnly as never,
+    discord: discord as never,
+    pad: telegramOnly as never,
+    bot: null,
+    claude: { ready: false, model: config.model },
+  });
+  try {
+    await server.start();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EPERM') return t.skip('this sandbox does not allow listening on a local port');
+    throw err;
+  }
+  const port = Number(new URL(server.url).port);
+  try {
+    const page = await call(port, '/');
+    const token = /name="console-token" content="([^"]+)"/.exec(page.body)![1];
+    const post = async (path: string, body: unknown) => JSON.parse((await call(port, path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-console-token': token }, body: JSON.stringify(body) })).body);
+    assert.equal((await call(port, '/starmap.js')).status, 200);
+
+    const state = JSON.parse((await call(port, '/api/state')).body);
+    assert.equal(state.discord.state, 'online');
+    const src = state.sources.find((x: { chatId: number }) => x.chatId === chat.chatId);
+    assert.equal(src.platform, 'discord');
+    assert.equal(src.access, 'discord');
+    assert.equal(src.pushed, true, 'pushed by Discord while the bot is connected');
+    assert.deepEqual(src.discord, { server: 'Ours', channel: 'feeds', feed: true, announcement: true, link: 'https://discord.com/channels/1000000000000000001/1100000000000000011' });
+
+    assert.equal((await post('/api/toggle', { chatId: chat.chatId, on: true })).ok, true);
+    assert.equal((await post('/api/pull', { chatId: chat.chatId })).ok, true);
+    assert.deepEqual(asked, ['catchUpSoon', 'catchUp'], 'switched on and caught up by the Discord bot');
+    assert.match((await post('/api/audit', { chatId: chat.chatId, hours: 1 })).message, /against Telegram/);
+    assert.match((await post('/api/pad/look', { chatId: chat.chatId })).message, /read here, never written/);
+    assert.match((await post('/api/pad/send', { chatId: chat.chatId, text: 'hi' })).message, /read here, never written/);
+    assert.match((await post('/api/watch', { target: 'https://discord.com/channels/1/2' })).message, /Discord bot is in its server/);
+  } finally {
+    await server.stop();
+  }
+});
